@@ -3,6 +3,7 @@ name = "ferrum-engine"
 version = "0.1.0"
 edition = "2021"
 description = "High-performance LLM inference engine - alternative to Ollama and vLLM"
+license = "MIT OR Apache-2.0"
 
 [features]
 default = []
