@@ -158,6 +158,20 @@ impl Scheduler {
         }
     }
 
+    /// Set the last sampled token for a request (used as input for next decode).
+    pub fn set_last_token(&self, req_id: u64, token: i32) {
+        let mut running = match self.running_batch.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        for req in running.iter_mut() {
+            if req.id == req_id {
+                req.last_token = Some(token);
+                break;
+            }
+        }
+    }
+
     /// Mark request as Finished and optionally extend kv_block_ids if we're doing incremental allocation.
     pub fn mark_finished(&self, req_id: u64, stop_reason: batch::StopReason) {
         let mut running = match self.running_batch.lock() {

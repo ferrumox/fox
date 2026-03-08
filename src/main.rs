@@ -43,12 +43,7 @@ async fn main() -> Result<()> {
     let scheduler = std::sync::Arc::new(scheduler);
 
     let model = std::sync::Arc::new(model);
-    let engine = InferenceEngine::new(
-        model.clone(),
-        scheduler.clone(),
-        kv_cache.clone(),
-        2, // EOS token ID - default for many LLaMA models
-    );
+    let engine = InferenceEngine::new(model.clone(), scheduler.clone(), kv_cache.clone());
     let engine = std::sync::Arc::new(engine);
 
     let addr: std::net::SocketAddr = format!("{}:{}", config.host, config.port)

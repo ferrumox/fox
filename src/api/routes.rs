@@ -2,7 +2,7 @@
 
 use axum::{
     extract::State,
-    response::{IntoResponse, sse::{Event, Sse}},
+    response::{IntoResponse, sse::{Event, KeepAlive, Sse}},
     routing::{get, post},
     Json, Router,
 };
@@ -54,32 +54,35 @@ async fn chat_completions(
         .unwrap_or_default()
         .as_secs();
 
-    // Build prompt from messages (simple concatenation; chat template would go here)
-    let prompt = req
+    // Build prompt: apply chat template if available, else simple "role: content" concatenation
+    let mut messages: Vec<(String, String)> = req
         .messages
         .iter()
-        .map(|m| format!("{}: {}", m.role, m.content))
-        .collect::<Vec<_>>()
-        .join("\n");
+        .map(|m| (m.role.clone(), m.content.clone()))
+        .collect();
+    // Prepend system message if missing (helps Qwen, Llama, etc. generate properly)
+    if messages.first().map(|(r, _)| r.as_str()) != Some("system") {
+        messages.insert(0, ("system".to_string(), "You are a helpful assistant.".to_string()));
+    }
+    let prompt = engine
+        .apply_chat_template(&messages)
+        .unwrap_or_else(|_| {
+            messages
+                .iter()
+                .map(|(r, c)| format!("{}: {}", r, c))
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
 
-    // Tokenize - for MVP we use a simple split; real impl uses model tokenizer
-    let prompt_tokens: Vec<i32> = {
-        let words: Vec<i32> = prompt
-            .split_whitespace()
-            .enumerate()
-            .map(|(i, _)| i as i32)
-            .collect();
-        if words.is_empty() {
-            let fallback: Vec<i32> = prompt.bytes().map(|b| b as i32).take(100).collect();
-            if fallback.is_empty() {
-                vec![0]
-            } else {
-                fallback
-            }
+    // Tokenize using model's vocabulary
+    let prompt_tokens: Vec<i32> = engine.tokenize(&prompt).unwrap_or_else(|_| {
+        // Fallback if tokenize fails
+        if prompt.is_empty() {
+            vec![0]
         } else {
-            words
+            prompt.bytes().map(|b| b as i32).take(4096).collect()
         }
-    };
+    });
 
     let max_tokens = req.max_tokens.unwrap_or(256) as usize;
     let prompt_tokens_len = prompt_tokens.len();
@@ -107,25 +110,29 @@ async fn chat_completions(
                         finish_reason: if token.is_eos { Some("stop".to_string()) } else { None },
                     }],
                 };
-                yield Ok::<_, std::convert::Infallible>(Event::default().json_data(chunk).unwrap());
+                let event = Event::default().json_data(chunk).unwrap();
+                tokio::task::yield_now().await;
+                yield Ok::<_, std::convert::Infallible>(event);
                 if token.is_eos {
                     break;
                 }
             }
         };
 
-        Sse::new(stream).into_response()
+        Sse::new(stream)
+            .keep_alive(KeepAlive::default())
+            .into_response()
     } else {
         // Collect full response
         let mut full_content = String::new();
+        let mut completion_tokens = 0u32;
         while let Some(token) = rx.recv().await {
             full_content.push_str(&token.text);
+            completion_tokens += 1;
             if token.is_eos {
                 break;
             }
         }
-
-        let completion_tokens = full_content.split_whitespace().count();
         let response = ChatCompletionResponse {
             id: id.clone(),
             object: "chat.completion".to_string(),
@@ -141,8 +148,8 @@ async fn chat_completions(
             }],
             usage: Some(Usage {
                 prompt_tokens: prompt_tokens_len as u32,
-                completion_tokens: completion_tokens as u32,
-                total_tokens: 0,
+                completion_tokens,
+                total_tokens: prompt_tokens_len as u32 + completion_tokens,
             }),
         };
 

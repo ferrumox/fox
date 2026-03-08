@@ -6,6 +6,7 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(ferrum_stub)");
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let llama_root = PathBuf::from(&manifest_dir).join("vendor").join("llama.cpp");
 

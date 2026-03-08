@@ -33,6 +33,7 @@ pub enum RequestState {
 pub struct InferenceRequest {
     pub id: u64,
     pub prompt_tokens: Vec<i32>,
+    pub last_token: Option<i32>,
     pub generated_tokens: usize,
     pub max_new_tokens: usize,
     pub state: RequestState,
@@ -51,6 +52,7 @@ impl InferenceRequest {
         Self {
             id,
             prompt_tokens,
+            last_token: None,
             generated_tokens: 0,
             max_new_tokens,
             state: RequestState::Waiting,
