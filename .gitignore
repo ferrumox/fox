@@ -1,0 +1,30 @@
+# Models (GGUF files are large)
+models/
+*.gguf
+
+# Rust / Cargo
+/target/
+**/*.rs.bk
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+*.log
