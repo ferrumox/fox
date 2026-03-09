@@ -71,6 +71,16 @@ pub struct RunArgs {
     #[arg(long, default_value = "16")]
     pub block_size: usize,
 
+    /// Fraction of GPU memory reserved for CPU↔GPU KV-cache swap space (0.0-1.0).
+    /// Set to 0 to disable (default). Currently a placeholder — see `ferrum serve --help`.
+    #[arg(long, default_value = "0.0")]
+    pub swap_fraction: f32,
+
+    /// Show the model's internal <think>…</think> reasoning block in the output.
+    /// By default reasoning is suppressed; only the final answer is printed.
+    #[arg(long)]
+    pub show_thinking: bool,
+
     /// Show engine logs (hidden by default for cleaner output)
     #[arg(long)]
     pub verbose: bool,
@@ -141,6 +151,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         repetition_penalty: args.repetition_penalty,
         seed: args.seed,
         stop: None,
+        show_thinking: args.show_thinking,
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

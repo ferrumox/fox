@@ -54,6 +54,17 @@ pub struct ServeArgs {
     )]
     pub system_prompt: String,
 
+    /// Fraction of GPU memory reserved for CPU↔GPU KV-cache swap space (0.0-1.0).
+    ///
+    /// When GPU memory is exhausted, preempted requests will have their KV blocks
+    /// swapped to CPU RAM instead of being discarded (re-prefill not required on
+    /// resume).  Set to 0 to disable swapping (default).
+    ///
+    /// Note: swap transfer is currently a placeholder pending llama.cpp tensor-access
+    /// API availability.  The flag is accepted to avoid breaking future config files.
+    #[arg(long, default_value = "0.0", env = "FERRUM_SWAP_FRACTION")]
+    pub swap_fraction: f32,
+
     /// Use JSON log format (for production)
     #[arg(long, env = "FERRUM_JSON_LOGS")]
     pub json_logs: bool,

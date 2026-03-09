@@ -48,10 +48,20 @@ LLM inference engine in Rust, open source, with higher throughput than vLLM and 
 - Internal: prefix cache uses `lru::LruCache` instead of `HashMap` (correct LRU ordering for future eviction)
 - 13 unit tests for sampler pipeline (`sample_greedy`, `apply_repetition_penalty`, `sample_token`)
 
-### v0.5.0 (next) — Block-level prefix caching and CPU↔GPU swap
-- Block-level prefix caching: share KV cache for prompts with a common prefix (system prompt + different users)
-- CPU↔GPU swap: persist KV cache of preempted requests in RAM instead of discarding it
-- True CoW: use ref_count + copy_on_write to share blocks between active requests
+### v0.5.0 (2026-03-09) — Block-level prefix caching, True CoW, and CPU↔GPU swap scaffold
+- Block-level chain-hash prefix caching: `compute_block_hash` + `prompt_block_hashes`; partial prefix hits (e.g. shared system prompt)
+- True CoW before decode: `is_shared` + `copy_on_write` guard in `run_decode`
+- `RequestState::Swapped` + `swap_out` / `swap_in` scaffold; `--swap-fraction` flag (placeholder pending llama.cpp API)
+
+### v0.5.1 (2026-03-09) — Output pipeline fixes and `--show-thinking`
+- Fix: EOG token detection uses `llama_vocab_is_eog` — covers all end-of-generation tokens, not just the primary EOS (critical for Qwen3.5 which has 5 EOG tokens)
+- Fix: `<|im_end|>` generated as 6 separate BPE tokens no longer leaks into user output — two-stage `pending_output` buffer detects multi-token control patterns and stops generation correctly
+- `--show-thinking` flag for `ferrum run`: stream the `<think>…</think>` reasoning block to stdout for debugging or transparency
+
+### v0.6.0 (next)
+- Full CPU↔GPU swap: implement byte-level KV transfer once llama.cpp exposes tensor-access API
+- Flash Attention 2 via FFI (Tri Dao C++ kernels)
+- CUDA Graphs for repetitive decode steps
 
 ---
 
@@ -121,10 +131,11 @@ Month 4-5: CLI, robustness and internals (v0.4.0) ✅
   [x] ahash + LruCache for prefix cache
   [x] 13 sampler unit tests
 
-Month 5-6: Advanced memory optimisations (v0.5.0)
-  [ ] Block-level prefix caching (shared KV prefix, not exact-match) — the real vLLM approach
-  [ ] CPU↔GPU swap for preempted requests (persist KV in RAM instead of discarding)
-  [ ] True CoW: use ref_count + copy_on_write to share blocks between active requests
+Month 5-6: Advanced memory optimisations (v0.5.0) ✅
+  [x] Block-level chain-hash prefix caching (shared KV prefix at block granularity)
+  [x] True CoW: `is_shared` guard + `copy_on_write` before every decode step
+  [x] CPU↔GPU swap scaffold: `Swapped` state, `swap_out`/`swap_in`, `--swap-fraction` flag
+  [ ] Full CPU↔GPU swap transfer (pending llama.cpp tensor-access API)
 
 Month 4-5: Compute optimisations
   [ ] Flash Attention 2 via FFI (Tri Dao C++ kernels)
@@ -173,7 +184,7 @@ Month 9-12: Community
 
 ---
 
-## Current architecture (v0.4.0)
+## Current architecture (v0.5.0)
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -230,6 +241,7 @@ Month 9-12: Community
 ```
 ferrum serve       # start the HTTP server
 ferrum run         # single-shot terminal inference (available since v0.4.0)
+                   #   --show-thinking   stream the <think>…</think> block (since v0.5.1)
 ferrum pull        # download GGUF model from HuggingFace Hub (available since v0.4.0)
 ferrum-bench       # integrated benchmark (available since v0.2.0)
 ```

@@ -19,6 +19,9 @@ pub struct SamplingParams {
     /// Stop generation when the output ends with any of these strings.
     /// The stop string itself is NOT included in the output (OpenAI spec behavior).
     pub stop: Option<Vec<String>>,
+    /// When true, emit `<think>…</think>` reasoning tokens to the output stream
+    /// instead of silently discarding them.  Useful for debugging or transparency.
+    pub show_thinking: bool,
 }
 
 impl Default for SamplingParams {
@@ -30,6 +33,7 @@ impl Default for SamplingParams {
             repetition_penalty: 1.0,
             seed: None,
             stop: None,
+            show_thinking: false,
         }
     }
 }
@@ -55,12 +59,33 @@ pub enum StopReason {
     StopSequence,
 }
 
-/// Request state machine: Waiting -> Prefilling -> Decoding -> Finished
+/// Request state machine.
+///
+/// Normal flow: `Waiting → Prefilling → Decoding → Finished`
+/// On preemption: `Decoding → Waiting` (KV blocks freed, re-prefill required)
+/// With CPU↔GPU swap (future): `Decoding → Swapped → Decoding` (KV blocks
+/// persisted in CPU RAM; re-prefill not required on resume).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestState {
+    /// In the waiting queue, not yet scheduled.
     Waiting,
+    /// KV blocks allocated; prefill batch is being processed this step.
     Prefilling,
+    /// Prefill complete; generating tokens one step at a time.
     Decoding,
+    /// KV blocks have been swapped to CPU RAM.
+    ///
+    /// The request retains its `page_table` (now pointing to CPU-resident
+    /// blocks) and its `generated_token_ids`.  On swap-in, the KV data is
+    /// copied back to GPU and the state transitions to `Decoding`.
+    ///
+    /// Note: this state is currently a placeholder.  Actual CPU↔GPU KV
+    /// transfer requires byte-level tensor access that llama.cpp does not yet
+    /// expose through its public API.  The infrastructure (state, page_table
+    /// retention) is in place; the transfer implementation will be added once
+    /// the underlying API is available.
+    Swapped,
+    /// Generation complete (EOS, Length, StopSequence, or Preempt).
     Finished,
 }
 

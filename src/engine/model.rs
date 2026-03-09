@@ -106,6 +106,11 @@ pub trait Model: Send + Sync {
 
     fn eos_token_id(&self) -> i32;
 
+    /// Returns true if `token_id` is ANY end-of-generation token for this model
+    /// (e.g. `<|im_end|>`, `<|endoftext|>`, etc.).  More reliable than comparing
+    /// with `eos_token_id()` alone because models like Qwen3.5 have multiple EOG tokens.
+    fn is_eog_token(&self, token_id: i32) -> bool;
+
     fn tokenize(&self, text: &str) -> Result<Vec<i32>>;
 
     fn token_to_piece(&self, token: i32) -> Result<String>;
@@ -805,6 +810,10 @@ impl Model for LlamaCppModel {
         self.eos_token
     }
 
+    fn is_eog_token(&self, token_id: i32) -> bool {
+        unsafe { ffi::llama_vocab_is_eog(self.vocab, token_id) }
+    }
+
     fn tokenize(&self, text: &str) -> Result<Vec<i32>> {
         self.tokenize_impl(text)
     }
@@ -932,6 +941,10 @@ impl Model for LlamaCppModel {
 
     fn eos_token_id(&self) -> i32 {
         2
+    }
+
+    fn is_eog_token(&self, token_id: i32) -> bool {
+        token_id == 2
     }
 
     fn tokenize(&self, text: &str) -> Result<Vec<i32>> {

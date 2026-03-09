@@ -7,6 +7,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.1] - 2026-03-09
+
+### Added
+
+- **`--show-thinking` flag for `ferrum run`** (`src/cli/run.rs`, `src/scheduler/batch.rs`, `src/engine/mod.rs`)
+  - New `SamplingParams::show_thinking: bool` field (default `false`).
+  - When `--show-thinking` is passed, the model's `<think>…</think>` reasoning block is
+    forwarded to stdout instead of being silently discarded. The `<think>` and `</think>`
+    tags themselves are also emitted so the user sees the complete block.
+  - Thinking tokens are still excluded from API responses (`show_thinking = false` in
+    `src/api/routes.rs`).
+  - `PerRequestState` initialised with `show_thinking` taken from the request's
+    `SamplingParams` on first token arrival (`or_insert_with` instead of `or_default`).
+
+### Fixed
+
+- **EOG token detection for multi-token-EOS models** (`src/engine/model.rs`, `src/engine/mod.rs`)
+  - `is_eos` was computed as `token_id == self.model.eos_token_id()`, which only matched the
+    *primary* EOS token.  Models like Qwen3.5 declare five EOG tokens
+    (`<|endoftext|>`, `<|im_end|>`, `<|fim_pad|>`, `<|repo_name|>`, `<|file_sep|>`).
+  - New `Model::is_eog_token(token_id) -> bool` method added to the trait and both
+    implementations (`LlamaCppModel` delegates to `ffi::llama_vocab_is_eog(vocab, token)`;
+    stub returns `token_id == 2`).
+  - `handle_logits` now uses `self.model.is_eog_token(token_id)` so any EOG token
+    correctly stops generation and produces empty output text.
+
+- **Multi-token `<|im_end|>` leaking into user output** (`src/engine/mod.rs`)
+  - Qwen3.5 (and other ChatML models running without forced-greedy sampling) may generate
+    `<|im_end|>` as six individual BPE tokens: `<` (27), `|` (91), `im` (316), `_end` (6018),
+    `|` (91), `>` (29) instead of the single special token 248046.  The previous per-token
+    `raw.contains("<|")` check missed this because no individual fragment matched.
+  - **New two-stage output pipeline**:
+    1. `apply_output_filter` now returns `(String, bool)` — the emittable text plus a
+       `control_stop` flag.  Text is buffered in `state.pending_output` before being
+       released; `flush_pending_output` scans for complete control-token patterns
+       (`CONTROL_TOKEN_PATTERNS`) and calls `find_holdback_start` to hold back any suffix
+       that could still be the beginning of such a pattern.
+    2. `find_holdback_start(text)` — returns the index of the first `<` from which *some*
+       control-token pattern could start (i.e. the pattern `starts_with` the suffix).
+       Everything before that index is safe to emit immediately; the rest stays in
+       `pending_output` for the next token.
+  - `handle_logits` combines the two stop signals:
+    `is_stop_hit = control_stop || user_stop` (where `user_stop` comes from
+    `check_stop_sequences` as before).
+  - `SPECIAL_TOKEN_PATTERNS` renamed to `CONTROL_TOKEN_PATTERNS` to better reflect their
+    role (end-of-turn markers that must never reach the user and must stop generation).
+  - `check_stop_sequences` reverted to handle only *user-supplied* stop strings; control
+    patterns are fully owned by `apply_output_filter` / `flush_pending_output`.
+  - **New unit tests** covering the two-stage pipeline:
+    - `test_filter_control_single_token_stopped` — single-token `<|im_end|>` triggers stop.
+    - `test_filter_control_multi_token_im_end` — 5-token sequence triggers stop only at `>`.
+    - `test_filter_holdback_released_on_non_pattern` — `<x` releases `<` when `x`
+      confirms the sequence cannot be a control pattern.
+    - `test_filter_text_before_control_token_emitted` — normal text before `<|im_end|>`
+      is emitted correctly and the pattern itself stops generation.
+
+---
+
+## [0.5.0] - 2026-03-09
+
+### Added
+
+- **Block-level chain-hash prefix caching** (`src/kv_cache/mod.rs`, `src/scheduler/mod.rs`, `src/engine/mod.rs`)
+  - Added `compute_block_hash(parent_hash, tokens) -> u64` and
+    `prompt_block_hashes(tokens, block_size) -> Vec<u64>` to `kv_cache/mod.rs`.
+    Each block's hash chains the previous block's hash with the block's token IDs
+    (same design as vLLM).  Two prompts that share their first N complete blocks
+    therefore produce the same chain hash at each of the first N boundaries.
+  - `schedule_step` now computes block hashes on admission and searches the cache
+    from the longest matching block prefix down to 1 block, enabling partial prefix
+    matches: a request whose prompt starts with the same system prompt as a previous
+    request reuses those cached blocks even if the rest of the prompt differs.
+  - `try_insert_prefix` no longer accepts an external `token_hash` parameter; it
+    computes the chain hash internally.  Only the *complete* block prefix of the
+    prompt is stored — partial trailing blocks and all generation blocks are freed
+    immediately, reducing memory pressure.
+  - `PrefixCacheEntry.token_count` removed (derivable as `block_ids.len() × block_size`).
+  - New test: `test_prefix_cache_block_level_partial_match` — verifies that request B
+    (prompt = shared 16-token prefix + 4 different tokens) gets a prefix hit against
+    request A (prompt = the same 16 tokens) and has `skip_prefix_tokens = 16`.
+
+- **True copy-on-write before decode** (`src/kv_cache/mod.rs`, `src/scheduler/mod.rs`, `src/engine/mod.rs`)
+  - `KVCacheManager::is_shared(block_id) -> bool` — returns `true` when `ref_count > 1`.
+  - `Scheduler::cow_update_page_table(req_id, logical_idx, new_block_id)` — replaces a
+    single page-table entry for a running request (called by the engine's CoW path).
+  - `InferenceEngine::run_decode` now inspects every block in each request's page table
+    before issuing `decode_sync`.  Any block with `ref_count > 1` is privatised via
+    `KVCacheManager::copy_on_write`; the new exclusive block ID is written back via
+    `cow_update_page_table`.  This guarantees a decoding request never writes into a
+    block shared with the prefix cache or another future request.
+
+- **`RequestState::Swapped` + CPU↔GPU swap scaffold** (`src/scheduler/batch.rs`, `src/scheduler/mod.rs`, `src/cli/serve.rs`, `src/cli/run.rs`)
+  - New `RequestState::Swapped` variant with full documentation on the intended
+    semantics and current API limitation (byte-level KV tensor transfer requires
+    low-level buffer access not yet exposed by llama.cpp's public API).
+  - `Scheduler::swap_out(req_id) -> bool` — transitions a `Decoding` request to
+    `Swapped`; caller is responsible for the GPU→CPU KV copy before calling.
+  - `Scheduler::swap_in(req_id) -> bool` — transitions a `Swapped` request back to
+    `Decoding`; caller is responsible for the CPU→GPU KV copy before calling.
+  - `--swap-fraction` flag added to both `ferrum serve` and `ferrum run` (env:
+    `FERRUM_SWAP_FRACTION`, default `0.0`).  Accepted but no-op until the llama.cpp
+    transfer API is available; enables future configuration files to specify the flag
+    without breaking.
+
+### Changed
+
+- `engine/mod.rs` local `hash_tokens` function removed (was using `DefaultHasher`);
+  replaced by `kv_cache::compute_block_hash` / `prompt_block_hashes`.
+- `DefaultHasher` and `std::hash::{Hash, Hasher}` imports removed from `engine/mod.rs`.
+
+---
+
 ## [0.4.0] - 2026-03-09
 
 ### Added

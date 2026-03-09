@@ -142,6 +142,7 @@ async fn chat_completions(
         repetition_penalty: req.repetition_penalty.unwrap_or(1.0).max(1.0),
         seed: req.seed,
         stop: req.stop.clone(),
+        show_thinking: false, // API responses never include raw thinking tokens
     };
     let prompt_tokens_len = prompt_tokens.len();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();

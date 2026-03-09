@@ -3,9 +3,7 @@
 mod ffi;
 pub mod model;
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -21,11 +19,14 @@ use self::model::{InferenceRequestForModel, Logits, Model};
 /// SentencePiece uses U+2581 (▁) for word boundaries. Replace with space so words don't concatenate.
 const SPM_SPACE: char = '\u{2581}';
 
-/// Known special tokens that should not appear in user-facing output.
-const SPECIAL_TOKEN_PATTERNS: &[&str] = &[
-    "<|endoftext|>",
+/// Special token patterns that mark end-of-turn or other control sequences.
+/// These are detected in `check_stop_sequences` using a rolling buffer so that
+/// patterns spanning multiple tokens (e.g. `<`, `|`, `im_end`, `|`, `>`) are
+/// also caught.  Never emitted to the user.
+const CONTROL_TOKEN_PATTERNS: &[&str] = &[
     "<|im_end|>",
     "<|im_start|>",
+    "<|endoftext|>",
     "<|endofthought|>",
 ];
 
@@ -34,62 +35,151 @@ const SPECIAL_TOKEN_PATTERNS: &[&str] = &[
 // ---------------------------------------------------------------------------
 
 /// Per-request mutable state for output processing.
-/// Combines `<think>` block tracking with the rolling text buffer used for
-/// multi-token stop sequence detection.
-#[derive(Default)]
 struct PerRequestState {
     /// True while we are inside a `<think>…</think>` block.
     in_thinking: bool,
+    /// When true the `<think>…</think>` block is forwarded to the caller instead
+    /// of being silently discarded.  Set from `SamplingParams::show_thinking`.
+    show_thinking: bool,
+    /// Text that has passed the thinking filter but is being held back until
+    /// we know it is not the start of a control-token pattern (e.g. `<|im_end|>`
+    /// arriving across several BPE tokens: `<`, `|`, `im_end`, `|`, `>`).
+    pending_output: String,
     /// Rolling suffix of recently emitted text (length ≤ 2 × max_stop_len).
-    /// Used to detect stop strings that span multiple tokens.
+    /// Used to detect *user-supplied* stop strings that span multiple tokens.
     text_buffer: String,
+}
+
+impl Default for PerRequestState {
+    fn default() -> Self {
+        Self {
+            in_thinking: false,
+            show_thinking: false,
+            pending_output: String::new(),
+            text_buffer: String::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Pure helpers (no self, no lock)
 // ---------------------------------------------------------------------------
 
-/// Apply output filtering rules using the per-request mutable state.
-/// Returns the (possibly empty) visible text for this token.
-fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> String {
+/// Apply output filtering rules.
+///
+/// Returns `(text_to_pass_downstream, control_stop)`.
+/// * `text_to_pass_downstream` — safe visible text (empty while thinking or holding back
+///   a partial control-token prefix).
+/// * `control_stop` — `true` when a complete control-token pattern (`<|im_end|>` etc.)
+///   was detected, meaning generation should stop.
+///
+/// **Why two stages?**
+/// Models like Qwen3.5 often generate `<|im_end|>` as 5–6 separate BPE tokens
+/// (`<`, `|`, `im`, `_end`, `|`, `>`).  A single-token `contains("<|")` check
+/// misses this.  We therefore buffer the output in `state.pending_output` and
+/// only flush text that cannot be the start of a control pattern.
+fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (String, bool) {
     if raw.is_empty() {
-        return String::new();
+        return (String::new(), false);
     }
 
-    // 1. Suppress known special tokens
-    for &pattern in SPECIAL_TOKEN_PATTERNS {
-        if raw == pattern || raw.contains(pattern) {
-            return String::new();
-        }
-    }
-    if raw.contains("<|") {
-        return String::new();
-    }
-
-    // 2. Enter <think> block
+    // 1. Enter <think> block (usually a single special token like 248068 for Qwen3.5).
     if raw.contains("<think>") {
         state.in_thinking = true;
-        return String::new();
+        if state.show_thinking {
+            // Emit the <think> tag so the user can see when reasoning starts.
+            return (raw.to_string(), false);
+        }
+        return (String::new(), false);
     }
 
-    // 3. Exit <think> block
+    // 2. Exit <think> block; text *after* the closing tag goes to the pending buffer.
     if raw.contains("</think>") {
         state.in_thinking = false;
+        if state.show_thinking {
+            // Emit the closing tag, then flush whatever was pending.
+            let after_tag = raw
+                .find("</think>")
+                .map(|i| i + "</think>".len())
+                .unwrap_or(raw.len());
+            let mut out = raw[..after_tag].to_string();
+            // Any text after </think> in the same token also needs to be flushed.
+            if after_tag < raw.len() {
+                state.pending_output.push_str(&raw[after_tag..]);
+                let (rest, stop) = flush_pending_output(&mut state.pending_output);
+                out.push_str(&rest);
+                if stop {
+                    return (out, true);
+                }
+            }
+            return (out, false);
+        }
+        // Normal mode: discard the tag, keep text after it.
         if let Some(idx) = raw.find("</think>") {
             let after = idx + "</think>".len();
             if after < raw.len() {
-                return raw[after..].to_string();
+                state.pending_output.push_str(&raw[after..]);
             }
         }
-        return String::new();
+        return flush_pending_output(&mut state.pending_output);
     }
 
-    // 4. Suppress tokens inside a thinking block
+    // 3. Inside a thinking block.
     if state.in_thinking {
-        return String::new();
+        if state.show_thinking {
+            // Emit thinking tokens directly (no holdback needed — control patterns
+            // like <|im_end|> should not appear inside a thinking block).
+            return (raw.to_string(), false);
+        }
+        return (String::new(), false);
     }
 
-    raw.to_string()
+    // 4. Normal text: push through the pending buffer; hold back any partial
+    //    control-token prefix (e.g. `<` that could be the start of `<|im_end|>`).
+    state.pending_output.push_str(raw);
+    flush_pending_output(&mut state.pending_output)
+}
+
+/// Flush as much of `pending` as is safe.
+///
+/// 1. If `pending` contains a complete control-token pattern, emit everything
+///    *before* the pattern and signal stop (the pattern itself is discarded).
+/// 2. Otherwise, hold back the longest suffix that is a strict prefix of any
+///    control pattern (could be the start of `<|im_end|>` etc.).
+fn flush_pending_output(pending: &mut String) -> (String, bool) {
+    // Check for complete control-token patterns.
+    for &pat in CONTROL_TOKEN_PATTERNS {
+        if let Some(idx) = pending.find(pat) {
+            let emit = pending[..idx].to_string();
+            pending.clear();
+            return (emit, true); // stop generation
+        }
+    }
+
+    // Find the earliest `<` that could be the start of a control pattern.
+    let holdback_start = find_holdback_start(pending);
+    let emit = pending[..holdback_start].to_string();
+    *pending = pending[holdback_start..].to_string();
+    (emit, false)
+}
+
+/// Returns the byte offset of the first `<` in `text` from which a control-token
+/// pattern *could* still begin (i.e. some pattern starts with the suffix
+/// `text[offset..]`).  Returns `text.len()` when nothing needs to be held back.
+fn find_holdback_start(text: &str) -> usize {
+    for (i, c) in text.char_indices() {
+        if c != '<' {
+            continue;
+        }
+        let suffix = &text[i..];
+        if CONTROL_TOKEN_PATTERNS
+            .iter()
+            .any(|p| p.starts_with(suffix))
+        {
+            return i;
+        }
+    }
+    text.len()
 }
 
 /// Check whether the rolling text buffer (extended with `new_text`) ends with
@@ -98,6 +188,10 @@ fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> String {
 /// Returns `(text_to_emit, was_stopped)`. When stopped, `text_to_emit` is
 /// the prefix of `new_text` that appears *before* the stop string; the stop
 /// string itself is NOT emitted (OpenAI spec behaviour).
+///
+/// Note: built-in control-token patterns (`<|im_end|>` etc.) are already handled
+/// upstream in `apply_output_filter` / `flush_pending_output`.  This function
+/// only deals with user-supplied stop strings.
 fn check_stop_sequences(
     state: &mut PerRequestState,
     new_text: String,
@@ -377,6 +471,35 @@ impl InferenceEngine {
     }
 
     async fn run_decode(&self, req_ids: &[u64]) -> Result<Vec<(u64, Logits)>> {
+        // Copy-on-write: if any block in a decoding request is shared (ref_count > 1),
+        // allocate a new exclusive copy before llama.cpp writes to it.
+        //
+        // With the current prefix-caching scheme (blocks are transferred exclusively on
+        // cache hit), shared blocks arise only if `retain_block` was called explicitly.
+        // This guard makes the decode path safe for future scenarios where multiple active
+        // requests share KV blocks.
+        for req_id in req_ids {
+            let requests = self.scheduler.get_running(&[*req_id]);
+            let Some(req) = requests.first() else {
+                continue;
+            };
+            for (logical_idx, &block_id) in req.page_table.entries.iter().enumerate() {
+                if self.kv_cache.is_shared(block_id) {
+                    if let Some(new_block_id) = self.kv_cache.copy_on_write(block_id) {
+                        self.scheduler
+                            .cow_update_page_table(*req_id, logical_idx, new_block_id);
+                        tracing::debug!(
+                            request_id = req_id,
+                            logical_idx,
+                            old_block = block_id,
+                            new_block = new_block_id,
+                            "CoW: privatised shared KV block before decode"
+                        );
+                    }
+                }
+            }
+        }
+
         let requests = self.scheduler.get_running(req_ids);
         let model_requests: Vec<InferenceRequestForModel> = requests
             .iter()
@@ -417,7 +540,11 @@ impl InferenceEngine {
             };
 
             let token_id = logits.sampled_token;
-            let is_eos = token_id == eos_token_id;
+            // Use is_eog_token() to catch ALL end-of-generation tokens, not just the
+            // primary EOS.  Models like Qwen3.5 have multiple EOG tokens
+            // (e.g. <|endoftext|>, <|im_end|>, <|fim_pad|>, …).
+            let is_eos = self.model.is_eog_token(token_id);
+            let _ = eos_token_id; // kept for metrics / future use
             let reached_max = req.generated_tokens + 1 >= req.max_new_tokens;
 
             // Detokenize (EOS tokens produce empty text to avoid leaking control tokens).
@@ -429,8 +556,7 @@ impl InferenceEngine {
                 t
             };
 
-            // Apply output filtering AND stop sequence detection in a single lock scope
-            // to avoid re-acquiring the lock for both operations.
+            // Apply output filtering AND stop sequence detection in a single lock scope.
             let (text, is_stop_hit) = {
                 let mut state_map = match self.per_request_state.lock() {
                     Ok(g) => g,
@@ -446,10 +572,21 @@ impl InferenceEngine {
                         continue;
                     }
                 };
-                let state = state_map.entry(*req_id).or_default();
+                let state = state_map.entry(*req_id).or_insert_with(|| PerRequestState {
+                    show_thinking: req.sampling.show_thinking,
+                    ..Default::default()
+                });
 
-                let filtered = apply_output_filter(state, &raw_text);
-                check_stop_sequences(state, filtered, &req.sampling.stop)
+                // Stage 1: thinking-block suppression + control-token holdback.
+                // Returns (filtered_text, control_stop) where control_stop is true when a
+                // complete control-token pattern was detected (e.g. multi-token <|im_end|>).
+                let (filtered, control_stop) = apply_output_filter(state, &raw_text);
+
+                // Stage 2: user-supplied stop strings checked on the rolling buffer.
+                let (text, user_stop) =
+                    check_stop_sequences(state, filtered, &req.sampling.stop);
+
+                (text, control_stop || user_stop)
             };
 
             let is_done = is_eos || reached_max || is_stop_hit;
@@ -507,8 +644,7 @@ impl InferenceEngine {
                             | Some(StopReason::Length)
                             | Some(StopReason::StopSequence)
                     ) {
-                    let hash = hash_tokens(&req.prompt_tokens);
-                    !self.scheduler.try_insert_prefix(*req_id, hash)
+                    !self.scheduler.try_insert_prefix(*req_id)
                 } else {
                     true
                 };
@@ -552,12 +688,6 @@ impl InferenceEngine {
     }
 }
 
-fn hash_tokens(tokens: &[i32]) -> u64 {
-    let mut h = DefaultHasher::new();
-    tokens.hash(&mut h);
-    h.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,36 +696,74 @@ mod tests {
         Some(v.iter().map(|s| s.to_string()).collect())
     }
 
-    // --- apply_output_filter ---
-
-    #[test]
-    fn test_filter_special_tokens_suppressed() {
-        let mut s = PerRequestState::default();
-        assert_eq!(apply_output_filter(&mut s, "<|im_end|>"), "");
-        assert_eq!(apply_output_filter(&mut s, "<|endoftext|>"), "");
-        assert_eq!(apply_output_filter(&mut s, "hello <|im_start|>"), "");
+    // Helper: unwrap the text from apply_output_filter (ignores the control_stop bool)
+    fn aof(state: &mut PerRequestState, raw: &str) -> String {
+        apply_output_filter(state, raw).0
     }
+
+    // --- apply_output_filter ---
 
     #[test]
     fn test_filter_think_block() {
         let mut s = PerRequestState::default();
-        // Enter thinking block
-        assert_eq!(apply_output_filter(&mut s, "<think>"), "");
+        assert_eq!(aof(&mut s, "<think>"), "");
         assert!(s.in_thinking);
-        // Inside: all suppressed
-        assert_eq!(apply_output_filter(&mut s, "internal thought"), "");
-        // Exit: text after </think> is emitted
-        assert_eq!(apply_output_filter(&mut s, "</think> hello"), " hello");
+        assert_eq!(aof(&mut s, "internal thought"), "");
+        assert_eq!(aof(&mut s, "</think> hello"), " hello");
         assert!(!s.in_thinking);
-        // Normal text passes through
-        assert_eq!(apply_output_filter(&mut s, " world"), " world");
+        assert_eq!(aof(&mut s, " world"), " world");
     }
 
     #[test]
     fn test_filter_passthrough() {
         let mut s = PerRequestState::default();
-        assert_eq!(apply_output_filter(&mut s, "hello"), "hello");
-        assert_eq!(apply_output_filter(&mut s, " world"), " world");
+        assert_eq!(aof(&mut s, "hello"), "hello");
+        assert_eq!(aof(&mut s, " world"), " world");
+    }
+
+    #[test]
+    fn test_filter_control_single_token_stopped() {
+        // Single-token <|im_end|> (e.g. EOS token decoded to its text form) must stop.
+        let mut s = PerRequestState::default();
+        let (text, stop) = apply_output_filter(&mut s, "<|im_end|>");
+        assert_eq!(text, "");
+        assert!(stop, "<|im_end|> single token must trigger control stop");
+    }
+
+    #[test]
+    fn test_filter_control_multi_token_im_end() {
+        // Qwen3.5 emits <|im_end|> as 5 separate BPE tokens.
+        let mut s = PerRequestState::default();
+        for tok in &["<", "|", "im", "_end", "|"] {
+            let (text, stop) = apply_output_filter(&mut s, tok);
+            assert_eq!(text, "", "partial token '{tok}' must be held back");
+            assert!(!stop, "no stop on partial token '{tok}'");
+        }
+        let (text, stop) = apply_output_filter(&mut s, ">");
+        assert_eq!(text, "", "closing '>' must not leak");
+        assert!(stop, "closing '>' completes <|im_end|> → must stop");
+    }
+
+    #[test]
+    fn test_filter_holdback_released_on_non_pattern() {
+        // A lone `<` is held back until the next token confirms it is not a control pattern.
+        let mut s = PerRequestState::default();
+        let (t1, _) = apply_output_filter(&mut s, "<");
+        assert_eq!(t1, "", "< must be held back");
+        // `x` cannot extend any control pattern starting with `<` → release both.
+        let (t2, stop) = apply_output_filter(&mut s, "x");
+        assert_eq!(t2, "<x", "< and x must be released together");
+        assert!(!stop);
+    }
+
+    #[test]
+    fn test_filter_text_before_control_token_emitted() {
+        // Normal text followed by <|im_end|>: text emitted, pattern stops generation.
+        let mut s = PerRequestState::default();
+        assert_eq!(aof(&mut s, "Hello!"), "Hello!");
+        let (text, stop) = apply_output_filter(&mut s, "<|im_end|>");
+        assert_eq!(text, "");
+        assert!(stop);
     }
 
     // --- check_stop_sequences ---
@@ -611,7 +779,6 @@ mod tests {
     #[test]
     fn test_stop_exact_single_token() {
         let mut s = PerRequestState::default();
-        // Stop string matches exactly the current token
         let (text, hit) = check_stop_sequences(&mut s, "User:".to_string(), &stops(&["User:"]));
         assert_eq!(text, "", "stop string itself must not be emitted");
         assert!(hit);
@@ -620,7 +787,6 @@ mod tests {
     #[test]
     fn test_stop_partial_current_token_emitted() {
         let mut s = PerRequestState::default();
-        // "Hello\nUser:" — stop is "\nUser:", so "Hello" should be emitted
         let (text, hit) =
             check_stop_sequences(&mut s, "Hello\nUser:".to_string(), &stops(&["\nUser:"]));
         assert_eq!(text, "Hello");
@@ -630,14 +796,10 @@ mod tests {
     #[test]
     fn test_stop_multi_token_span() {
         let mut s = PerRequestState::default();
-        // First token builds up buffer without triggering stop
         let (t1, h1) = check_stop_sequences(&mut s, "Hello\n".to_string(), &stops(&["\nUser:"]));
         assert_eq!(t1, "Hello\n");
         assert!(!h1);
-        // Second token completes the stop string
         let (t2, h2) = check_stop_sequences(&mut s, "User:".to_string(), &stops(&["\nUser:"]));
-        // The portion "User:" was already in the stop string that started in the previous token
-        // so nothing from the current token should be emitted.
         assert_eq!(t2, "");
         assert!(h2);
     }
