@@ -48,6 +48,7 @@ fn finish_reason_str(reason: &StopReason) -> &'static str {
         StopReason::Eos => "stop",
         StopReason::Length => "length",
         StopReason::Preempt => "stop",
+        StopReason::StopSequence => "stop",
     }
 }
 
@@ -98,6 +99,7 @@ async fn chat_completions(
         top_k: req.top_k.unwrap_or(0),
         repetition_penalty: req.repetition_penalty.unwrap_or(1.0).max(1.0),
         seed: req.seed,
+        stop: req.stop.clone(),
     };
     let prompt_tokens_len = prompt_tokens.len();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
@@ -194,6 +196,7 @@ async fn completions(
         top_k: None,
         repetition_penalty: None,
         seed: None,
+        stop: None,
         stream: req.stream,
     };
 

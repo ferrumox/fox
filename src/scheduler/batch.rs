@@ -1,6 +1,7 @@
 // Batch types and InferenceRequest for the scheduler.
 
 use tokio::sync::mpsc;
+use crate::kv_cache::PageTable;
 
 /// All sampling hyper-parameters for a single inference request.
 #[derive(Debug, Clone)]
@@ -15,6 +16,9 @@ pub struct SamplingParams {
     pub repetition_penalty: f32,
     /// Optional RNG seed for reproducible sampling.
     pub seed: Option<u64>,
+    /// Stop generation when the output ends with any of these strings.
+    /// The stop string itself is NOT included in the output (OpenAI spec behavior).
+    pub stop: Option<Vec<String>>,
 }
 
 impl Default for SamplingParams {
@@ -25,6 +29,7 @@ impl Default for SamplingParams {
             top_k: 0,
             repetition_penalty: 1.0,
             seed: None,
+            stop: None,
         }
     }
 }
@@ -46,6 +51,8 @@ pub enum StopReason {
     Eos,
     Length,
     Preempt,
+    /// A user-supplied stop string was found in the output.
+    StopSequence,
 }
 
 /// Request state machine: Waiting -> Prefilling -> Decoding -> Finished
@@ -68,13 +75,23 @@ pub struct InferenceRequest {
     pub generated_token_ids: Vec<i32>,
     pub max_new_tokens: usize,
     pub state: RequestState,
-    pub kv_block_ids: Vec<usize>,
+    /// Logical-to-physical page table for this request's KV cache blocks.
+    pub page_table: PageTable,
     pub response_tx: mpsc::UnboundedSender<Token>,
     pub stop_reason: Option<StopReason>,
     pub sampling: SamplingParams,
     /// Stable sequence ID assigned from the Scheduler's pool when admitted.
     /// Used as the llama.cpp seq_id so KV cache slots are never confused across requests.
     pub kv_seq_id: i32,
+    /// Number of prompt tokens already present in the KV cache from a prefix cache hit.
+    /// The prefill step will skip these tokens (they don't need to be computed again).
+    pub skip_prefix_tokens: usize,
+    /// Sequence ID holding the cached prefix KV data in llama.cpp.
+    /// Set during admission when a prefix cache hit is found.
+    /// The engine copies KV from this seq_id before prefill, then clears and returns it to pool.
+    pub prefix_seq_id: Option<i32>,
+    /// Timestamp when the request was submitted (for latency metrics).
+    pub submitted_at: std::time::Instant,
 }
 
 impl InferenceRequest {
@@ -93,11 +110,14 @@ impl InferenceRequest {
             generated_token_ids: Vec::new(),
             max_new_tokens,
             state: RequestState::Waiting,
-            kv_block_ids: Vec::new(),
+            page_table: PageTable::default(),
             response_tx,
             stop_reason: None,
             sampling,
             kv_seq_id: -1,
+            skip_prefix_tokens: 0,
+            prefix_seq_id: None,
+            submitted_at: std::time::Instant::now(),
         }
     }
 

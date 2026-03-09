@@ -86,11 +86,11 @@ impl Scheduler {
             std::mem::take(&mut *running).into_iter().partition(|r| r.is_finished());
 
         for req in &finished {
-            if !req.kv_block_ids.is_empty() {
-                self.kv_cache.free_blocks(&req.kv_block_ids);
+            if !req.page_table.is_empty() {
+                self.kv_cache.free_blocks(req.page_table.block_ids());
                 debug!(
                     request_id = req.id,
-                    blocks = req.kv_block_ids.len(),
+                    blocks = req.page_table.len(),
                     "freed KV blocks for finished request"
                 );
             }
@@ -116,7 +116,7 @@ impl Scheduler {
                 match self.kv_cache.allocate(needed) {
                     Ok(ids) => {
                         let id = req.id;
-                        req.kv_block_ids = ids;
+                        req.page_table = crate::kv_cache::PageTable::new(ids);
                         req.kv_seq_id = pool.pop().expect("pool non-empty checked above");
                         req.state = batch::RequestState::Prefilling;
                         info!(request_id = id, seq_id = req.kv_seq_id, "request admitted to batch");
@@ -134,9 +134,9 @@ impl Scheduler {
                 if let Some(mut evicted) = running.pop() {
                     evicted.state = batch::RequestState::Waiting;
                     evicted.stop_reason = Some(batch::StopReason::Preempt);
-                    if !evicted.kv_block_ids.is_empty() {
-                        self.kv_cache.free_blocks(&evicted.kv_block_ids);
-                        evicted.kv_block_ids.clear();
+                    if !evicted.page_table.is_empty() {
+                        self.kv_cache.free_blocks(evicted.page_table.block_ids());
+                        evicted.page_table.clear();
                     }
                     if evicted.kv_seq_id >= 0 {
                         // Return to pool and signal engine to wipe the KV state for this seq_id.
@@ -186,7 +186,7 @@ impl Scheduler {
         }
     }
 
-    /// Mark request as Finished and optionally extend kv_block_ids if we're doing incremental allocation.
+    /// Mark request as Finished with the given stop reason.
     pub fn mark_finished(&self, req_id: u64, stop_reason: batch::StopReason) {
         let mut running = match self.running_batch.lock() {
             Ok(g) => g,

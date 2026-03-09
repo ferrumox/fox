@@ -1,6 +1,25 @@
 // OpenAI-compatible request/response types.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserialize the OpenAI `stop` field which can be either a string or an array of strings.
+fn deserialize_stop<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StopField {
+        Single(String),
+        Multiple(Vec<String>),
+    }
+
+    let opt = Option::<StopField>::deserialize(deserializer)?;
+    Ok(opt.map(|v| match v {
+        StopField::Single(s) => vec![s],
+        StopField::Multiple(v) => v,
+    }))
+}
 
 // --- Chat Completions ---
 
@@ -23,6 +42,10 @@ pub struct ChatCompletionRequest {
     /// Fixed RNG seed for reproducible outputs.
     #[serde(default)]
     pub seed: Option<u64>,
+    /// Stop generation when output ends with any of these strings (OpenAI-compatible).
+    /// Accepts a single string or an array of strings.
+    #[serde(default, deserialize_with = "deserialize_stop")]
+    pub stop: Option<Vec<String>>,
     #[serde(default)]
     pub stream: bool,
 }
