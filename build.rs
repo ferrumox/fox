@@ -1,0 +1,103 @@
+// ============ MÓDULO 8: build.rs ============
+//
+// Build llama.cpp and generate Rust FFI bindings.
+
+use std::env;
+use std::path::PathBuf;
+
+fn main() {
+    println!("cargo:rustc-check-cfg=cfg(ferrum_stub)");
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let llama_root = PathBuf::from(&manifest_dir).join("vendor").join("llama.cpp");
+
+    if env::var("FERRUM_SKIP_LLAMA").is_ok() || !llama_root.exists() {
+        if !llama_root.exists() {
+            println!("cargo:warning=llama.cpp not found. Set FERRUM_SKIP_LLAMA=1 to build with stubs only.");
+        }
+        // Generate minimal stub bindings (empty but valid module)
+        let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+        std::fs::write(
+            out.join("llama_bindings.rs"),
+            "// Stub - llama.cpp not built. Build with vendor/llama.cpp present for full functionality.\n#[allow(dead_code)] const _STUB: () = ();\n",
+        )
+        .unwrap();
+        println!("cargo:rustc-cfg=ferrum_stub");
+        return;
+    }
+
+    // Build llama.cpp with cmake
+    let mut cmake_config = cmake::Config::new(&llama_root);
+    cmake_config
+        .define("BUILD_SHARED_LIBS", "OFF")
+        .define("LLAMA_BUILD_TESTS", "OFF")
+        .define("LLAMA_BUILD_TOOLS", "OFF")
+        .define("LLAMA_BUILD_EXAMPLES", "OFF")
+        .define("LLAMA_BUILD_SERVER", "OFF")
+        .define("LLAMA_BUILD_COMMON", "OFF")
+        .profile("Release");
+
+    // Feature-based backend selection
+    if env::var("CARGO_FEATURE_CUDA").is_ok() {
+        if env::var("CUDA_PATH").is_ok() {
+            cmake_config.define("GGML_CUDA", "ON");
+        }
+    } else if env::var("CARGO_FEATURE_METAL").is_ok() {
+        cmake_config.define("GGML_METAL", "ON");
+    }
+    // else: cpu-only (default)
+
+    let dst = cmake_config.build();
+    let build_dir = dst.join("build");
+
+    // llama.cpp puts libllama.a in build/src, ggml libs in build/ggml/src
+    println!("cargo:rustc-link-search=native={}", build_dir.join("src").display());
+    println!("cargo:rustc-link-search=native={}", build_dir.join("ggml").join("src").display());
+
+    println!("cargo:rustc-link-lib=static=llama");
+    println!("cargo:rustc-link-lib=static=ggml");
+    println!("cargo:rustc-link-lib=static=ggml-cpu");
+    println!("cargo:rustc-link-lib=static=ggml-base");
+    println!("cargo:rustc-link-lib=dylib=stdc++");
+    println!("cargo:rustc-link-lib=dylib=pthread");
+    println!("cargo:rustc-link-lib=dylib=dl");
+    println!("cargo:rustc-link-lib=dylib=gomp"); // OpenMP
+
+    #[cfg(target_os = "linux")]
+    {
+        println!("cargo:rustc-link-lib=dylib=m");
+    }
+
+    // Generate bindings with bindgen
+    let llama_include = llama_root.join("include");
+    let ggml_include = llama_root.join("ggml").join("include");
+    let ggml_build_include = llama_root.join("build").join("ggml").join("include");
+
+    let mut include_paths = vec![
+        llama_include.clone(),
+        ggml_include.clone(),
+    ];
+    if ggml_build_include.exists() {
+        include_paths.push(ggml_build_include);
+    }
+
+    let clang_args: Vec<String> = include_paths
+        .iter()
+        .flat_map(|p| vec!["-I".to_string(), p.to_string_lossy().into_owned()])
+        .collect();
+
+    let bindings = bindgen::Builder::default()
+        .header(llama_include.join("llama.h").to_string_lossy())
+        .clang_args(clang_args)
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .allowlist_function("llama_.*")
+        .allowlist_type("llama_.*")
+        .allowlist_var("LLAMA_.*")
+        .size_t_is_usize(true)
+        .generate()
+        .expect("Unable to generate bindings");
+
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+    bindings
+        .write_to_file(out_path.join("llama_bindings.rs"))
+        .expect("Couldn't write bindings");
+}

@@ -1,0 +1,39 @@
+[package]
+name = "ferrum-engine"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance LLM inference engine - alternative to Ollama and vLLM"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+cuda = ["cudarc"]
+metal = []
+cpu-only = []
+
+[dependencies]
+tokio = { version = "1.41", features = ["rt-multi-thread", "sync", "time", "macros", "signal"] }
+axum = { version = "0.7", features = ["json", "macros"] }
+tower-http = { version = "0.5", features = ["cors"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+anyhow = "1.0"
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+uuid = { version = "1.11", features = ["v4"] }
+async-stream = "0.3"
+
+# Optional
+cudarc = { version = "0.12", optional = true }
+
+[build-dependencies]
+bindgen = "0.69"
+cmake = "0.1"
+cc = "1.0"
+
+[dev-dependencies]
+tokio-test = "0.4"
