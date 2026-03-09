@@ -10,7 +10,7 @@ High-performance LLM inference engine in Rust — an alternative to Ollama and v
 - **OpenAI-compatible API** (chat completions, completions, models, health)
 - **Continuous batching** with LIFO preemption
 - **PagedAttention** — logical→physical KV block mapping with ref-counted CoW infrastructure
-- **Prefix caching** — reuse KV cache across requests with identical prompts (skip re-prefill, lower TTFT)
+- **Prefix caching** — reuse KV cache for requests with an identical full prompt (exact-match; block-level prefix sharing planned for v0.4.0)
 - **Stop sequences** — `stop: string | string[]` halts generation at any user-defined string
 - **Prometheus metrics** — scrape `/metrics` for request rates, latency histogram, KV usage, prefix hit ratio
 - **Real stochastic sampling** — temperature, top_p, top_k, repetition_penalty, seed

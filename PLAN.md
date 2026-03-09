@@ -22,8 +22,18 @@ Motor de inferencia de LLMs en Rust, open source, con mayor throughput que vLLM 
 - `ferrum-bench`: benchmark integrado con TTFT P50/P95, throughput, latencia P50/P95/P99
 - `SamplingParams` struct unificado para agrupar hyper-params de sampling
 
-### v0.3.0 (en progreso) — Optimización de memoria y API completa
-Ver Fase 2 (ítems marcados con `[x]`).
+### v0.4.0 (próxima) — Prefix caching por bloque y swap CPU↔GPU
+- Prefix caching por bloque: compartir KV cache para prompts con prefijo común (system prompt + usuarios distintos)
+- Swap CPU↔GPU: persistir KV cache de requests preemptados en RAM en lugar de descartarlo
+- CoW real: ref_count + copy_on_write para bloques compartidos entre requests activos
+
+### v0.3.0 (2026-03-09) — Optimización de memoria y API completa
+- PageTable: mapping explícito lógico→físico por request; ref_count + CoW infrastructure por bloque
+- Prefix caching hash-based: reutilización del KV cache entre requests con prompt idéntico (skip re-prefill)
+- Stop sequences: `stop: string | string[]` con rolling-buffer detection cross-token-boundary
+- `GET /metrics` Prometheus: 8 métricas (request rate, latency histogram, KV usage, prefix hit ratio)
+- Streaming SSE: `usage` incluido en el chunk final (OpenAI spec)
+- Repo quality: GitHub Actions CI, cargo fmt, clippy -D warnings limpio, 45 tests unitarios
 
 ---
 
@@ -76,17 +86,21 @@ Semana 9-10: Pulido MVP
 **Meta: superar a vLLM en throughput en hardware equivalente**
 
 ```
-Mes 3-4: Optimizaciones de memoria (v0.3.0)
+Mes 3-4: Optimizaciones de memoria (v0.3.0) ✅
   [x] PageTable: mapping explícito lógico→físico por request
   [x] ref_count por bloque (infraestructura para CoW real)
-  [x] Prefix caching: reutilizar KV cache entre requests con prompt idéntico
+  [x] Prefix caching: reutilizar KV cache entre requests con prompt idéntico (exact-match)
   [x] copy_on_write: infraestructura para bloques compartidos
-  [ ] Swap CPU↔GPU para requests preemptados
 
-Mes 3-4: Extensiones de API (v0.3.0)
+Mes 3-4: Extensiones de API (v0.3.0) ✅
   [x] Stop sequences (parámetro stop: string[])
   [x] Endpoint GET /metrics (Prometheus scrape format)
-  [ ] Streaming: incluir usage en el último chunk
+  [x] Streaming: incluir usage en el último chunk
+
+Mes 4-5: Optimizaciones de memoria avanzadas (v0.4.0)
+  [ ] Prefix caching por bloque (shared KV prefix, no exact-match) — el vLLM real
+  [ ] Swap CPU↔GPU para requests preemptados (persistir KV en RAM en lugar de descartar)
+  [ ] CoW real: usar ref_count + copy_on_write para compartir bloques entre requests activos
 
 Mes 4-5: Optimizaciones de cómputo
   [ ] Flash Attention 2 via FFI (kernels C++ de Tri Dao)

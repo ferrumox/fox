@@ -67,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Dependency added: `prometheus = "0.14"`.
   - Gauges and counter deltas are refreshed on every engine scheduling step.
 
+- **Streaming `usage` in the final chunk** (`src/api/routes.rs`, `src/api/types.rs`)
+  - The last SSE chunk (the one that carries `finish_reason`) now includes a `usage` object
+    with `prompt_tokens`, `completion_tokens`, and `total_tokens`, matching the OpenAI
+    streaming spec. Intermediate chunks omit the field (`skip_serializing_if = "Option::is_none"`).
+
 ### Changed
 
 - `InferenceRequest` fields: `kv_block_ids: Vec<BlockId>` → `page_table: PageTable`;
@@ -77,13 +82,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sequence detection.
 - `PLAN.md` updated: Phase 1 marked completed with v0.1.0/v0.2.0 summaries; Phase 2
   progress tracked.
-
----
-
-All notable changes to ferrum-engine are documented in this file.
-
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
