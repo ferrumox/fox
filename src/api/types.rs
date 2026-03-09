@@ -99,6 +99,9 @@ pub struct ChatCompletionChunk {
     pub created: u64,
     pub model: String,
     pub choices: Vec<ChatCompletionChunkChoice>,
+    /// Token usage — only present in the final chunk (when finish_reason is set).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Serialize)]

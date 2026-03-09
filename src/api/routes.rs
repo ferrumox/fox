@@ -141,10 +141,21 @@ async fn chat_completions(
 
     if req.stream {
         let stream = async_stream::stream! {
+            let mut completion_tokens: u32 = 0;
             while let Some(token) = rx.recv().await {
                 let content = token.text.clone();
                 let is_done = token.stop_reason.is_some();
                 let finish_reason = token.stop_reason.as_ref().map(finish_reason_str).map(str::to_string);
+                completion_tokens += 1;
+                let usage = if is_done {
+                    Some(Usage {
+                        prompt_tokens: prompt_tokens_len as u32,
+                        completion_tokens,
+                        total_tokens: prompt_tokens_len as u32 + completion_tokens,
+                    })
+                } else {
+                    None
+                };
                 let chunk = ChatCompletionChunk {
                     id: id.clone(),
                     object: "chat.completion.chunk".to_string(),
@@ -158,6 +169,7 @@ async fn chat_completions(
                         },
                         finish_reason,
                     }],
+                    usage,
                 };
                 let event = Event::default()
                     .json_data(chunk)
