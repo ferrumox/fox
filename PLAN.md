@@ -37,7 +37,18 @@ LLM inference engine in Rust, open source, with higher throughput than vLLM and 
 - Fix: CUDA build — removed `cudarc` dep, corrected linker flags for `ggml-cuda` + driver API
 - Fix: prefix-cache boundary token submitted at wrong position (pos n instead of n-1)
 
-### v0.4.0 (next) — Block-level prefix caching and CPU↔GPU swap
+### v0.4.0 (2026-03-09) — CLI, robustness and internal improvements
+- `ferrum` binary: unified CLI with `serve`, `run` (single-shot terminal inference) and `pull` (HuggingFace Hub download) subcommands
+- `--system-prompt` flag for both `serve` and `run`; `--json-logs` on `serve`
+- CUDA build: dynamic `nvcc` detection in `build.rs`; works with non-standard CUDA installations
+- Fix: KV cache positional gap — `prefilled_tokens` field + corrected `context_len()` prevents `find_slot: non-consecutive token position` on hybrid/recurrent models
+- Fix: graceful recovery on KV cache exhaustion (`llama_decode` failure now marks requests `StopReason::Length` instead of crashing the engine)
+- Fix: stale `stop_reason` cleared when a preempted request is re-admitted to `Prefilling`
+- Internal: `ahash` replaces `DefaultHasher` for `hash_tokens` (faster, less collision-prone)
+- Internal: prefix cache uses `lru::LruCache` instead of `HashMap` (correct LRU ordering for future eviction)
+- 13 unit tests for sampler pipeline (`sample_greedy`, `apply_repetition_penalty`, `sample_token`)
+
+### v0.5.0 (next) — Block-level prefix caching and CPU↔GPU swap
 - Block-level prefix caching: share KV cache for prompts with a common prefix (system prompt + different users)
 - CPU↔GPU swap: persist KV cache of preempted requests in RAM instead of discarding it
 - True CoW: use ref_count + copy_on_write to share blocks between active requests
@@ -104,7 +115,13 @@ Month 3-4: API extensions (v0.3.0) ✅
   [x] GET /metrics endpoint (Prometheus scrape format)
   [x] Streaming: include usage in the final chunk
 
-Month 4-5: Advanced memory optimisations (v0.4.0)
+Month 4-5: CLI, robustness and internals (v0.4.0) ✅
+  [x] `ferrum` unified CLI: serve / run / pull subcommands
+  [x] KV cache positional fix and graceful exhaustion recovery
+  [x] ahash + LruCache for prefix cache
+  [x] 13 sampler unit tests
+
+Month 5-6: Advanced memory optimisations (v0.5.0)
   [ ] Block-level prefix caching (shared KV prefix, not exact-match) — the real vLLM approach
   [ ] CPU↔GPU swap for preempted requests (persist KV in RAM instead of discarding)
   [ ] True CoW: use ref_count + copy_on_write to share blocks between active requests
@@ -131,8 +148,8 @@ Month 5-6: Scaling
 
 ```
 Month 6-7: User experience
-  [ ] Ollama-style CLI (ferrum pull llama3, ferrum run llama3)
-  [ ] Automatic model download from HuggingFace Hub
+  [x] Ollama-style CLI (ferrum pull, ferrum run) — moved forward to v0.4.0
+  [x] Automatic model download from HuggingFace Hub — implemented in `ferrum pull`
   [ ] Basic web UI for testing models (optional)
 
 Month 7-8: Model ecosystem
@@ -156,7 +173,7 @@ Month 9-12: Community
 
 ---
 
-## Current architecture (v0.3.1)
+## Current architecture (v0.4.0)
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -211,8 +228,8 @@ Month 9-12: Community
 ## CLI commands
 
 ```
-ferrum serve       # start the server
+ferrum serve       # start the HTTP server
+ferrum run         # single-shot terminal inference (available since v0.4.0)
+ferrum pull        # download GGUF model from HuggingFace Hub (available since v0.4.0)
 ferrum-bench       # integrated benchmark (available since v0.2.0)
-ferrum pull        # download model (pending Phase 3)
-ferrum run         # quick CLI inference (pending Phase 3)
 ```

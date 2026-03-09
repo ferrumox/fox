@@ -7,6 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.0] - 2026-03-09
+
+### Added
+
+- **Unified `ferrum` CLI with subcommands** (`src/cli/`, `src/main.rs`, `Cargo.toml`)
+  - The project now ships a single `ferrum` binary (renamed from `ferrum-engine`) with three
+    subcommands dispatched via `clap`:
+  - `ferrum serve` — start the OpenAI-compatible HTTP server. Accepts all previous flags plus
+    `--system-prompt <text>` (injected as the first system message if not already present) and
+    `--json-logs`. Logic extracted from `main.rs` into `src/cli/serve.rs`.
+  - `ferrum run <prompt>` — single-shot terminal inference: loads the model, runs prefill +
+    decode, streams tokens to stdout, then exits. Useful for quick one-off queries without
+    running a server. Flags: `--model-path`, `--temperature`, `--top-p`, `--top-k`,
+    `--repetition-penalty`, `--seed`, `--max-new-tokens`, `--system-prompt`,
+    `--no-system-prompt`, `--ctx-len`, `--gpu-memory-fraction`, `--verbose`.
+    Implemented in `src/cli/run.rs`.
+  - `ferrum pull <model-id>` — download a GGUF model from HuggingFace Hub. Fetches the model
+    file list from the Hub API, presents an interactive selector when multiple GGUF files are
+    found (`dialoguer`), downloads with a live progress bar (`indicatif`), and saves to
+    `--output-dir` (default: `./models/`). Supports `--hf-token` for private repositories.
+    Implemented in `src/cli/pull.rs`.
+  - `src/config.rs` deleted; all configuration is now owned by the CLI arg structs.
+  - New dependencies: `indicatif = "0.17"`, `dialoguer = "0.11"`.
+
+- **Configurable system prompt for the HTTP server** (`src/api/routes.rs`)
+  - `AppState` struct introduced to hold `Arc<InferenceEngine>` + `Option<String>` system
+    prompt. `router()` now takes the prompt as a parameter and injects it into every
+    `chat/completions` request that doesn't already have a system message.
+
+- **13 sampler unit tests** (`src/engine/model.rs`)
+  - `sample_greedy`: argmax correctness, single-token input, tie-breaking behaviour.
+  - `apply_repetition_penalty`: positive/negative logit cases, no-op on empty history,
+    out-of-range token IDs.
+  - `sample_token`: greedy path at temperature ≤ 0, seeded reproducibility, top-K candidate
+    restriction (50-sample Monte Carlo), top-P nucleus restriction (dominant token always
+    sampled), repetition penalty overrides raw logit ranking.
+
+### Fixed
+
+- **KV cache positional gap on hybrid/recurrent models** (`src/scheduler/batch.rs`, `src/scheduler/mod.rs`, `src/engine/model.rs`, `src/engine/mod.rs`)
+  - When a prefix-cache hit was used, the decode step was starting at position
+    `prompt_tokens.len() + generated_tokens` instead of the number of tokens actually
+    submitted to llama.cpp. For models with a recurrent memory backend (Qwen3.5, Mamba)
+    this caused `find_slot: non-consecutive token position` warnings and incoherent output.
+  - Fix: added `prefilled_tokens: usize` to `InferenceRequest` (initialised to 0). After
+    prefill, `InferenceEngine::run_prefill` calls `Scheduler::set_prefilled_tokens` with the
+    actual count. `context_len()` returns `prefilled_tokens + generated_tokens` once set,
+    falling back to `prompt_tokens.len()` only before prefill completes.
+  - `Model::prefill_sync` / `LlamaCppModel::do_prefill` return type extended from
+    `Vec<(u64, Logits)>` to `Vec<(u64, Logits, usize)>` (third element is `tokens_submitted`).
+
+- **Graceful recovery on KV cache exhaustion** (`src/engine/mod.rs`)
+  - `llama_decode` returning a non-zero error code (e.g. `init_batch: failed to prepare
+    attention ubatches` / `decode: failed to find a memory slot`) previously propagated as a
+    hard `anyhow::Error` and crashed the engine loop.
+  - `run_prefill` and `run_decode` errors are now caught with `match`; affected requests are
+    marked `StopReason::Length` and the engine loop continues. Subsequent requests are
+    unaffected.
+
+- **Stale `stop_reason` on preempted-request re-admission** (`src/scheduler/mod.rs`)
+  - When a request was LIFO-preempted its `stop_reason` was set to `Some(Preempt)`. On
+    re-admission to `Prefilling` the field was never cleared, so the engine could see a
+    non-`None` stop reason on a still-active request.
+  - Fix: `schedule_step` now sets `req.stop_reason = None` in both the prefix-cache-hit and
+    normal admission paths before transitioning to `Prefilling`.
+
+- **CUDA build with non-standard CUDA installations** (`build.rs`)
+  - Removed the hard `CUDA_PATH` env-var requirement. `build.rs` now locates `nvcc` via
+    `which nvcc`, falling back to `$CUDACXX` and then `/usr/local/cuda/bin/nvcc`. The
+    resolved path is passed to CMake as `CMAKE_CUDA_COMPILER`; the parent directory is used
+    to derive the CUDA library search paths.
+
+### Changed
+
+- **`ahash` replaces `DefaultHasher` for token hashing** (`src/scheduler/mod.rs`)
+  - `hash_tokens` now uses `ahash::AHasher` (initialised from a process-stable
+    `OnceLock<ahash::RandomState>`). Faster with better avalanche properties; still
+    deterministic within a single run. Dependency added: `ahash = "0.8"`.
+
+- **Prefix cache backed by `lru::LruCache`** (`src/scheduler/mod.rs`)
+  - `HashMap<u64, PrefixCacheEntry>` replaced with `lru::LruCache<u64, PrefixCacheEntry>`.
+    The LRU ordering is preserved in preparation for future automatic eviction (currently the
+    manual capacity check is kept to avoid silent block leaks until the eviction path is
+    wired through properly). Dependency added: `lru = "0.12"`.
+
+- `src/config.rs` deleted; server configuration now lives in `src/cli/serve.rs::ServeArgs`.
+- `src/api/mod.rs` now re-exports `AppState` alongside `router`.
+
+---
+
 ## [0.3.1] - 2026-03-09
 
 ### Fixed

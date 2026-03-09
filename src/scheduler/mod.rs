@@ -8,9 +8,9 @@ pub use batch::{
     InferenceRequest, RequestState, SamplingParams, ScheduledBatch, StopReason, Token,
 };
 
-use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, VecDeque};
-use std::hash::{Hash, Hasher};
+use std::collections::VecDeque;
+use std::hash::{BuildHasher, Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -31,9 +31,15 @@ struct PrefixCacheEntry {
     token_count: usize,
 }
 
-/// Hash a slice of token IDs using the standard DefaultHasher.
+/// Process-stable random state for token hashing.
+/// Initialized once so `hash_tokens` is deterministic within a single run.
+static HASH_STATE: std::sync::OnceLock<ahash::RandomState> = std::sync::OnceLock::new();
+
+/// Hash a slice of token IDs using ahash (faster and more collision-resistant
+/// than DefaultHasher, stable within a single process run).
 pub fn hash_tokens(tokens: &[i32]) -> u64 {
-    let mut h = DefaultHasher::new();
+    let state = HASH_STATE.get_or_init(ahash::RandomState::new);
+    let mut h = state.build_hasher();
     tokens.hash(&mut h);
     h.finish()
 }
@@ -52,8 +58,9 @@ pub struct Scheduler {
     /// Pool of available llama.cpp sequence IDs (0..max_batch_size).
     seq_id_pool: std::sync::Mutex<Vec<i32>>,
     /// Prefix cache: completed-request KV data keyed by hash(prompt_tokens).
+    /// LruCache provides O(1) access and automatic LRU ordering for future eviction.
     /// Lock ordering: always acquire `running_batch` BEFORE `prefix_cache`.
-    prefix_cache: std::sync::Mutex<HashMap<u64, PrefixCacheEntry>>,
+    prefix_cache: std::sync::Mutex<lru::LruCache<u64, PrefixCacheEntry>>,
     /// Maximum number of entries held in the prefix cache simultaneously.
     prefix_cache_max: usize,
     /// Lifetime hit counter (for metrics / logging).
@@ -73,7 +80,9 @@ impl Scheduler {
             kv_cache,
             work_notify: tokio::sync::Notify::new(),
             seq_id_pool: std::sync::Mutex::new(pool),
-            prefix_cache: std::sync::Mutex::new(HashMap::new()),
+            prefix_cache: std::sync::Mutex::new(lru::LruCache::new(
+                NonZeroUsize::new(prefix_cache_max).expect("prefix_cache_max >= 1"),
+            )),
             prefix_cache_max,
             prefix_hits: AtomicU64::new(0),
             prefix_misses: AtomicU64::new(0),
@@ -161,7 +170,7 @@ impl Scheduler {
             let token_hash = hash_tokens(&req.prompt_tokens);
 
             // --- Prefix cache hit path ---
-            if let Some(hit) = pcache.remove(&token_hash) {
+            if let Some(hit) = pcache.pop(&token_hash) {
                 // Only need blocks for the generation portion (prompt is already cached).
                 let gen_blocks = {
                     let block_size = self.kv_cache.block_size();
@@ -174,7 +183,7 @@ impl Scheduler {
                             Ok(ids) => ids,
                             Err(_) => {
                                 // Allocation failed — put entry back and fall through to normal path
-                                pcache.insert(token_hash, hit);
+                                pcache.put(token_hash, hit);
                                 waiting.push_front(req);
                                 break 'admit;
                             }
@@ -190,6 +199,7 @@ impl Scheduler {
                     req.kv_seq_id = pool.pop().expect("pool non-empty checked above");
                     req.skip_prefix_tokens = hit.token_count;
                     req.prefix_seq_id = Some(hit.seq_id);
+                    req.stop_reason = None; // clear any stale Preempt stop_reason on re-admission
                     req.state = batch::RequestState::Prefilling;
                     self.prefix_hits.fetch_add(1, Ordering::Relaxed);
                     info!(
@@ -203,7 +213,7 @@ impl Scheduler {
                     continue 'admit;
                 } else {
                     // No room for gen blocks — restore cache entry and try preemption.
-                    pcache.insert(token_hash, hit);
+                    pcache.put(token_hash, hit);
                     waiting.push_front(req);
                     // Fall through to LIFO preemption below.
                 }
@@ -214,10 +224,11 @@ impl Scheduler {
                 if self.kv_cache.can_allocate(needed) {
                     match self.kv_cache.allocate(needed) {
                         Ok(ids) => {
-                            let id = req.id;
-                            req.page_table = PageTable::new(ids);
-                            req.kv_seq_id = pool.pop().expect("pool non-empty checked above");
-                            req.state = batch::RequestState::Prefilling;
+                    let id = req.id;
+                        req.page_table = PageTable::new(ids);
+                        req.kv_seq_id = pool.pop().expect("pool non-empty checked above");
+                        req.stop_reason = None; // clear any stale Preempt stop_reason on re-admission
+                        req.state = batch::RequestState::Prefilling;
                             info!(
                                 request_id = id,
                                 seq_id = req.kv_seq_id,
@@ -349,7 +360,7 @@ impl Scheduler {
                 let block_ids = std::mem::take(&mut req.page_table).entries;
                 // Zero out the request's ownership so schedule_step won't double-free.
                 req.kv_seq_id = -1;
-                pcache.insert(
+                pcache.put(
                     token_hash,
                     PrefixCacheEntry {
                         seq_id,
@@ -377,7 +388,7 @@ impl Scheduler {
             Ok(g) => g,
             Err(_) => return vec![],
         };
-        let id_set: std::collections::HashSet<_> = ids.iter().copied().collect();
+        let id_set: ahash::AHashSet<_> = ids.iter().copied().collect();
         running
             .iter()
             .filter(|r| id_set.contains(&r.id))

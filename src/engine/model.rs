@@ -961,3 +961,196 @@ impl Model for LlamaCppModel {
         false
     }
 }
+
+#[cfg(all(test, not(ferrum_stub)))]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // sample_greedy
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn greedy_picks_argmax() {
+        let logits = vec![0.1f32, 0.9, 0.3, 0.7];
+        assert_eq!(sample_greedy(&logits), 1);
+    }
+
+    #[test]
+    fn greedy_last_element_wins_on_tie() {
+        // Rust's Iterator::max_by returns the *last* equal maximum element.
+        let logits = vec![1.0f32, 1.0, 0.5];
+        assert_eq!(sample_greedy(&logits), 1);
+    }
+
+    #[test]
+    fn greedy_handles_single_token() {
+        assert_eq!(sample_greedy(&[42.0f32]), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_repetition_penalty
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rep_penalty_divides_positive_logits() {
+        let mut logits = vec![2.0f32, 1.0, -1.0];
+        apply_repetition_penalty(&mut logits, &[0], 2.0);
+        assert!((logits[0] - 1.0).abs() < 1e-6, "positive logit should be halved");
+        assert!((logits[1] - 1.0).abs() < 1e-6, "untouched");
+        assert!((logits[2] - (-1.0)).abs() < 1e-6, "untouched negative not in token_ids");
+    }
+
+    #[test]
+    fn rep_penalty_multiplies_negative_logits() {
+        let mut logits = vec![-1.0f32, 0.5];
+        apply_repetition_penalty(&mut logits, &[0], 2.0);
+        assert!((logits[0] - (-2.0)).abs() < 1e-6, "negative logit multiplied by penalty");
+        assert!((logits[1] - 0.5).abs() < 1e-6, "untouched");
+    }
+
+    #[test]
+    fn rep_penalty_noop_when_no_generated_tokens() {
+        let original = vec![1.0f32, 2.0, 3.0];
+        let mut logits = original.clone();
+        apply_repetition_penalty(&mut logits, &[], 2.0);
+        assert_eq!(logits, original);
+    }
+
+    #[test]
+    fn rep_penalty_ignores_out_of_range_token_ids() {
+        let original = vec![1.0f32, 2.0];
+        let mut logits = original.clone();
+        apply_repetition_penalty(&mut logits, &[99, -1], 2.0);
+        assert_eq!(logits, original);
+    }
+
+    // -----------------------------------------------------------------------
+    // sample_token — greedy path (temperature ≤ 0)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sample_token_greedy_at_temperature_zero() {
+        let logits = vec![0.1f32, 5.0, 0.3];
+        let token = sample_token(
+            &logits,
+            SamplerParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                top_k: 0,
+                repetition_penalty: 1.0,
+                generated_ids: &[],
+                seed: None,
+                token_count: 0,
+            },
+        );
+        assert_eq!(token, 1);
+    }
+
+    #[test]
+    fn sample_token_negative_temperature_is_greedy() {
+        let logits = vec![0.1f32, 0.2, 9.9];
+        let token = sample_token(
+            &logits,
+            SamplerParams {
+                temperature: -1.0,
+                top_p: 1.0,
+                top_k: 0,
+                repetition_penalty: 1.0,
+                generated_ids: &[],
+                seed: None,
+                token_count: 0,
+            },
+        );
+        assert_eq!(token, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // sample_token — stochastic path with seeded RNG (reproducible)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sample_token_seeded_is_reproducible() {
+        let logits = vec![1.0f32, 2.0, 0.5, 1.5];
+        let params = || SamplerParams {
+            temperature: 1.0,
+            top_p: 1.0,
+            top_k: 0,
+            repetition_penalty: 1.0,
+            generated_ids: &[],
+            seed: Some(42),
+            token_count: 0,
+        };
+        assert_eq!(sample_token(&logits, params()), sample_token(&logits, params()));
+    }
+
+    #[test]
+    fn sample_token_top_k_restricts_candidates() {
+        // With logits heavily favouring token 3 but top_k=2, only tokens 1 and 3 are eligible
+        // (they have the two highest logits). Token 0 and 2 must never be sampled.
+        let logits = vec![0.0f32, 5.0, 0.0, 10.0];
+        let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        for seed in 0u64..50 {
+            let t = sample_token(
+                &logits,
+                SamplerParams {
+                    temperature: 1.0,
+                    top_p: 1.0,
+                    top_k: 2,
+                    repetition_penalty: 1.0,
+                    generated_ids: &[],
+                    seed: Some(seed),
+                    token_count: 0,
+                },
+            );
+            seen.insert(t);
+        }
+        assert!(
+            !seen.contains(&0) && !seen.contains(&2),
+            "tokens outside top-K window should never be sampled; got {:?}",
+            seen
+        );
+    }
+
+    #[test]
+    fn sample_token_top_p_restricts_candidates() {
+        // Token 3 has logit 10 (very dominant). With top_p = 0.5, only tokens
+        // with cumulative mass ≥ 50 % survive; that should include token 3 at minimum.
+        let logits = vec![0.0f32, 0.0, 0.0, 10.0];
+        for seed in 0u64..20 {
+            let t = sample_token(
+                &logits,
+                SamplerParams {
+                    temperature: 1.0,
+                    top_p: 0.5,
+                    top_k: 0,
+                    repetition_penalty: 1.0,
+                    generated_ids: &[],
+                    seed: Some(seed),
+                    token_count: 0,
+                },
+            );
+            assert_eq!(t, 3, "dominant token must always be sampled under top_p=0.5");
+        }
+    }
+
+    #[test]
+    fn sample_token_repetition_penalty_reduces_repeated_token() {
+        // Token 0 has the highest raw logit but we penalise it heavily.
+        // After the penalty token 1 should win in greedy mode.
+        let logits = vec![5.0f32, 3.0];
+        let token = sample_token(
+            &logits,
+            SamplerParams {
+                temperature: 0.0, // greedy so result is deterministic
+                top_p: 1.0,
+                top_k: 0,
+                repetition_penalty: 10.0,
+                generated_ids: &[0], // token 0 was already generated
+                seed: None,
+                token_count: 1,
+            },
+        );
+        assert_eq!(token, 1, "penalised token 0 should lose to token 1");
+    }
+}
