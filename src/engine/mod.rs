@@ -319,7 +319,7 @@ impl InferenceEngine {
 
         let model = self.model.clone();
         let req_ids_vec = req_ids.to_vec();
-        let result =
+        let raw =
             tokio::task::spawn_blocking(move || model.prefill_sync(&req_ids_vec, &model_requests))
                 .await
                 .map_err(|e| anyhow::anyhow!("prefill spawn_blocking: {}", e))??;
@@ -328,6 +328,18 @@ impl InferenceEngine {
             self.model.clear_sequence(prefix_seq_id);
             self.scheduler.return_prefix_seq_id(prefix_seq_id);
         }
+
+        // Register how many tokens were actually placed in the KV for each request so
+        // decode positions are consecutive (no gaps for recurrent/hybrid models).
+        let result = raw
+            .into_iter()
+            .map(|(id, logits, tokens_in_kv)| {
+                if tokens_in_kv > 0 {
+                    self.scheduler.set_prefilled_tokens(id, tokens_in_kv);
+                }
+                (id, logits)
+            })
+            .collect();
 
         Ok(result)
     }

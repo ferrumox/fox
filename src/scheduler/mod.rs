@@ -274,6 +274,19 @@ impl Scheduler {
         }
     }
 
+    /// Record how many tokens were actually submitted to llama.cpp during prefill.
+    /// Must be called once per request immediately after `run_prefill` returns.
+    pub fn set_prefilled_tokens(&self, req_id: u64, count: usize) {
+        if let Ok(mut running) = self.running_batch.lock() {
+            for req in running.iter_mut() {
+                if req.id == req_id {
+                    req.prefilled_tokens = count;
+                    break;
+                }
+            }
+        }
+    }
+
     /// Update request state after a generated token.
     pub fn update_after_token(&self, req_id: u64, token_id: i32, from_prefill: bool) {
         let mut running = match self.running_batch.lock() {

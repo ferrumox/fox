@@ -19,14 +19,27 @@ use crate::scheduler::{InferenceRequest, SamplingParams, StopReason, Token};
 
 use super::types::*;
 
-pub fn router(engine: Arc<InferenceEngine>) -> Router {
+/// Shared state for all route handlers: the engine plus the configured system prompt.
+#[derive(Clone)]
+pub struct AppState {
+    pub engine: Arc<InferenceEngine>,
+    /// Injected as the first message when no system message is present.
+    /// `None` disables injection entirely.
+    pub system_prompt: Option<String>,
+}
+
+pub fn router(engine: Arc<InferenceEngine>, system_prompt: Option<String>) -> Router {
+    let state = AppState {
+        engine,
+        system_prompt,
+    };
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
         .route("/v1/models", get(models))
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
-        .with_state(engine)
+        .with_state(state)
 }
 
 /// Prometheus text-format scrape endpoint.
@@ -51,7 +64,8 @@ async fn metrics_handler() -> impl IntoResponse {
     )
 }
 
-async fn health(State(engine): State<Arc<InferenceEngine>>) -> Json<HealthResponse> {
+async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    let engine = &state.engine;
     Json(HealthResponse {
         status: "ok".to_string(),
         kv_cache_usage: engine.kv_cache_usage(),
@@ -60,11 +74,11 @@ async fn health(State(engine): State<Arc<InferenceEngine>>) -> Json<HealthRespon
     })
 }
 
-async fn models(State(engine): State<Arc<InferenceEngine>>) -> Json<ModelsResponse> {
+async fn models(State(state): State<AppState>) -> Json<ModelsResponse> {
     Json(ModelsResponse {
         object: "list".to_string(),
         data: vec![ModelInfo {
-            id: engine.model_name().to_string(),
+            id: state.engine.model_name().to_string(),
             object: "model".to_string(),
         }],
     })
@@ -80,9 +94,10 @@ fn finish_reason_str(reason: &StopReason) -> &'static str {
 }
 
 async fn chat_completions(
-    State(engine): State<Arc<InferenceEngine>>,
+    State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> axum::response::Response {
+    let engine = &state.engine;
     let id = Uuid::new_v4().to_string();
     let req_id = engine.next_request_id();
     let created = SystemTime::now()
@@ -90,22 +105,19 @@ async fn chat_completions(
         .unwrap_or_default()
         .as_secs();
 
-    // Build prompt: apply chat template if available, else simple "role: content" concatenation
     let mut messages: Vec<(String, String)> = req
         .messages
         .iter()
         .map(|m| (m.role.clone(), m.content.clone()))
         .collect();
-    // Prepend system message if missing (helps Qwen, Llama, etc. generate properly)
-    if messages.first().map(|(r, _)| r.as_str()) != Some("system") {
-        messages.insert(
-            0,
-            (
-                "system".to_string(),
-                "You are a helpful assistant.".to_string(),
-            ),
-        );
+
+    // Inject system prompt when configured and none is present in the request.
+    if let Some(ref sp) = state.system_prompt {
+        if messages.first().map(|(r, _)| r.as_str()) != Some("system") {
+            messages.insert(0, ("system".to_string(), sp.clone()));
+        }
     }
+
     let prompt = engine.apply_chat_template(&messages).unwrap_or_else(|_| {
         messages
             .iter()
@@ -114,7 +126,6 @@ async fn chat_completions(
             .join("\n")
     });
 
-    // Tokenize using model's vocabulary
     let prompt_tokens: Vec<i32> = engine.tokenize(&prompt).unwrap_or_else(|_| {
         if prompt.is_empty() {
             vec![0]
@@ -136,7 +147,6 @@ async fn chat_completions(
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
 
     let inference_req = InferenceRequest::new(req_id, prompt_tokens, max_tokens, sampling, tx);
-
     engine.submit_request(inference_req);
 
     if req.stream {
@@ -186,7 +196,6 @@ async fn chat_completions(
             .keep_alive(KeepAlive::default())
             .into_response()
     } else {
-        // Collect full response
         let mut full_content = String::new();
         let mut completion_tokens = 0u32;
         let mut final_finish_reason = "stop".to_string();
@@ -223,10 +232,9 @@ async fn chat_completions(
 }
 
 async fn completions(
-    State(engine): State<Arc<InferenceEngine>>,
+    State(state): State<AppState>,
     Json(req): Json<CompletionRequest>,
 ) -> axum::response::Response {
-    // Convert to chat format and delegate
     let chat_req = ChatCompletionRequest {
         model: req.model,
         messages: vec![ChatMessage {
@@ -243,5 +251,5 @@ async fn completions(
         stream: req.stream,
     };
 
-    chat_completions(State(engine), Json(chat_req)).await
+    chat_completions(State(state), Json(chat_req)).await
 }

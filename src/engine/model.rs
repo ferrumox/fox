@@ -86,11 +86,14 @@ pub struct InferenceRequestForModel {
 /// Backend model trait.
 pub trait Model: Send + Sync {
     /// Sync prefill (called by engine from spawn_blocking).
+    /// Returns `(req_id, logits, tokens_submitted)` — `tokens_submitted` is how many tokens
+    /// were actually placed in the KV cache for each request (may differ from
+    /// `prompt_tokens.len()` when effective_skip > 0).
     fn prefill_sync(
         &self,
         req_ids: &[u64],
         requests: &[InferenceRequestForModel],
-    ) -> Result<Vec<(u64, Logits)>>;
+    ) -> Result<Vec<(u64, Logits, usize)>>;
 
     /// Sync decode step (called by engine from spawn_blocking).
     fn decode_sync(
@@ -544,7 +547,7 @@ impl LlamaCppModel {
         &self,
         req_ids: &[u64],
         requests: &[InferenceRequestForModel],
-    ) -> Result<Vec<(u64, Logits)>> {
+    ) -> Result<Vec<(u64, Logits, usize)>> {
         if requests.is_empty() {
             return Ok(vec![]);
         }
@@ -647,6 +650,10 @@ impl LlamaCppModel {
 
         for (i, &req_id) in req_ids.iter().enumerate() {
             let req = requests.get(i);
+            // tokens_in_kv = tokens actually placed in the KV during this prefill call.
+            // Used by the engine to set prefilled_tokens on the request so decode positions
+            // are always consecutive (fixes the position gap for recurrent/hybrid models).
+            let tokens_in_kv = req.map(|r| r.prompt_tokens.len() - effective_skip(r)).unwrap_or(0);
             let batch_idx = batch_logits_indices.get(i).copied().unwrap_or(-1);
             let logits_ptr = if batch_idx >= 0 {
                 unsafe { ffi::llama_get_logits_ith(ctx, batch_idx) }
@@ -654,7 +661,7 @@ impl LlamaCppModel {
                 std::ptr::null_mut()
             };
             if logits_ptr.is_null() {
-                results.push((req_id, Logits::new(vec![], self.eos_token)));
+                results.push((req_id, Logits::new(vec![], self.eos_token), tokens_in_kv));
                 continue;
             }
             let logits_slice: &[f32] =
@@ -676,7 +683,7 @@ impl LlamaCppModel {
                 sample_greedy(logits_slice)
             };
             let values: Vec<f32> = logits_slice.to_vec();
-            results.push((req_id, Logits::new(values, sampled)));
+            results.push((req_id, Logits::new(values, sampled), tokens_in_kv));
         }
 
         unsafe { ffi::llama_batch_free(batch) };
@@ -700,7 +707,11 @@ impl LlamaCppModel {
                 .last_token
                 .or_else(|| req.prompt_tokens.last().copied())
                 .unwrap_or(self.eos_token);
-            let pos = req.context_len as i32;
+            // context_len = prompt_len + generated_tokens (already incremented after prefill),
+            // so the correct KV position for this token is context_len - 1.
+            // Example: 47-token prompt → prefill covers pos 0..46; first decode token goes
+            // at pos 47 (= context_len 48 - 1), not 48.
+            let pos = req.context_len as i32 - 1;
             let seq_id = req.kv_seq_id; // stable ID — never the batch slot index
 
             unsafe {
@@ -774,7 +785,7 @@ impl Model for LlamaCppModel {
         &self,
         req_ids: &[u64],
         requests: &[InferenceRequestForModel],
-    ) -> Result<Vec<(u64, Logits)>> {
+    ) -> Result<Vec<(u64, Logits, usize)>> {
         self.do_prefill(req_ids, requests)
     }
 
@@ -890,11 +901,15 @@ impl Model for LlamaCppModel {
     fn prefill_sync(
         &self,
         req_ids: &[u64],
-        _requests: &[InferenceRequestForModel],
-    ) -> Result<Vec<(u64, Logits)>> {
+        requests: &[InferenceRequestForModel],
+    ) -> Result<Vec<(u64, Logits, usize)>> {
         let results: Vec<_> = req_ids
             .iter()
-            .map(|&id| (id, Logits::new(vec![], 2)))
+            .enumerate()
+            .map(|(i, &id)| {
+                let tokens_in_kv = requests.get(i).map(|r| r.prompt_tokens.len()).unwrap_or(0);
+                (id, Logits::new(vec![], 2), tokens_in_kv)
+            })
             .collect();
         Ok(results)
     }

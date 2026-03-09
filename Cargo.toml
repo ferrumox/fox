@@ -1,6 +1,6 @@
 [package]
 name = "ferrum-engine"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 description = "High-performance LLM inference engine - alternative to Ollama and vLLM"
 license = "MIT OR Apache-2.0"
@@ -30,6 +30,8 @@ uuid = { version = "1.11", features = ["v4"] }
 async-stream = "0.3"
 
 prometheus = "0.14"
+indicatif = "0.17"
+dialoguer = "0.11"
 
 # Optional
 
@@ -37,6 +39,10 @@ prometheus = "0.14"
 bindgen = "0.69"
 cmake = "0.1"
 cc = "1.0"
+
+[[bin]]
+name = "ferrum"
+path = "src/main.rs"
 
 [[bin]]
 name = "ferrum-bench"

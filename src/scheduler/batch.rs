@@ -92,6 +92,11 @@ pub struct InferenceRequest {
     pub prefix_seq_id: Option<i32>,
     /// Timestamp when the request was submitted (for latency metrics).
     pub submitted_at: std::time::Instant,
+    /// Number of prompt tokens actually submitted to llama.cpp during prefill.
+    /// May be less than `prompt_tokens.len()` when `effective_skip > 0` (prefix cache hit with
+    /// boundary re-submission).  The decode position is based on this value, not
+    /// `prompt_tokens.len()`, to avoid position gaps in recurrent/hybrid models.
+    pub prefilled_tokens: usize,
 }
 
 impl InferenceRequest {
@@ -118,12 +123,21 @@ impl InferenceRequest {
             skip_prefix_tokens: 0,
             prefix_seq_id: None,
             submitted_at: std::time::Instant::now(),
+            prefilled_tokens: 0,
         }
     }
 
-    /// Total tokens so far (prompt + generated).
+    /// Total tokens currently in the KV cache (prefilled + generated).
+    /// Uses `prefilled_tokens` (set after prefill) so the decode position is always
+    /// consecutive with the last prefill position, even when `effective_skip` caused
+    /// fewer tokens to be submitted than `prompt_tokens.len()`.
     pub fn context_len(&self) -> usize {
-        self.prompt_tokens.len() + self.generated_tokens
+        if self.prefilled_tokens > 0 {
+            self.prefilled_tokens + self.generated_tokens
+        } else {
+            // Fallback before prefill completes (prefilled_tokens not yet set).
+            self.prompt_tokens.len() + self.generated_tokens
+        }
     }
 
     /// Whether this request has reached a terminal state.
