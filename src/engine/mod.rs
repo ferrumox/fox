@@ -4,6 +4,8 @@ mod ffi;
 pub mod model;
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -92,8 +94,6 @@ impl InferenceEngine {
             let batch = engine.scheduler.schedule_step();
 
             // Wipe KV state for preempted sequences BEFORE their IDs can be reassigned.
-            // This must happen synchronously here — schedule_step has already returned the IDs
-            // to the pool, so a subsequent schedule_step could hand them out to new requests.
             for seq_id in &batch.preempted_seq_ids {
                 engine.model.clear_sequence(*seq_id);
             }
@@ -136,14 +136,34 @@ impl InferenceEngine {
                 repetition_penalty: r.sampling.repetition_penalty,
                 seed: r.sampling.seed,
                 generated_token_ids: r.generated_token_ids.clone(),
+                skip_prefix_tokens: r.skip_prefix_tokens,
+                prefix_seq_id: r.prefix_seq_id,
             })
             .collect();
+
+        // Collect prefix seq_ids BEFORE moving model_requests into spawn_blocking.
+        // After the blocking task returns we'll clear and return them to the pool.
+        let prefix_cleanup: Vec<(i32,)> = model_requests
+            .iter()
+            .filter_map(|r| r.prefix_seq_id.map(|ps| (ps,)))
+            .collect();
+
         let model = self.model.clone();
-        let req_ids = req_ids.to_vec();
-        let model_requests = model_requests.clone();
-        tokio::task::spawn_blocking(move || model.prefill_sync(&req_ids, &model_requests))
-            .await
-            .map_err(|e| anyhow::anyhow!("prefill spawn_blocking: {}", e))?
+        let req_ids_vec = req_ids.to_vec();
+        let result = tokio::task::spawn_blocking(move || {
+            model.prefill_sync(&req_ids_vec, &model_requests)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("prefill spawn_blocking: {}", e))??;
+
+        // Return each prefix seq_id to the pool now that the KV copy is done.
+        // The copy itself happened inside do_prefill (before building the batch).
+        for (prefix_seq_id,) in prefix_cleanup {
+            self.model.clear_sequence(prefix_seq_id);
+            self.scheduler.return_prefix_seq_id(prefix_seq_id);
+        }
+
+        Ok(result)
     }
 
     async fn run_decode(&self, req_ids: &[u64]) -> Result<Vec<(u64, Logits)>> {
@@ -164,12 +184,13 @@ impl InferenceEngine {
                 repetition_penalty: r.sampling.repetition_penalty,
                 seed: r.sampling.seed,
                 generated_token_ids: r.generated_token_ids.clone(),
+                skip_prefix_tokens: 0,
+                prefix_seq_id: None,
             })
             .collect();
         let model = self.model.clone();
-        let req_ids = req_ids.to_vec();
-        let model_requests = model_requests.clone();
-        tokio::task::spawn_blocking(move || model.decode_sync(&req_ids, &model_requests))
+        let req_ids_vec = req_ids.to_vec();
+        tokio::task::spawn_blocking(move || model.decode_sync(&req_ids_vec, &model_requests))
             .await
             .map_err(|e| anyhow::anyhow!("decode spawn_blocking: {}", e))?
     }
@@ -196,7 +217,6 @@ impl InferenceEngine {
                 None
             };
 
-            // Detokenize for streaming; skip text for EOS (control tokens like <|im_end|>)
             let mut raw_text = if is_eos {
                 String::new()
             } else {
@@ -204,10 +224,8 @@ impl InferenceEngine {
                     .token_to_piece(token_id)
                     .unwrap_or_default()
             };
-            // SentencePiece: ▁ (U+2581) means word boundary → insert space
             raw_text = raw_text.replace(SPM_SPACE, " ");
 
-            // Filter special tokens, <think> blocks, and other control tokens
             let text = self.filter_output_text(*req_id, raw_text);
 
             let _ = req.response_tx.send(Token {
@@ -221,13 +239,23 @@ impl InferenceEngine {
             debug!(request_id = req_id, token_id, "token generated");
 
             if is_done {
-                // Clear KV state before returning the seq_id to the pool (which happens
-                // in the next schedule_step when it processes the Finished request).
-                if req.kv_seq_id >= 0 {
+                // Attempt to cache the KV state for this request before clearing it.
+                // try_insert_prefix atomically moves seq_id + blocks into the cache
+                // and zeroes them on the InferenceRequest so schedule_step won't free them.
+                let should_clear = if matches!(stop_reason, Some(StopReason::Eos) | Some(StopReason::Length)) {
+                    let hash = hash_tokens(&req.prompt_tokens);
+                    let cached = self.scheduler.try_insert_prefix(*req_id, hash);
+                    !cached // if not cached, still need to clear
+                } else {
+                    true
+                };
+
+                if should_clear && req.kv_seq_id >= 0 {
                     self.model.clear_sequence(req.kv_seq_id);
                 }
+
                 self.scheduler.mark_finished(*req_id, stop_reason.unwrap());
-                // Clean up filter state
+
                 if let Ok(mut state) = self.output_filter_state.lock() {
                     state.remove(req_id);
                 }
@@ -251,24 +279,20 @@ impl InferenceEngine {
         };
         let state = state_map.entry(req_id).or_default();
 
-        // 1. Check for special tokens - always suppress
         for &pattern in SPECIAL_TOKEN_PATTERNS {
             if raw == pattern || raw.contains(pattern) {
                 return String::new();
             }
         }
-        // Suppress tokens containing <|...|> or bare <| (partial special tokens)
         if raw.contains("<|") {
             return String::new();
         }
 
-        // 2. Check for <think> tag - enter thinking block
         if raw.contains("<think>") {
             state.in_thinking = true;
             return String::new();
         }
 
-        // 3. Check for </think> tag - exit thinking block
         if raw.contains("</think>") {
             state.in_thinking = false;
             if let Some(idx) = raw.find("</think>") {
@@ -280,7 +304,6 @@ impl InferenceEngine {
             return String::new();
         }
 
-        // 4. If inside thinking block, suppress
         if state.in_thinking {
             return String::new();
         }
@@ -299,4 +322,19 @@ impl InferenceEngine {
     pub fn active_requests(&self) -> usize {
         self.scheduler.active_requests()
     }
+
+    pub fn prefix_cache_hits(&self) -> u64 {
+        self.scheduler.prefix_hits.load(Ordering::Relaxed)
+    }
+
+    pub fn prefix_cache_misses(&self) -> u64 {
+        self.scheduler.prefix_misses.load(Ordering::Relaxed)
+    }
+}
+
+/// Stable hash for a slice of token IDs (delegates to scheduler's helper).
+fn hash_tokens(tokens: &[i32]) -> u64 {
+    let mut h = DefaultHasher::new();
+    tokens.hash(&mut h);
+    h.finish()
 }

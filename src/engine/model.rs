@@ -60,6 +60,14 @@ pub struct InferenceRequestForModel {
     pub seed: Option<u64>,
     /// Previously generated token IDs (for repetition penalty).
     pub generated_token_ids: Vec<i32>,
+    /// Number of prompt tokens already in the KV cache from a prefix hit.
+    /// `do_prefill` submits only `prompt_tokens[skip_prefix_tokens..]` starting at
+    /// position `skip_prefix_tokens`.
+    pub skip_prefix_tokens: usize,
+    /// Sequence ID that holds the cached prefix KV data. When set, `do_prefill` calls
+    /// `llama_memory_seq_cp` to transfer positions 0..skip_prefix_tokens before adding
+    /// the remaining tokens to the batch.
+    pub prefix_seq_id: Option<i32>,
 }
 
 /// Backend model trait.
@@ -94,6 +102,12 @@ pub trait Model: Send + Sync {
     /// Must be called before a seq_id is reused for a new request; otherwise the new request
     /// will inherit stale positions from the previous occupant and llama_decode will fail.
     fn clear_sequence(&self, seq_id: i32);
+
+    /// Copy `token_count` tokens worth of KV cache from `src_seq_id` to `dst_seq_id`
+    /// (positions 0..token_count). Used by prefix caching: before prefilling a request whose
+    /// prompt matches a completed one, we copy the KV data so only the non-cached suffix
+    /// needs to be computed.
+    fn copy_sequence_range(&self, src_seq_id: i32, dst_seq_id: i32, token_count: i32);
 }
 
 /// Sample the highest-probability token (deterministic).
@@ -495,7 +509,43 @@ impl LlamaCppModel {
             return Ok(vec![]);
         }
 
-        let total_tokens: usize = requests.iter().map(|r| r.prompt_tokens.len()).sum();
+        // Copy cached prefix KV data into each request's sequence BEFORE building the batch.
+        // This must happen while holding the context lock, so we do it here in the blocking task.
+        {
+            let ctx_guard = self._ctx.lock().map_err(|e| anyhow!("lock poisoned: {}", e))?;
+            let ctx = ctx_guard.as_ptr();
+            unsafe {
+                let mem = ffi::llama_get_memory(ctx as *const _);
+                if !mem.is_null() {
+                    for req in requests.iter() {
+                        if let Some(src) = req.prefix_seq_id {
+                            if req.skip_prefix_tokens > 0 {
+                                ffi::llama_memory_seq_cp(
+                                    mem,
+                                    src,
+                                    req.kv_seq_id,
+                                    0,
+                                    req.skip_prefix_tokens as i32,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Count only the tokens that actually need to be prefilled (after the cached prefix).
+        let total_tokens: usize = requests
+            .iter()
+            .map(|r| r.prompt_tokens.len().saturating_sub(r.skip_prefix_tokens))
+            .sum();
+
+        if total_tokens == 0 {
+            // All tokens were covered by prefix cache — sample from the last cached position.
+            // We do a minimal 1-token decode for each request at the last prompt position.
+            return self.do_decode(req_ids, requests);
+        }
+
         let n_seq_max = requests.len().max(1) as i32;
 
         let mut batch = unsafe {
@@ -505,12 +555,20 @@ impl LlamaCppModel {
         let mut batch_logits_indices: Vec<i32> = Vec::with_capacity(requests.len());
         for req in requests.iter() {
             let seq_id = req.kv_seq_id;
-            for (pos, &token) in req.prompt_tokens.iter().enumerate() {
+            let start = req.skip_prefix_tokens.min(req.prompt_tokens.len());
+            let tokens_to_submit = &req.prompt_tokens[start..];
+            if tokens_to_submit.is_empty() {
+                // Should be handled by the total_tokens == 0 branch above, but be defensive.
+                batch_logits_indices.push(-1);
+                continue;
+            }
+            for (local_pos, &token) in tokens_to_submit.iter().enumerate() {
+                let abs_pos = start + local_pos;
                 let idx = batch.n_tokens as usize;
-                let has_logits = pos == req.prompt_tokens.len() - 1;
+                let has_logits = abs_pos == req.prompt_tokens.len() - 1;
                 unsafe {
                     *batch.token.add(idx) = token;
-                    *batch.pos.add(idx) = pos as i32;
+                    *batch.pos.add(idx) = abs_pos as i32;
                     *batch.n_seq_id.add(idx) = 1;
                     let arr = *batch.seq_id.add(idx);
                     *arr.add(0) = seq_id;
@@ -698,6 +756,22 @@ impl Model for LlamaCppModel {
             }
         }
     }
+
+    fn copy_sequence_range(&self, src_seq_id: i32, dst_seq_id: i32, token_count: i32) {
+        if token_count <= 0 {
+            return;
+        }
+        let ctx_guard = match self._ctx.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        unsafe {
+            let mem = ffi::llama_get_memory(ctx_guard.as_ptr() as *const _);
+            if !mem.is_null() {
+                ffi::llama_memory_seq_cp(mem, src_seq_id, dst_seq_id, 0, token_count);
+            }
+        }
+    }
 }
 
 // ==================== Stub implementation (when FERRUM_SKIP_LLAMA or no llama.cpp) ====================
@@ -786,4 +860,6 @@ impl Model for LlamaCppModel {
     }
 
     fn clear_sequence(&self, _seq_id: i32) {}
+
+    fn copy_sequence_range(&self, _src_seq_id: i32, _dst_seq_id: i32, _token_count: i32) {}
 }
