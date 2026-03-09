@@ -278,13 +278,45 @@ impl InferenceEngine {
             let decode_ids = batch.decode.clone();
 
             if !prefill_ids.is_empty() {
-                let prefill_results = engine.run_prefill(&prefill_ids).await?;
-                engine.handle_logits(&prefill_results, true).await?;
+                match engine.run_prefill(&prefill_ids).await {
+                    Ok(prefill_results) => {
+                        engine.handle_logits(&prefill_results, true).await?;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "prefill failed (KV cache full?): {} — stopping {} request(s) with Length",
+                            e,
+                            prefill_ids.len()
+                        );
+                        for req_id in &prefill_ids {
+                            engine
+                                .scheduler
+                                .mark_finished(*req_id, StopReason::Length);
+                        }
+                    }
+                }
             }
 
             if !decode_ids.is_empty() {
-                let decode_results = engine.run_decode(&decode_ids).await?;
-                engine.handle_logits(&decode_results, false).await?;
+                match engine.run_decode(&decode_ids).await {
+                    Ok(decode_results) => {
+                        engine.handle_logits(&decode_results, false).await?;
+                    }
+                    Err(e) => {
+                        // KV cache exhausted or llama_decode failure — stop all affected
+                        // requests gracefully instead of crashing the engine loop.
+                        tracing::warn!(
+                            "decode failed (KV cache full?): {} — stopping {} request(s) with Length",
+                            e,
+                            decode_ids.len()
+                        );
+                        for req_id in &decode_ids {
+                            engine
+                                .scheduler
+                                .mark_finished(*req_id, StopReason::Length);
+                        }
+                    }
+                }
             }
         }
     }
