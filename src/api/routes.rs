@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::engine::InferenceEngine;
-use crate::scheduler::{InferenceRequest, StopReason, Token};
+use crate::scheduler::{InferenceRequest, SamplingParams, StopReason, Token};
 
 use super::types::*;
 
@@ -92,12 +92,17 @@ async fn chat_completions(
     });
 
     let max_tokens = req.max_tokens.unwrap_or(256) as usize;
-    let temperature = req.temperature.unwrap_or(1.0).max(0.0);
-    let top_p = req.top_p.unwrap_or(1.0).clamp(0.0, 1.0);
+    let sampling = SamplingParams {
+        temperature: req.temperature.unwrap_or(1.0).max(0.0),
+        top_p: req.top_p.unwrap_or(1.0).clamp(0.0, 1.0),
+        top_k: req.top_k.unwrap_or(0),
+        repetition_penalty: req.repetition_penalty.unwrap_or(1.0).max(1.0),
+        seed: req.seed,
+    };
     let prompt_tokens_len = prompt_tokens.len();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
 
-    let inference_req = InferenceRequest::new(req_id, prompt_tokens, max_tokens, temperature, top_p, tx);
+    let inference_req = InferenceRequest::new(req_id, prompt_tokens, max_tokens, sampling, tx);
 
     engine.submit_request(inference_req);
 
@@ -186,6 +191,9 @@ async fn completions(
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         top_p: None,
+        top_k: None,
+        repetition_penalty: None,
+        seed: None,
         stream: req.stream,
     };
 

@@ -10,9 +10,11 @@ High-performance LLM inference engine in Rust — an alternative to Ollama and v
 - **OpenAI-compatible API** (chat completions, completions, models, health)
 - **Continuous batching** with LIFO preemption
 - **KV-cache management** with block-based allocation
-- **Temperature + top_p sampling** wired through the full pipeline
+- **Real stochastic sampling** — temperature, top_p, top_k, repetition_penalty, seed
 - **Output filtering** — `<think>` blocks, special tokens, SentencePiece word boundaries
 - **Graceful shutdown** on SIGTERM / SIGINT
+- **Docker support** — multi-stage build + `docker compose up`
+- **Integrated benchmark** — TTFT, throughput, P50/P95/P99 latency
 
 ## Prerequisites
 
@@ -87,6 +89,63 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 ```
 
+## Docker
+
+The fastest way to get started without a Rust toolchain:
+
+```bash
+# 1. Put your GGUF model in ./models/
+mkdir -p models
+# cp /path/to/my-model.gguf models/model.gguf
+
+# 2. Start the server
+docker compose up          # or: make docker-run
+
+# 3. (optional) build only
+make docker
+# docker run -v ./models:/models -e FERRUM_MODEL_PATH=/models/model.gguf \
+#   -p 8080:8080 ferrum-engine
+```
+
+Edit `docker-compose.yml` to change the model path or environment variables.
+Uncomment the `deploy.resources` section to pass an NVIDIA GPU into the container.
+
+## Benchmark
+
+Run the built-in benchmark tool against a running server:
+
+```bash
+# Quick smoke test (server must be running)
+make bench
+
+# Custom run
+./target/release/ferrum-bench \
+  --url http://localhost:8080 \
+  --model my-model \
+  --concurrency 8 \
+  --requests 100 \
+  --max-tokens 256
+```
+
+Sample output:
+
+```
+ferrum-bench
+  URL         : http://localhost:8080
+  Model       : my-model
+  Concurrency : 8
+  Requests    : 100
+  Max tokens  : 256
+
+Results (100 ok, 0 errors)
+─────────────────────────────────────────
+  TTFT        P50:     87ms   P95:    134ms
+  Latency     P50:    412ms   P95:    823ms   P99:   1204ms
+  Throughput  : 312.4 tokens/sec
+  Total time  : 14.2s
+  Tokens out  : 4438
+```
+
 ## Configuration
 
 | Flag | Env | Default | Description |
@@ -105,11 +164,14 @@ curl http://localhost:8080/v1/chat/completions \
 ```
 make install-rust    Install Rust toolchain
 make download-model  Download default model (Qwen3.5 0.8B Q4_K_M)
-make build           Compile release binary
+make build           Compile release binaries (engine + bench)
 make run             Build and start the server
 make dev             Start with RUST_LOG=debug
 make test            Run unit tests
 make check           Fast type-check
+make bench           Run benchmark against a running server
+make docker          Build Docker image
+make docker-run      Start via docker compose
 ```
 
 ## Project Structure
@@ -122,8 +184,12 @@ ferrum-engine/
 │   ├── api/             # REST API (OpenAI compatible)
 │   ├── scheduler/       # Continuous batching scheduler
 │   ├── kv_cache/        # KV-cache block manager
-│   └── engine/          # Inference engine + llama.cpp FFI
+│   ├── engine/          # Inference engine + llama.cpp FFI
+│   └── bin/
+│       └── bench.rs     # Standalone benchmark binary
 ├── vendor/llama.cpp/    # Git submodule
+├── Dockerfile
+├── docker-compose.yml
 ├── Makefile
 ├── CHANGELOG.md
 └── Cargo.toml

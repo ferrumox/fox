@@ -91,6 +91,13 @@ impl InferenceEngine {
         loop {
             let batch = engine.scheduler.schedule_step();
 
+            // Wipe KV state for preempted sequences BEFORE their IDs can be reassigned.
+            // This must happen synchronously here — schedule_step has already returned the IDs
+            // to the pool, so a subsequent schedule_step could hand them out to new requests.
+            for seq_id in &batch.preempted_seq_ids {
+                engine.model.clear_sequence(*seq_id);
+            }
+
             if batch.is_empty() {
                 engine.scheduler.wait_for_work().await;
                 continue;
@@ -122,8 +129,13 @@ impl InferenceEngine {
                 generated_tokens: r.generated_tokens,
                 max_new_tokens: r.max_new_tokens,
                 context_len: r.context_len(),
-                temperature: r.temperature,
-                top_p: r.top_p,
+                kv_seq_id: r.kv_seq_id,
+                temperature: r.sampling.temperature,
+                top_p: r.sampling.top_p,
+                top_k: r.sampling.top_k,
+                repetition_penalty: r.sampling.repetition_penalty,
+                seed: r.sampling.seed,
+                generated_token_ids: r.generated_token_ids.clone(),
             })
             .collect();
         let model = self.model.clone();
@@ -145,8 +157,13 @@ impl InferenceEngine {
                 generated_tokens: r.generated_tokens,
                 max_new_tokens: r.max_new_tokens,
                 context_len: r.context_len(),
-                temperature: r.temperature,
-                top_p: r.top_p,
+                kv_seq_id: r.kv_seq_id,
+                temperature: r.sampling.temperature,
+                top_p: r.sampling.top_p,
+                top_k: r.sampling.top_k,
+                repetition_penalty: r.sampling.repetition_penalty,
+                seed: r.sampling.seed,
+                generated_token_ids: r.generated_token_ids.clone(),
             })
             .collect();
         let model = self.model.clone();
@@ -204,6 +221,11 @@ impl InferenceEngine {
             debug!(request_id = req_id, token_id, "token generated");
 
             if is_done {
+                // Clear KV state before returning the seq_id to the pool (which happens
+                // in the next schedule_step when it processes the Finished request).
+                if req.kv_seq_id >= 0 {
+                    self.model.clear_sequence(req.kv_seq_id);
+                }
                 self.scheduler.mark_finished(*req_id, stop_reason.unwrap());
                 // Clean up filter state
                 if let Ok(mut state) = self.output_filter_state.lock() {

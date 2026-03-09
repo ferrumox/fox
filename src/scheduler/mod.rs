@@ -4,7 +4,7 @@
 
 mod batch;
 
-pub use batch::{InferenceRequest, ScheduledBatch, StopReason, RequestState, Token};
+pub use batch::{InferenceRequest, SamplingParams, ScheduledBatch, StopReason, RequestState, Token};
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -20,15 +20,20 @@ pub struct Scheduler {
     kv_cache: Arc<KVCacheManager>,
     /// Notified when a new request is submitted, waking the engine loop.
     work_notify: tokio::sync::Notify,
+    /// Pool of available llama.cpp sequence IDs (0..max_batch_size).
+    /// Popped when a request is admitted, pushed back when it finishes or is preempted.
+    seq_id_pool: std::sync::Mutex<Vec<i32>>,
 }
 
 impl Scheduler {
-    pub fn new(kv_cache: Arc<KVCacheManager>) -> Self {
+    pub fn new(kv_cache: Arc<KVCacheManager>, max_batch_size: usize) -> Self {
+        let pool: Vec<i32> = (0..max_batch_size as i32).collect();
         Self {
             waiting_queue: std::sync::Mutex::new(VecDeque::new()),
             running_batch: std::sync::Mutex::new(Vec::new()),
             kv_cache,
             work_notify: tokio::sync::Notify::new(),
+            seq_id_pool: std::sync::Mutex::new(pool),
         }
     }
 
@@ -58,9 +63,9 @@ impl Scheduler {
 
     /// One scheduling step. Returns prefill and decode batches.
     ///
-    /// 1. Evict Finished requests, free their KV blocks
-    /// 2. Admit from waiting_queue if blocks available
-    /// 3. If no blocks, LIFO preempt last admitted
+    /// 1. Evict Finished requests, free their KV blocks, return seq IDs to pool
+    /// 2. Admit from waiting_queue if blocks and seq IDs are available
+    /// 3. If no blocks, LIFO preempt last admitted (returns seq ID to pool)
     /// 4. Return prefill (need first token) and decode (need next token) ids
     pub fn schedule_step(&self) -> ScheduledBatch {
         let mut running = match self.running_batch.lock() {
@@ -71,8 +76,12 @@ impl Scheduler {
             Ok(g) => g,
             Err(_) => return ScheduledBatch::default(),
         };
+        let mut pool = match self.seq_id_pool.lock() {
+            Ok(g) => g,
+            Err(_) => return ScheduledBatch::default(),
+        };
 
-        // 1. Evict Finished and free blocks
+        // 1. Evict Finished and free blocks + return seq IDs
         let (finished, still_running): (Vec<_>, Vec<_>) =
             std::mem::take(&mut *running).into_iter().partition(|r| r.is_finished());
 
@@ -85,22 +94,32 @@ impl Scheduler {
                     "freed KV blocks for finished request"
                 );
             }
+            if req.kv_seq_id >= 0 {
+                pool.push(req.kv_seq_id);
+            }
         }
         *running = still_running;
 
         // 2. Try to admit from waiting_queue
         let mut prefill = Vec::new();
         let mut decode = Vec::new();
+        let mut preempted_seq_ids = Vec::new();
 
         while let Some(mut req) = waiting.pop_front() {
+            // Need both a free KV block range and a free seq ID
+            if pool.is_empty() {
+                waiting.push_front(req);
+                break;
+            }
             let needed = self.blocks_needed(&req);
             if self.kv_cache.can_allocate(needed) {
                 match self.kv_cache.allocate(needed) {
                     Ok(ids) => {
                         let id = req.id;
                         req.kv_block_ids = ids;
+                        req.kv_seq_id = pool.pop().expect("pool non-empty checked above");
                         req.state = batch::RequestState::Prefilling;
-                        info!(request_id = id, "request admitted to batch");
+                        info!(request_id = id, seq_id = req.kv_seq_id, "request admitted to batch");
                         running.push(req);
                         prefill.push(id);
                     }
@@ -118,6 +137,13 @@ impl Scheduler {
                     if !evicted.kv_block_ids.is_empty() {
                         self.kv_cache.free_blocks(&evicted.kv_block_ids);
                         evicted.kv_block_ids.clear();
+                    }
+                    if evicted.kv_seq_id >= 0 {
+                        // Return to pool and signal engine to wipe the KV state for this seq_id.
+                        // The engine will call model.clear_sequence() before the ID can be reused.
+                        preempted_seq_ids.push(evicted.kv_seq_id);
+                        pool.push(evicted.kv_seq_id);
+                        evicted.kv_seq_id = -1;
                     }
                     info!(request_id = evicted.id, "LIFO preemption: evicted from batch");
                     waiting.push_front(evicted);
@@ -137,7 +163,7 @@ impl Scheduler {
             }
         }
 
-        ScheduledBatch { prefill, decode }
+        ScheduledBatch { prefill, decode, preempted_seq_ids }
     }
 
     /// Update request state after a generated token in a single lock acquisition.
@@ -151,6 +177,7 @@ impl Scheduler {
             if req.id == req_id {
                 req.last_token = Some(token_id);
                 req.generated_tokens += 1;
+                req.generated_token_ids.push(token_id);
                 if from_prefill && req.state == batch::RequestState::Prefilling {
                     req.state = batch::RequestState::Decoding;
                 }
@@ -213,10 +240,10 @@ mod tests {
             vocab_size: 32000,
         };
         let kv = Arc::new(KVCacheManager::new(&config, 1_000_000_000, 0.5, 16));
-        let sched = Scheduler::new(kv);
+        let sched = Scheduler::new(kv, 8);
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let req = InferenceRequest::new(1, vec![1, 2, 3], 10, 1.0, 1.0, tx);
+        let req = InferenceRequest::new(1, vec![1, 2, 3], 10, SamplingParams::default(), tx);
         sched.submit(req);
 
         assert_eq!(sched.queue_depth(), 1);

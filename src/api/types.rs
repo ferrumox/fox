@@ -14,6 +14,15 @@ pub struct ChatCompletionRequest {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub top_p: Option<f32>,
+    /// Top-K filter: keep only the K most likely tokens before nucleus sampling (0 = disabled).
+    #[serde(default)]
+    pub top_k: Option<u32>,
+    /// Penalize tokens that already appear in the output (1.0 = disabled).
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
+    /// Fixed RNG seed for reproducible outputs.
+    #[serde(default)]
+    pub seed: Option<u64>,
     #[serde(default)]
     pub stream: bool,
 }

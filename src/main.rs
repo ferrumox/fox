@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
     );
     let kv_cache = std::sync::Arc::new(kv_cache);
 
-    let scheduler = Scheduler::new(kv_cache.clone());
+    let scheduler = Scheduler::new(kv_cache.clone(), config.max_batch_size);
     let scheduler = std::sync::Arc::new(scheduler);
 
     let model = std::sync::Arc::new(model);

@@ -1,0 +1,20 @@
+# Build artifacts
+target/
+
+# Local model files (mounted at runtime via volume)
+models/
+*.gguf
+
+# Version control
+.git/
+.gitignore
+
+# Editor / IDE
+.cursor/
+.vscode/
+*.swp
+*.swo
+
+# Plans and docs that are not needed in the image
+*.plan.md
+CHANGELOG.md

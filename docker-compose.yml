@@ -1,0 +1,25 @@
+services:
+  ferrum:
+    build: .
+    image: ferrum-engine:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount a local models directory so GGUF files are not baked into the image.
+      - ./models:/models:ro
+    environment:
+      FERRUM_MODEL_PATH: /models/model.gguf
+      FERRUM_HOST: 0.0.0.0
+      FERRUM_PORT: "8080"
+      FERRUM_MAX_CONTEXT_LEN: "4096"
+      FERRUM_GPU_MEMORY_FRACTION: "0.9"
+      FERRUM_MAX_BATCH_SIZE: "8"
+    restart: unless-stopped
+    # Optional: expose GPU to the container (requires nvidia-container-toolkit)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]

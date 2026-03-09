@@ -19,17 +19,26 @@ GPU_MEM_FRACTION  ?= 0.85
 MAX_BATCH_SIZE    ?= 32
 BLOCK_SIZE        ?= 16
 
-.PHONY: help install-rust build run dev test download-model check
+# --- Bench ---
+BENCH_CONCURRENCY ?= 4
+BENCH_REQUESTS    ?= 50
+BENCH_PROMPT      ?= Write a short paragraph about the Rust programming language.
+BENCH_MAX_TOKENS  ?= 128
+
+.PHONY: help install-rust build run dev test bench download-model check docker docker-run
 
 help:
 	@echo "Targets:"
 	@echo "  make install-rust    Install Rust toolchain (run once if not installed)"
 	@echo "  make download-model  Download $(MODEL_FILE) from HuggingFace to $(MODELS_DIR)/"
-	@echo "  make build           Compile release binary"
+	@echo "  make build           Compile release binaries"
 	@echo "  make run             Build and start the server"
 	@echo "  make dev             Start with verbose logging (RUST_LOG=debug)"
 	@echo "  make test            Run unit tests"
 	@echo "  make check           Fast type-check without producing a binary"
+	@echo "  make bench           Run the integrated benchmark against a running server"
+	@echo "  make docker          Build the Docker image"
+	@echo "  make docker-run      Start the server via docker compose"
 	@echo ""
 	@echo "Variables (override with make run VAR=value):"
 	@echo "  MODEL_PATH=$(MODEL_PATH)"
@@ -37,6 +46,7 @@ help:
 	@echo "  MAX_CONTEXT_LEN=$(MAX_CONTEXT_LEN)"
 	@echo "  GPU_MEM_FRACTION=$(GPU_MEM_FRACTION)"
 	@echo "  MAX_BATCH_SIZE=$(MAX_BATCH_SIZE)"
+	@echo "  BENCH_CONCURRENCY=$(BENCH_CONCURRENCY)  BENCH_REQUESTS=$(BENCH_REQUESTS)"
 
 install-rust:
 	@command -v cargo >/dev/null 2>&1 && \
@@ -90,3 +100,19 @@ dev: build
 
 test:
 	cargo test
+
+bench: build
+	@echo "Running benchmark against $(HOST):$(PORT)..."
+	./target/release/ferrum-bench \
+		--url http://$(HOST):$(PORT) \
+		--model $(MODEL_FILE) \
+		--concurrency $(BENCH_CONCURRENCY) \
+		--requests $(BENCH_REQUESTS) \
+		--max-tokens $(BENCH_MAX_TOKENS) \
+		--prompt "$(BENCH_PROMPT)"
+
+docker:
+	docker build -t ferrum-engine:latest .
+
+docker-run:
+	docker compose up

@@ -1,12 +1,15 @@
 // Model trait and LlamaCppModel implementation.
 // Uses llama.cpp FFI for GGUF loading and inference.
 
+use std::cmp::Ordering;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::ptr::NonNull;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 
 use super::ffi;
 
@@ -42,10 +45,21 @@ pub struct InferenceRequestForModel {
     pub generated_tokens: usize,
     pub max_new_tokens: usize,
     pub context_len: usize,
-    /// Sampling temperature (0 = greedy).
+    /// Stable llama.cpp sequence ID assigned at admission — never changes for the lifetime of
+    /// a request. Using the batch index here would cause seq_id collisions across decode steps.
+    pub kv_seq_id: i32,
+    /// Sampling temperature (0 = greedy, 1 = unscaled).
     pub temperature: f32,
     /// Top-p nucleus sampling threshold (1.0 = disabled).
     pub top_p: f32,
+    /// Top-K filter (0 = disabled).
+    pub top_k: u32,
+    /// Repetition penalty (1.0 = disabled).
+    pub repetition_penalty: f32,
+    /// RNG seed for reproducible sampling (None = random).
+    pub seed: Option<u64>,
+    /// Previously generated token IDs (for repetition penalty).
+    pub generated_token_ids: Vec<i32>,
 }
 
 /// Backend model trait.
@@ -75,57 +89,117 @@ pub trait Model: Send + Sync {
     /// Apply chat template to messages. Returns formatted prompt for tokenization.
     /// Fallback: simple "role: content\n" concatenation if template unavailable.
     fn apply_chat_template(&self, messages: &[(String, String)]) -> Result<String>;
+
+    /// Remove all KV cache / recurrent state for the given sequence ID.
+    /// Must be called before a seq_id is reused for a new request; otherwise the new request
+    /// will inherit stale positions from the previous occupant and llama_decode will fail.
+    fn clear_sequence(&self, seq_id: i32);
 }
 
-/// Sample token from logits (greedy).
+/// Sample the highest-probability token (deterministic).
 fn sample_greedy(logits: &[f32]) -> i32 {
     logits
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
         .map(|(i, _)| i as i32)
         .unwrap_or(0)
 }
 
-/// Sample token using top-p (nucleus) sampling on already-scaled logits.
-fn sample_top_p(logits: &[f32], top_p: f32) -> i32 {
-    if top_p >= 1.0 {
-        return sample_greedy(logits);
+/// Apply repetition penalty in-place: divide positive logits and multiply negative ones.
+fn apply_repetition_penalty(logits: &mut [f32], token_ids: &[i32], penalty: f32) {
+    for &tid in token_ids {
+        if tid >= 0 && (tid as usize) < logits.len() {
+            let l = logits[tid as usize];
+            logits[tid as usize] = if l > 0.0 { l / penalty } else { l * penalty };
+        }
     }
-    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let exp_sum: f32 = logits.iter().map(|&l| (l - max_logit).exp()).sum();
+}
+
+/// Full stochastic sampler: repetition penalty → temperature → top-K → top-P → weighted draw.
+///
+/// When `temperature` ≤ 0 the function falls back to greedy regardless of other parameters.
+/// The RNG is seeded per-request for reproducibility when `seed` is provided.
+fn sample_token(
+    logits: &[f32],
+    temperature: f32,
+    top_p: f32,
+    top_k: u32,
+    repetition_penalty: f32,
+    generated_ids: &[i32],
+    seed: Option<u64>,
+    token_count: usize,
+) -> i32 {
+    let mut logits = logits.to_vec();
+
+    // 1. Repetition penalty
+    if repetition_penalty != 1.0 && !generated_ids.is_empty() {
+        apply_repetition_penalty(&mut logits, generated_ids, repetition_penalty);
+    }
+
+    // 2. Greedy shortcut
+    if temperature <= 0.0 {
+        return sample_greedy(&logits);
+    }
+
+    // 3. Temperature scaling
+    for l in &mut logits {
+        *l /= temperature;
+    }
+
+    // 4. Top-K masking
+    let k = top_k as usize;
+    if k > 0 && k < logits.len() {
+        let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+        indexed.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(Ordering::Equal));
+        let threshold = indexed[k - 1].1;
+        for l in &mut logits {
+            if *l < threshold {
+                *l = f32::NEG_INFINITY;
+            }
+        }
+    }
+
+    // 5. Softmax + sort by descending probability
+    let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let exp_sum: f32 = logits.iter().map(|&l| (l - max_l).exp()).sum();
     let mut probs: Vec<(usize, f32)> = logits
         .iter()
         .enumerate()
-        .map(|(i, &l)| (i, (l - max_logit).exp() / exp_sum))
+        .map(|(i, &l)| (i, (l - max_l).exp() / exp_sum))
         .collect();
-    probs.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    probs.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(Ordering::Equal));
+
+    // 6. Top-P nucleus truncation
+    if top_p < 1.0 {
+        let mut cum = 0.0f32;
+        let mut end = probs.len();
+        for (idx, (_, p)) in probs.iter().enumerate() {
+            cum += p;
+            if cum >= top_p {
+                end = idx + 1;
+                break;
+            }
+        }
+        probs.truncate(end);
+    }
+
+    // 7. Weighted random draw
+    let mut rng: Box<dyn rand::RngCore> = match seed {
+        Some(s) => Box::new(StdRng::seed_from_u64(s ^ (token_count as u64))),
+        None => Box::new(rand::thread_rng()),
+    };
+
+    let total: f32 = probs.iter().map(|(_, p)| p).sum();
+    let r: f32 = rng.gen::<f32>() * total;
     let mut cum = 0.0f32;
-    for (i, p) in &probs {
+    for (idx, p) in &probs {
         cum += p;
-        if cum >= top_p {
-            return *i as i32;
+        if cum >= r {
+            return *idx as i32;
         }
     }
-    probs.last().map(|(i, _)| *i as i32).unwrap_or(0)
-}
-
-/// Sample a token applying temperature scaling and optional top-p.
-fn sample(logits: &[f32], temperature: f32, top_p: f32) -> i32 {
-    // temperature <= 0 or == 1.0 with no top-p → greedy
-    if temperature <= 0.0 {
-        return sample_greedy(logits);
-    }
-    if (temperature - 1.0).abs() < 1e-6 && top_p >= 1.0 {
-        return sample_greedy(logits);
-    }
-    // Apply temperature scaling before sampling
-    if (temperature - 1.0).abs() < 1e-6 {
-        sample_top_p(logits, top_p)
-    } else {
-        let scaled: Vec<f32> = logits.iter().map(|&l| l / temperature).collect();
-        sample_top_p(&scaled, top_p)
-    }
+    probs.last().map(|(idx, _)| *idx as i32).unwrap_or(0)
 }
 
 #[cfg(not(ferrum_stub))]
@@ -429,8 +503,8 @@ impl LlamaCppModel {
         };
 
         let mut batch_logits_indices: Vec<i32> = Vec::with_capacity(requests.len());
-        for (seq_idx, req) in requests.iter().enumerate() {
-            let seq_id = seq_idx as i32;
+        for req in requests.iter() {
+            let seq_id = req.kv_seq_id;
             for (pos, &token) in req.prompt_tokens.iter().enumerate() {
                 let idx = batch.n_tokens as usize;
                 let has_logits = pos == req.prompt_tokens.len() - 1;
@@ -476,8 +550,18 @@ impl LlamaCppModel {
             let logits_slice: &[f32] = unsafe {
                 std::slice::from_raw_parts(logits_ptr, n_vocab as usize)
             };
-            let (temperature, top_p) = req.map(|r| (r.temperature, r.top_p)).unwrap_or((0.0, 1.0));
-            let sampled = sample(logits_slice, temperature, top_p);
+            let sampled = if let Some(r) = req {
+                sample_token(
+                    logits_slice,
+                    r.temperature, r.top_p, r.top_k,
+                    r.repetition_penalty,
+                    &r.generated_token_ids,
+                    r.seed,
+                    r.generated_tokens,
+                )
+            } else {
+                sample_greedy(logits_slice)
+            };
             let values: Vec<f32> = logits_slice.to_vec();
             results.push((req_id, Logits::new(values, sampled)));
         }
@@ -498,20 +582,19 @@ impl LlamaCppModel {
         let n_tokens = requests.len() as i32;
         let mut batch = unsafe { ffi::llama_batch_init(n_tokens, 0, n_tokens) };
 
-        for (idx, req) in requests.iter().enumerate() {
+        for (batch_slot, req) in requests.iter().enumerate() {
             let input_token = req.last_token.or_else(|| req.prompt_tokens.last().copied())
                 .unwrap_or(self.eos_token);
             let pos = req.context_len as i32;
-            let seq_id = idx as i32;
-            let idx = idx as usize;
+            let seq_id = req.kv_seq_id;  // stable ID — never the batch slot index
 
             unsafe {
-                *batch.token.add(idx) = input_token;
-                *batch.pos.add(idx) = pos;
-                *batch.n_seq_id.add(idx) = 1;
-                let arr = *batch.seq_id.add(idx);
+                *batch.token.add(batch_slot) = input_token;
+                *batch.pos.add(batch_slot) = pos;
+                *batch.n_seq_id.add(batch_slot) = 1;
+                let arr = *batch.seq_id.add(batch_slot);
                 *arr.add(0) = seq_id;
-                *batch.logits.add(idx) = 1i8;
+                *batch.logits.add(batch_slot) = 1i8;
             }
             batch.n_tokens += 1;
         }
@@ -538,8 +621,18 @@ impl LlamaCppModel {
             let logits_slice: &[f32] = unsafe {
                 std::slice::from_raw_parts(logits_ptr, n_vocab as usize)
             };
-            let (temperature, top_p) = req.map(|r| (r.temperature, r.top_p)).unwrap_or((0.0, 1.0));
-            let sampled = sample(logits_slice, temperature, top_p);
+            let sampled = if let Some(r) = req {
+                sample_token(
+                    logits_slice,
+                    r.temperature, r.top_p, r.top_k,
+                    r.repetition_penalty,
+                    &r.generated_token_ids,
+                    r.seed,
+                    r.generated_tokens,
+                )
+            } else {
+                sample_greedy(logits_slice)
+            };
             let values: Vec<f32> = logits_slice.to_vec();
             results.push((req_id, Logits::new(values, sampled)));
         }
@@ -590,6 +683,20 @@ impl Model for LlamaCppModel {
 
     fn apply_chat_template(&self, messages: &[(String, String)]) -> Result<String> {
         self.apply_chat_template_impl(messages)
+    }
+
+    fn clear_sequence(&self, seq_id: i32) {
+        let ctx_guard = match self._ctx.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        unsafe {
+            let mem = ffi::llama_get_memory(ctx_guard.as_ptr() as *const _);
+            if !mem.is_null() {
+                // p0=0, p1=-1 means "remove all positions for this sequence"
+                ffi::llama_memory_seq_rm(mem, seq_id, 0, -1);
+            }
+        }
     }
 }
 
@@ -677,4 +784,6 @@ impl Model for LlamaCppModel {
             .collect::<Vec<_>>()
             .join("\n"))
     }
+
+    fn clear_sequence(&self, _seq_id: i32) {}
 }
