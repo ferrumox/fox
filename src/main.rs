@@ -152,14 +152,20 @@ async fn shutdown_signal() {
 }
 
 fn get_gpu_memory_bytes() -> usize {
+    // Query total GPU memory via nvidia-smi (works with any CUDA version, no extra deps).
+    // Falls back to 8 GiB if the GPU is unavailable or nvidia-smi is not installed.
     #[cfg(feature = "cuda")]
+    if let Ok(out) = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .output()
     {
-        if let Ok(cu) = cudarc::driver::CudaDevice::new(0) {
-            if let Ok((_free, total)) = cu.get_mem_info() {
-                return total;
+        if out.status.success() {
+            if let Ok(s) = std::str::from_utf8(&out.stdout) {
+                if let Ok(mib) = s.trim().parse::<usize>() {
+                    return mib * 1024 * 1024;
+                }
             }
         }
     }
-    // Fallback: 8 GB
     8 * 1024 * 1024 * 1024
 }

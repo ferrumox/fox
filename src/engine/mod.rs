@@ -179,6 +179,9 @@ pub struct InferenceEngine {
     model_name: String,
     /// Prometheus metrics (optional — None disables recording).
     metrics: Option<Arc<Metrics>>,
+    /// Whether the loaded model supports KV-cache sequence copying (llama_memory_seq_cp).
+    /// False for recurrent/hybrid models (Mamba, Qwen3.5, etc.); prefix caching is disabled.
+    supports_prefix_cache: bool,
 }
 
 impl InferenceEngine {
@@ -189,6 +192,14 @@ impl InferenceEngine {
         model_name: String,
         metrics: Option<Arc<Metrics>>,
     ) -> Self {
+        let supports_prefix_cache = model.supports_seq_copy();
+        if supports_prefix_cache {
+            tracing::info!("prefix caching enabled (model supports seq_cp)");
+        } else {
+            tracing::info!(
+                "prefix caching disabled (model uses recurrent/hybrid memory — seq_cp unsupported)"
+            );
+        }
         Self {
             model,
             scheduler,
@@ -197,6 +208,7 @@ impl InferenceEngine {
             per_request_state: Arc::new(Mutex::new(HashMap::new())),
             model_name,
             metrics,
+            supports_prefix_cache,
         }
     }
 
@@ -443,12 +455,14 @@ impl InferenceEngine {
                 }
 
                 // Cache the KV state for potential prefix reuse on future identical prompts.
-                let should_clear = if matches!(
-                    stop_reason,
-                    Some(StopReason::Eos)
-                        | Some(StopReason::Length)
-                        | Some(StopReason::StopSequence)
-                ) {
+                // Disabled for models that don't support llama_memory_seq_cp (e.g. Mamba/hybrid).
+                let should_clear = if self.supports_prefix_cache
+                    && matches!(
+                        stop_reason,
+                        Some(StopReason::Eos)
+                            | Some(StopReason::Length)
+                            | Some(StopReason::StopSequence)
+                    ) {
                     let hash = hash_tokens(&req.prompt_tokens);
                     !self.scheduler.try_insert_prefix(*req_id, hash)
                 } else {
