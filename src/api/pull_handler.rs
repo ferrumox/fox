@@ -15,7 +15,7 @@ use axum::{
 };
 use tokio::sync::mpsc;
 
-use super::routes::AppState;
+use super::router::AppState;
 use super::types::{PullRequest, PullStatus};
 
 const HF_API_BASE: &str = "https://huggingface.co/api/models";
