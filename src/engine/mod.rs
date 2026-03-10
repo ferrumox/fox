@@ -557,13 +557,19 @@ impl InferenceEngine {
                     Ok(g) => g,
                     Err(_) => {
                         // Lock poisoned — skip processing, emit raw text with no stop check.
-                        let _ = req.response_tx.send(Token {
+                        if req.response_tx.send(Token {
                             id: *req_id,
                             token_id,
                             text: raw_text,
                             is_eos,
                             stop_reason: None,
-                        });
+                        }).is_err() {
+                            // Client disconnected while lock was poisoned — cancel.
+                            if req.kv_seq_id >= 0 {
+                                self.model.clear_sequence(req.kv_seq_id);
+                            }
+                            self.scheduler.mark_finished(*req_id, StopReason::Preempt);
+                        }
                         continue;
                     }
                 };
@@ -596,18 +602,31 @@ impl InferenceEngine {
                 None
             };
 
-            let _ = req.response_tx.send(Token {
+            let send_ok = req.response_tx.send(Token {
                 id: *req_id,
                 token_id,
                 text,
                 is_eos,
                 stop_reason: stop_reason.clone(),
-            });
+            }).is_ok();
 
             debug!(
                 request_id = req_id,
                 token_id, is_stop_hit, "token generated"
             );
+
+            // Client disconnected: receiver was dropped. Cancel the request
+            // immediately to free KV cache and scheduler slot.
+            if !send_ok {
+                if req.kv_seq_id >= 0 {
+                    self.model.clear_sequence(req.kv_seq_id);
+                }
+                self.scheduler.mark_finished(*req_id, StopReason::Preempt);
+                if let Ok(mut state) = self.per_request_state.lock() {
+                    state.remove(req_id);
+                }
+                continue;
+            }
 
             // Record per-token metrics.
             if let Some(m) = &self.metrics {

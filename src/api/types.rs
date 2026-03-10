@@ -48,6 +48,15 @@ pub struct ChatCompletionRequest {
     pub stop: Option<Vec<String>>,
     #[serde(default)]
     pub stream: bool,
+    /// OpenAI function/tool definitions.
+    #[serde(default)]
+    pub tools: Option<Vec<Tool>>,
+    /// "auto" | "none" | specific tool selector.
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
+    /// Structured output format.
+    #[serde(default)]
+    pub response_format: Option<ResponseFormat>,
 }
 
 fn default_max_tokens() -> Option<u32> {
@@ -81,6 +90,8 @@ pub struct ChatCompletionChoice {
 pub struct ChatMessageResponse {
     pub role: String,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -309,6 +320,147 @@ pub struct HealthResponse {
     pub started_at: u64,
 }
 
+// --- Version ---
+
+#[derive(Debug, Serialize)]
+pub struct VersionResponse {
+    pub version: String,
+}
+
+// --- Ollama Generate (POST /api/generate) ---
+
+/// Sampling options shared by /api/generate and /api/chat.
+#[derive(Debug, Deserialize, Default)]
+pub struct OllamaOptions {
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub top_k: Option<u32>,
+    #[serde(default)]
+    pub repeat_penalty: Option<f32>,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// Maximum tokens to generate (equivalent to max_tokens).
+    #[serde(default)]
+    pub num_predict: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_stop")]
+    pub stop: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OllamaGenerateRequest {
+    pub model: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub system: Option<String>,
+    /// true = stream tokens as NDJSON (default), false = wait for full response.
+    #[serde(default)]
+    pub stream: Option<bool>,
+    #[serde(default)]
+    pub options: Option<OllamaOptions>,
+}
+
+/// A single token event in the /api/generate stream.
+#[derive(Debug, Serialize)]
+pub struct OllamaGenerateChunk {
+    pub model: String,
+    pub created_at: String,
+    pub response: String,
+    pub done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_eval_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval_count: Option<u32>,
+}
+
+// --- Ollama Chat (POST /api/chat) ---
+
+/// Ollama chat message (used in both request and response).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct OllamaChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OllamaChatRequest {
+    pub model: String,
+    pub messages: Vec<OllamaChatMessage>,
+    #[serde(default)]
+    pub stream: Option<bool>,
+    #[serde(default)]
+    pub options: Option<OllamaOptions>,
+}
+
+/// A single message event in the /api/chat stream.
+#[derive(Debug, Serialize)]
+pub struct OllamaChatChunk {
+    pub model: String,
+    pub created_at: String,
+    pub message: OllamaChatMessage,
+    pub done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_eval_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval_count: Option<u32>,
+}
+
+// --- Function Calling (OpenAI tool use) ---
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Tool {
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub function: ToolFunction,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ToolFunction {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub call_type: String,
+    pub function: ToolCallFunction,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ToolCallFunction {
+    pub name: String,
+    /// Arguments serialized as a JSON string (OpenAI spec).
+    pub arguments: String,
+}
+
+// --- Structured Output ---
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ResponseFormat {
+    /// "json_object" | "text"
+    #[serde(rename = "type")]
+    pub format_type: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +479,33 @@ mod tests {
         let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.model, "llama");
         assert!(req.stream);
+    }
+
+    #[test]
+    fn test_chat_completion_request_with_tools() {
+        let json = r#"{
+            "model": "llama",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [{"type": "function", "function": {"name": "get_weather", "description": "Get weather"}}]
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert!(req.tools.is_some());
+        assert_eq!(req.tools.unwrap()[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn test_ollama_generate_request_deserialize() {
+        let json = r#"{"model":"llama3.2","prompt":"Why is the sky blue?","stream":false}"#;
+        let req: OllamaGenerateRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.model, "llama3.2");
+        assert_eq!(req.stream, Some(false));
+    }
+
+    #[test]
+    fn test_ollama_chat_request_deserialize() {
+        let json = r#"{"model":"llama3.2","messages":[{"role":"user","content":"Hi"}]}"#;
+        let req: OllamaChatRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.model, "llama3.2");
+        assert_eq!(req.messages[0].role, "user");
     }
 }

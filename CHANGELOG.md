@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.10.0] - 2026-03-10
+
+### Added
+
+- **`GET /api/version`** — devuelve `{"version":"0.10.0"}`. Los clientes Ollama (Open WebUI,
+  Continue.dev, etc.) llaman este endpoint al arrancar para detectar el servidor.
+
+- **`POST /api/generate`** (Ollama nativo) — generación con NDJSON streaming. Acepta `model`,
+  `prompt`, `system`, `stream` y `options` (`temperature`, `top_p`, `top_k`, `repeat_penalty`,
+  `seed`, `num_predict`, `stop`). Compatible con `ollama run` y clientes nativos de Ollama.
+
+- **`POST /api/chat`** (Ollama nativo) — chat con NDJSON streaming. Formato `{"message":{"role","content"}}`.
+  Compatible con Open WebUI usando el backend Ollama.
+
+- **Keep-alive / evicción temporal** — `--keep-alive-secs` (`FOX_KEEP_ALIVE_SECS`, default 300).
+  Los modelos sin actividad por más de ese tiempo se descargan automáticamente de memoria.
+  Background task con `Arc::downgrade` para lifecycle limpio. 0 = nunca evictar por tiempo.
+
+- **`fox serve` sin `--model-path` obligatorio** — el flag es ahora opcional. Sin él el servidor
+  arranca en modo lazy: los modelos se cargan en la primera request que los necesite. El modelo
+  primario para `/health` se detecta automáticamente del primer `.gguf` en `models_dir`.
+
+- **Request cancellation** — cuando el cliente se desconecta a mitad de un stream, el engine
+  detecta el canal cerrado (`send()` retorna `Err`) y cancela el request inmediatamente,
+  liberando el bloque de KV cache y el slot del scheduler.
+
+- **Function calling / tool use** — `tools: [{type:"function", function:{name, description, parameters}}]`
+  y `tool_choice` en `POST /v1/chat/completions`. Las tools se inyectan como system message
+  en formato JSON; la respuesta se parsea para detectar `{"name":..., "arguments":{...}}` y
+  se retorna como `tool_calls` en la respuesta. Streaming deshabilitado automáticamente cuando
+  hay tools (necesario para parsear la respuesta completa).
+
+- **Structured output** — `response_format: {"type": "json_object"}` inyecta la instrucción
+  "Respond ONLY with valid JSON" en el system prompt para modelos compatibles.
+
+- **Config file** — `~/.config/ferrumox/config.toml` (o `$FOX_CONFIG`). Los valores se aplican
+  antes de que clap parsee los argumentos CLI (vía env vars), por lo que los flags explícitos
+  siempre tienen precedencia. Campos soportados: `model_path`, `host`, `port`, `max_models`,
+  `keep_alive_secs`, `system_prompt`, `gpu_memory_fraction`, `max_batch_size`, `max_context_len`,
+  `block_size`, `hf_token`, `alias_file`, `json_logs`.
+
+### Changed
+
+- `model_path` en `fox serve` es ahora opcional (antes era obligatorio).
+- `--keep-alive-secs` añadido a `ServeArgs` (default 300 s).
+- `OllamaOptions` nuevo tipo compartido entre `/api/generate` y `/api/chat`.
+- `ChatCompletionRequest` extendido con `tools`, `tool_choice`, `response_format`.
+- `ChatMessageResponse` extendido con `tool_calls: Option<Vec<ToolCall>>`.
+
+---
+
 ## [0.9.0] - 2026-03-10
 
 ### Added

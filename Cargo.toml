@@ -1,6 +1,6 @@
 [package]
 name = "ferrumox"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 description = "High-performance LLM inference engine - alternative to Ollama and vLLM"
 license = "MIT OR Apache-2.0"
@@ -39,6 +39,7 @@ hex = "0.4"
 lru = "0.16.3"
 dashmap = "6"
 toml = "0.8"
+bytes = "1"
 
 # Optional
 
@@ -57,3 +58,6 @@ path = "src/bin/bench.rs"
 
 [dev-dependencies]
 tokio-test = "0.4"
+tempfile = "3"
+tower = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"

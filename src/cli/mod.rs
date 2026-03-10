@@ -43,6 +43,10 @@ pub enum Command {
 }
 
 pub async fn run() -> anyhow::Result<()> {
+    // Load config file before clap parses CLI args so env-var-backed flags
+    // pick up config values as their effective defaults.
+    crate::config::load_config_into_env();
+
     let cli = Cli::parse();
     match cli.command {
         Command::Serve(args) => serve::run_serve(args).await,
