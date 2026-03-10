@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::cli::show::{parse_architecture, parse_quantization};
 use crate::cli::{format_size, list_models};
-use crate::engine::InferenceEngine;
+use crate::model_registry::ModelRegistry;
 use crate::scheduler::{InferenceRequest, SamplingParams, StopReason, Token};
 
 use super::types::*;
@@ -28,9 +28,10 @@ use super::types::*;
 /// Shared state for all route handlers.
 #[derive(Clone)]
 pub struct AppState {
-    pub engine: Arc<InferenceEngine>,
+    pub registry: Arc<ModelRegistry>,
+    /// Stem of the model supplied via `--model-path` (pre-loaded at startup).
+    pub primary_model: String,
     /// Injected as the first message when no system message is present.
-    /// `None` disables injection entirely.
     pub system_prompt: Option<String>,
     /// Unix timestamp (seconds) when the server started.
     pub started_at: u64,
@@ -43,14 +44,16 @@ pub struct AppState {
 }
 
 pub fn router(
-    engine: Arc<InferenceEngine>,
+    registry: Arc<ModelRegistry>,
+    primary_model: String,
     system_prompt: Option<String>,
     started_at: u64,
     models_dir: PathBuf,
     hf_token: Option<String>,
 ) -> Router {
     let state = AppState {
-        engine,
+        registry,
+        primary_model,
         system_prompt,
         started_at,
         models_dir,
@@ -97,24 +100,43 @@ async fn metrics_handler() -> impl IntoResponse {
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    let engine = &state.engine;
+    let entry = state.registry.get_or_load(&state.primary_model).await.ok();
+    let (kv_cache_usage, queue_depth, active_requests, model_name) = match entry {
+        Some(e) => (
+            e.engine.kv_cache_usage(),
+            e.engine.queue_depth(),
+            e.engine.active_requests(),
+            e.engine.model_name().to_string(),
+        ),
+        None => (0.0, 0, 0, state.primary_model.clone()),
+    };
     Json(HealthResponse {
         status: "ok".to_string(),
-        kv_cache_usage: engine.kv_cache_usage(),
-        queue_depth: engine.queue_depth(),
-        active_requests: engine.active_requests(),
-        model_name: engine.model_name().to_string(),
+        kv_cache_usage,
+        queue_depth,
+        active_requests,
+        model_name,
         started_at: state.started_at,
     })
 }
 
+/// Lists all `.gguf` models available on disk (OpenAI format).
 async fn models(State(state): State<AppState>) -> Json<ModelsResponse> {
+    let entries = list_models(&state.models_dir).unwrap_or_default();
+    let data = entries
+        .iter()
+        .filter_map(|(path, _)| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|stem| ModelInfo {
+                    id: stem.to_string(),
+                    object: "model".to_string(),
+                })
+        })
+        .collect();
     Json(ModelsResponse {
         object: "list".to_string(),
-        data: vec![ModelInfo {
-            id: state.engine.model_name().to_string(),
-            object: "model".to_string(),
-        }],
+        data,
     })
 }
 
@@ -218,45 +240,48 @@ async fn ollama_tags(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn ollama_ps(State(state): State<AppState>) -> Json<PsResponse> {
-    let engine = &state.engine;
-    let name = engine.model_name().to_string();
+    let loaded = state.registry.loaded();
+    let mut ps_entries = Vec::with_capacity(loaded.len());
 
-    // Look up the file in models_dir to get real size and digest.
-    let file_info = list_models(&state.models_dir)
-        .ok()
-        .and_then(|entries| {
-            entries.into_iter().find(|(path, _)| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|stem| stem == name)
-                    .unwrap_or(false)
-            })
+    for (name, entry) in &loaded {
+        // Look up the file in models_dir to get real size and digest.
+        let file_info = list_models(&state.models_dir)
+            .ok()
+            .and_then(|entries| {
+                entries.into_iter().find(|(path, _)| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|stem| stem == name.as_str())
+                        .unwrap_or(false)
+                })
+            });
+
+        let (size, digest) = if let Some((path, meta)) = file_info {
+            let d = get_digest(&path, &state.digest_cache).await;
+            (meta.len(), d)
+        } else {
+            (0u64, "sha256:unknown".to_string())
+        };
+
+        let model_name = entry.engine.model_name().to_string();
+        ps_entries.push(PsEntry {
+            name: model_name.clone(),
+            size,
+            digest,
+            details: OllamaDetails {
+                format: "gguf".to_string(),
+                family: parse_architecture(&model_name).unwrap_or("unknown").to_string(),
+                parameter_size: "unknown".to_string(),
+                quantization_level: parse_quantization(&model_name)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            },
+            expires_at: "0001-01-01T00:00:00Z".to_string(),
+            size_vram: 0,
         });
+    }
 
-    let (size, digest) = if let Some((path, meta)) = file_info {
-        let d = get_digest(&path, &state.digest_cache).await;
-        (meta.len(), d)
-    } else {
-        (0u64, "sha256:unknown".to_string())
-    };
-
-    let entry = PsEntry {
-        name: name.clone(),
-        size,
-        digest,
-        details: OllamaDetails {
-            format: "gguf".to_string(),
-            family: parse_architecture(&name).unwrap_or("unknown").to_string(),
-            parameter_size: "unknown".to_string(),
-            quantization_level: parse_quantization(&name).unwrap_or("unknown").to_string(),
-        },
-        expires_at: "0001-01-01T00:00:00Z".to_string(),
-        size_vram: 0,
-    };
-
-    Json(PsResponse {
-        models: vec![entry],
-    })
+    Json(PsResponse { models: ps_entries })
 }
 
 async fn ollama_show(
@@ -343,14 +368,18 @@ async fn ollama_delete(
             format!("model '{}' not found", req.name),
         )
             .into_response(),
-        Some((path, _)) => match std::fs::remove_file(&path) {
-            Ok(_) => StatusCode::OK.into_response(),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to delete model: {e}"),
-            )
-                .into_response(),
-        },
+        Some((path, _)) => {
+            // Unload from registry if loaded.
+            state.registry.unload(&req.name);
+            match std::fs::remove_file(&path) {
+                Ok(_) => StatusCode::OK.into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to delete model: {e}"),
+                )
+                    .into_response(),
+            }
+        }
     }
 }
 
@@ -358,8 +387,14 @@ async fn v1_embeddings(
     State(state): State<AppState>,
     Json(req): Json<EmbeddingRequest>,
 ) -> impl IntoResponse {
+    let entry = match state.registry.get_or_load(&req.model).await {
+        Ok(e) => e,
+        Err(e) => {
+            return (StatusCode::NOT_FOUND, e.to_string()).into_response();
+        }
+    };
+    let engine = &entry.engine;
     let inputs = req.input.into_vec();
-    let engine = &state.engine;
     let mut data = Vec::with_capacity(inputs.len());
     let mut total_tokens = 0u32;
 
@@ -400,8 +435,14 @@ async fn ollama_embed(
     State(state): State<AppState>,
     Json(req): Json<OllamaEmbedRequest>,
 ) -> impl IntoResponse {
+    let entry = match state.registry.get_or_load(&req.model).await {
+        Ok(e) => e,
+        Err(e) => {
+            return (StatusCode::NOT_FOUND, e.to_string()).into_response();
+        }
+    };
+    let engine = &entry.engine;
     let inputs = req.input.into_vec();
-    let engine = &state.engine;
     let mut embeddings = Vec::with_capacity(inputs.len());
 
     for text in &inputs {
@@ -437,7 +478,11 @@ async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> axum::response::Response {
-    let engine = &state.engine;
+    let entry = match state.registry.get_or_load(&req.model).await {
+        Ok(e) => e,
+        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    };
+    let engine = &entry.engine;
     let id = Uuid::new_v4().to_string();
     let req_id = engine.next_request_id();
     let created = SystemTime::now()

@@ -1,6 +1,6 @@
 [package]
 name = "ferrumox"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 description = "High-performance LLM inference engine - alternative to Ollama and vLLM"
 license = "MIT OR Apache-2.0"
@@ -37,6 +37,8 @@ ahash = "0.8.12"
 sha2 = "0.10"
 hex = "0.4"
 lru = "0.16.3"
+dashmap = "6"
+toml = "0.8"
 
 # Optional
 

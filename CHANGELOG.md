@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.0] - 2026-03-10
+
+### Added
+
+- **Multi-Model support** — `ModelRegistry` loads and serves multiple models simultaneously
+  with LRU eviction.
+  - New `src/model_registry.rs`: `ModelRegistry`, `EngineEntry`, `RegistryConfig`.
+  - `GET /api/ps` now lists **all** currently-loaded models (previously only the one model).
+  - `GET /v1/models` now lists **all** `.gguf` files in `models_dir` (not just the loaded one).
+  - Each inference/embedding request is routed to the correct engine based on the `model` field;
+    unknown models return HTTP 404.
+  - `DELETE /api/delete` now also unloads the model from the registry if it was loaded.
+
+- **`--max-models` flag** (`FOX_MAX_MODELS` env var, default `1`) — maximum number of models
+  kept in memory simultaneously; excess models are evicted LRU-first.
+
+- **`--alias-file` flag** (`FOX_ALIAS_FILE` env var) — optional TOML file mapping short names
+  to model stems (e.g. `"llama3" = "Llama-3.2-3B-Instruct-f16"`).
+  Default path: `~/.config/ferrumox/aliases.toml`.
+
+### Changed
+
+- `AppState` replaces `engine: Arc<InferenceEngine>` with `registry: Arc<ModelRegistry>` +
+  `primary_model: String`. Backward-compatible: `fox serve --model-path X.gguf` works unchanged.
+- `router()` signature updated accordingly.
+- Engine run-loop is now started inside `ModelRegistry::get_or_load` and aborted automatically
+  on LRU eviction via `Drop` on `EngineEntry`.
+
+---
+
 ## [0.8.0] - 2026-03-10
 
 ### Added
