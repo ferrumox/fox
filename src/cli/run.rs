@@ -7,9 +7,11 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::engine::model::{LlamaCppModel, Model};
 use crate::engine::InferenceEngine;
@@ -17,6 +19,7 @@ use crate::kv_cache::KVCacheManager;
 use crate::scheduler::{InferenceRequest, SamplingParams};
 
 use super::get_gpu_memory_bytes;
+use super::theme;
 
 #[derive(Parser, Debug)]
 pub struct RunArgs {
@@ -98,12 +101,20 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
             .init();
     }
 
-    eprint!("Loading model… ");
-    let _ = std::io::stderr().flush();
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::with_template("  {spinner:.cyan} {msg}")
+            .expect("valid template")
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    spinner.set_message("Loading model…");
+    spinner.enable_steady_tick(Duration::from_millis(80));
 
     let model = LlamaCppModel::load(&args.model_path, 1, args.max_context_len)?;
     let model_config = model.model_config();
-    eprintln!("done.");
+
+    spinner.finish_and_clear();
+    theme::print_success("Model loaded.");
 
     let gpu_memory_bytes = get_gpu_memory_bytes();
     let kv_cache = std::sync::Arc::new(KVCacheManager::new(
@@ -153,10 +164,7 @@ async fn run_oneshot(args: &RunArgs, engine: &Arc<InferenceEngine>, prompt: Stri
 async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
     let model_name = engine.model_name();
 
-    eprintln!();
-    eprintln!("Ferrumox — {}", model_name);
-    eprintln!("Type your message and press Enter. Type /bye or press Ctrl+D to exit.");
-    eprintln!();
+    theme::print_banner(model_name, args.max_context_len);
 
     // Keep the engine loop running for the lifetime of the session.
     let engine_loop = {
@@ -172,9 +180,7 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
     }
 
     loop {
-        // Print prompt indicator.
-        eprint!("You: ");
-        let _ = std::io::stderr().flush();
+        theme::print_prompt_glyph();
 
         // Read line via spawn_blocking to avoid blocking the tokio runtime thread,
         // which would starve the engine loop task running concurrently.
@@ -194,9 +200,10 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
             }
         };
 
+        eprintln!();
+
         if n == 0 {
             // EOF (Ctrl+D)
-            eprintln!();
             break;
         }
 
@@ -207,18 +214,37 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
         }
 
         if input == "/bye" || input == "/exit" || input == "exit" || input == "quit" {
-            eprintln!("Bye!");
             break;
         }
 
         messages.push(("user".to_string(), input));
 
-        eprint!("Assistant: ");
-        let _ = std::io::stderr().flush();
+        // Thinking spinner
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::with_template("  {spinner:.dim} {msg:.dim}")
+                .expect("valid template")
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+        );
+        spinner.set_message("Thinking…");
+        spinner.enable_steady_tick(Duration::from_millis(80));
 
-        let response = stream_turn_collecting(args, engine, &messages).await?;
+        let start = Instant::now();
+        let (response, token_count) =
+            stream_turn_collecting(args, engine, &messages, spinner).await?;
+        let elapsed = start.elapsed();
+
         println!();
-        eprintln!();
+        theme::eprint_styled(
+            None,
+            false,
+            true,
+            &format!(
+                "  {} tokens · {:.1}s\n\n",
+                token_count,
+                elapsed.as_secs_f64()
+            ),
+        );
 
         if response.is_empty() {
             eprintln!("(Context window full — clearing conversation history.)");
@@ -233,12 +259,13 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
     Ok(())
 }
 
-/// Run one inference turn, stream tokens to stdout, and return the full response text.
+/// Run one inference turn, stream tokens to stdout, and return `(response_text, token_count)`.
 async fn stream_turn_collecting(
     args: &RunArgs,
     engine: &Arc<InferenceEngine>,
     messages: &[(String, String)],
-) -> Result<String> {
+    spinner: ProgressBar,
+) -> Result<(String, usize)> {
     let prompt = engine.apply_chat_template(messages).unwrap_or_else(|_| {
         messages
             .iter()
@@ -260,18 +287,32 @@ async fn stream_turn_collecting(
 
     let stdout = std::io::stdout();
     let mut response = String::new();
+    let mut token_count: usize = 0;
+    let mut first_token = true;
+
     while let Some(token) = rx.recv().await {
         if !token.text.is_empty() {
+            if first_token {
+                spinner.finish_and_clear();
+                eprintln!();
+                theme::print_fox_label();
+                let _ = std::io::stderr().flush();
+                first_token = false;
+            }
             print!("{}", token.text);
             let _ = stdout.lock().flush();
             response.push_str(&token.text);
+            token_count += 1;
         }
         if token.stop_reason.is_some() {
+            if first_token {
+                spinner.finish_and_clear();
+            }
             break;
         }
     }
 
-    Ok(response)
+    Ok((response, token_count))
 }
 
 /// Run one inference turn streaming to stdout (no response collection — for one-shot mode).

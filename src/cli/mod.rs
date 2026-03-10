@@ -7,6 +7,7 @@ pub mod rm;
 pub mod run;
 pub mod serve;
 pub mod show;
+pub mod theme;
 
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};

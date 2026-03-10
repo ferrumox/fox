@@ -15,6 +15,7 @@ use crate::metrics::Metrics;
 use crate::scheduler::Scheduler;
 
 use super::get_gpu_memory_bytes;
+use super::theme;
 
 #[derive(Parser, Debug, Clone)]
 pub struct ServeArgs {
@@ -157,6 +158,13 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         .layer(tower_http::cors::CorsLayer::permissive());
 
     tracing::info!("listening on {}", addr);
+    theme::print_serve_ready(
+        args.model_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("model"),
+        &addr.to_string(),
+    );
 
     let server = axum::serve(tokio::net::TcpListener::bind(addr).await?, app);
 

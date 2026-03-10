@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
+use crossterm::style::Color;
 
+use super::theme;
 use super::{format_age, format_size, list_models, models_dir};
 
 #[derive(Parser, Debug)]
@@ -34,13 +36,8 @@ pub async fn run_list(args: ListArgs) -> Result<()> {
         .max(4);
     let name_col = max_name_len + 2;
 
-    println!(
-        "{:<width$} {:<10} MODIFIED",
-        "NAME",
-        "SIZE",
-        width = name_col
-    );
-    println!("{}", "\u{2500}".repeat(name_col + 10 + 1 + 20));
+    theme::print_table_header(&[("NAME", name_col), ("SIZE", 10), ("MODIFIED", 20)]);
+    theme::print_separator(name_col + 31);
 
     for (path, meta) in &models {
         let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
@@ -49,7 +46,11 @@ pub async fn run_list(args: ListArgs) -> Result<()> {
             .modified()
             .map(format_age)
             .unwrap_or_else(|_| "unknown".to_string());
-        println!("{:<width$} {:<10} {}", name, size, age, width = name_col);
+
+        print!("{:<width$} ", name, width = name_col);
+        theme::print_styled(Some(Color::Blue), false, false, &format!("{:<10} ", size));
+        theme::print_styled(None, false, true, &age);
+        println!();
     }
 
     Ok(())

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 
+use super::theme;
 use super::{format_age, format_size, list_models, models_dir};
 
 #[derive(Parser, Debug)]
@@ -99,12 +100,12 @@ pub async fn run_show(args: ShowArgs) -> Result<()> {
         .map(format_age)
         .unwrap_or_else(|_| "unknown".to_string());
 
-    println!("  {:<14} {}", "Name", stem);
-    println!("  {:<14} {}", "Architecture", arch);
-    println!("  {:<14} {}", "Quantization", quant);
-    println!("  {:<14} {}", "Size", size);
-    println!("  {:<14} {}", "Modified", age);
-    println!("  {:<14} {}", "Path", path.display());
+    theme::print_kv_pair("Name", stem);
+    theme::print_kv_pair("Architecture", arch);
+    theme::print_kv_pair("Quantization", quant);
+    theme::print_kv_pair("Size", &size);
+    theme::print_kv_pair("Modified", &age);
+    theme::print_kv_pair("Path", &path.display().to_string());
 
     Ok(())
 }

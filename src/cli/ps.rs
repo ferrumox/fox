@@ -6,6 +6,8 @@ use anyhow::Result;
 use clap::Parser;
 use serde::Deserialize;
 
+use super::theme;
+
 #[derive(Parser, Debug)]
 pub struct PsArgs {
     /// Port the server is running on
@@ -50,29 +52,24 @@ pub async fn run_ps(args: PsArgs) -> Result<()> {
     };
 
     let uptime = format_uptime(health.started_at);
-    let kv_pct = format!("{:.0}%", health.kv_cache_usage * 100.0);
     let name_col = health.model_name.len().max(4) + 2;
 
-    println!(
-        "{:<width$} {:<10} {:<8} {:<12} {:<9} UPTIME",
-        "NAME",
-        "STATUS",
-        "PORT",
-        "KV CACHE",
-        "QUEUE",
-        width = name_col
-    );
-    println!("{}", "\u{2500}".repeat(name_col + 10 + 8 + 12 + 9 + 10));
-    println!(
-        "{:<width$} {:<10} {:<8} {:<12} {:<9} {}",
-        health.model_name,
-        health.status,
-        args.port,
-        kv_pct,
-        health.queue_depth,
-        uptime,
-        width = name_col
-    );
+    theme::print_table_header(&[
+        ("NAME", name_col),
+        ("STATUS", 10),
+        ("PORT", 8),
+        ("KV CACHE", 12),
+        ("QUEUE", 9),
+        ("UPTIME", 10),
+    ]);
+    theme::print_separator(name_col + 49);
+
+    print!("{:<width$} ", health.model_name, width = name_col);
+    theme::print_status(&health.status, 10);
+    print!("{:<8} ", args.port);
+    theme::print_kv_cache(health.kv_cache_usage, 12);
+    print!("{:<9} ", health.queue_depth);
+    println!("{}", uptime);
 
     Ok(())
 }

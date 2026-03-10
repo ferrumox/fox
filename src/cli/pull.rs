@@ -12,6 +12,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
+use super::theme;
+
 const HF_API_BASE: &str = "https://huggingface.co/api/models";
 const HF_CDN_BASE: &str = "https://huggingface.co";
 
@@ -178,12 +180,23 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
     std::fs::rename(&tmp_dest, &dest)
         .with_context(|| format!("renaming {:?} to {:?}", tmp_dest, dest))?;
 
-    eprintln!("\nSaved to: {}", dest.display());
-    eprintln!(
-        "Run with:  fox run --model-path \"{}\" \"Your prompt here\"",
-        dest.display()
+    eprintln!();
+    theme::print_success(&format!("Saved to {}", dest.display()));
+    theme::eprint_styled(
+        None,
+        false,
+        true,
+        &format!("     Run:   fox run --model-path \"{}\"\n", dest.display()),
     );
-    eprintln!("Serve:     fox serve --model-path \"{}\"", dest.display());
+    theme::eprint_styled(
+        None,
+        false,
+        true,
+        &format!(
+            "     Serve: fox serve --model-path \"{}\"\n",
+            dest.display()
+        ),
+    );
 
     Ok(())
 }
