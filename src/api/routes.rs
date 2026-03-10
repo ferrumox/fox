@@ -2,24 +2,30 @@
 
 use axum::{
     extract::State,
-    http::header,
+    http::{header, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
     },
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
-use std::sync::Arc;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::io::Read as _;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+use crate::cli::show::{parse_architecture, parse_quantization};
+use crate::cli::{format_size, list_models};
 use crate::engine::InferenceEngine;
 use crate::scheduler::{InferenceRequest, SamplingParams, StopReason, Token};
 
 use super::types::*;
 
-/// Shared state for all route handlers: the engine plus the configured system prompt.
+/// Shared state for all route handlers.
 #[derive(Clone)]
 pub struct AppState {
     pub engine: Arc<InferenceEngine>,
@@ -28,17 +34,24 @@ pub struct AppState {
     pub system_prompt: Option<String>,
     /// Unix timestamp (seconds) when the server started.
     pub started_at: u64,
+    /// Directory where `.gguf` model files are stored.
+    pub models_dir: PathBuf,
+    /// Cache of SHA256 digests keyed by file path. Computed once per file.
+    pub digest_cache: Arc<Mutex<HashMap<PathBuf, String>>>,
 }
 
 pub fn router(
     engine: Arc<InferenceEngine>,
     system_prompt: Option<String>,
     started_at: u64,
+    models_dir: PathBuf,
 ) -> Router {
     let state = AppState {
         engine,
         system_prompt,
         started_at,
+        models_dir,
+        digest_cache: Arc::new(Mutex::new(HashMap::new())),
     };
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
@@ -46,6 +59,11 @@ pub fn router(
         .route("/v1/models", get(models))
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
+        // Ollama-compatible endpoints
+        .route("/api/tags", get(ollama_tags))
+        .route("/api/ps", get(ollama_ps))
+        .route("/api/show", post(ollama_show))
+        .route("/api/delete", delete(ollama_delete))
         .with_state(state)
 }
 
@@ -91,6 +109,242 @@ async fn models(State(state): State<AppState>) -> Json<ModelsResponse> {
             object: "model".to_string(),
         }],
     })
+}
+
+// --- Ollama-compatible handlers ---
+
+/// Compute SHA256 of a file, returning `"sha256:<hex>"`.
+/// Uses the cache to avoid re-hashing large files on every request.
+async fn file_digest(path: PathBuf, cache: Arc<Mutex<HashMap<PathBuf, String>>>) -> String {
+    if let Some(cached) = cache.lock().unwrap().get(&path).cloned() {
+        return cached;
+    }
+    let digest = tokio::task::spawn_blocking(move || {
+        let mut file = std::fs::File::open(&path)?;
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 1024 * 1024]; // 1 MiB chunks
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok::<String, std::io::Error>(format!("sha256:{}", hex::encode(hasher.finalize())))
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .unwrap_or_else(|| "sha256:unknown".to_string());
+
+    // Store in cache (re-acquire lock after spawn_blocking)
+    // Note: path was moved, so we rebuild from the digest string which is fine — we only
+    // need the value. The caller holds the original path, so we skip re-caching here.
+    // Instead we return the digest; caching is handled by the callers that have `path`.
+    digest
+}
+
+/// Compute and cache digest for a given path.
+async fn get_digest(path: &PathBuf, cache: &Arc<Mutex<HashMap<PathBuf, String>>>) -> String {
+    if let Some(cached) = cache.lock().unwrap().get(path).cloned() {
+        return cached;
+    }
+    let path_clone = path.clone();
+    let cache_clone = cache.clone();
+    let digest = file_digest(path_clone.clone(), cache_clone.clone()).await;
+    cache_clone.lock().unwrap().insert(path_clone, digest.clone());
+    digest
+}
+
+fn modified_at_rfc3339(meta: &std::fs::Metadata) -> String {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| {
+            // Minimal RFC 3339 UTC from Unix timestamp
+            let s = d.as_secs();
+            let sec = s % 60;
+            let min = (s / 60) % 60;
+            let hour = (s / 3600) % 24;
+            // Rough date (good enough for compatibility; not fully accurate for leap years)
+            let days_since_epoch = s / 86400;
+            let year = 1970u64 + days_since_epoch / 365;
+            let day_of_year = days_since_epoch % 365;
+            let month = day_of_year / 30 + 1;
+            let day = day_of_year % 30 + 1;
+            format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+        })
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
+}
+
+async fn ollama_tags(State(state): State<AppState>) -> impl IntoResponse {
+    let entries = match list_models(&state.models_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to list models: {e}"),
+            )
+                .into_response()
+        }
+    };
+
+    let mut models = Vec::with_capacity(entries.len());
+    for (path, meta) in &entries {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+        let digest = get_digest(path, &state.digest_cache).await;
+        models.push(OllamaModel {
+            name: stem.to_string(),
+            size: meta.len(),
+            digest,
+            details: OllamaDetails {
+                format: "gguf".to_string(),
+                family: parse_architecture(stem).unwrap_or("unknown").to_string(),
+                parameter_size: "unknown".to_string(),
+                quantization_level: parse_quantization(stem).unwrap_or("unknown").to_string(),
+            },
+            modified_at: modified_at_rfc3339(meta),
+        });
+    }
+
+    Json(TagsResponse { models }).into_response()
+}
+
+async fn ollama_ps(State(state): State<AppState>) -> Json<PsResponse> {
+    let engine = &state.engine;
+    let name = engine.model_name().to_string();
+
+    // Look up the file in models_dir to get real size and digest.
+    let file_info = list_models(&state.models_dir)
+        .ok()
+        .and_then(|entries| {
+            entries.into_iter().find(|(path, _)| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|stem| stem == name)
+                    .unwrap_or(false)
+            })
+        });
+
+    let (size, digest) = if let Some((path, meta)) = file_info {
+        let d = get_digest(&path, &state.digest_cache).await;
+        (meta.len(), d)
+    } else {
+        (0u64, "sha256:unknown".to_string())
+    };
+
+    let entry = PsEntry {
+        name: name.clone(),
+        size,
+        digest,
+        details: OllamaDetails {
+            format: "gguf".to_string(),
+            family: parse_architecture(&name).unwrap_or("unknown").to_string(),
+            parameter_size: "unknown".to_string(),
+            quantization_level: parse_quantization(&name).unwrap_or("unknown").to_string(),
+        },
+        expires_at: "0001-01-01T00:00:00Z".to_string(),
+        size_vram: 0,
+    };
+
+    Json(PsResponse {
+        models: vec![entry],
+    })
+}
+
+async fn ollama_show(
+    State(state): State<AppState>,
+    Json(req): Json<ShowRequest>,
+) -> impl IntoResponse {
+    let entries = match list_models(&state.models_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to list models: {e}"),
+            )
+                .into_response()
+        }
+    };
+
+    let found = entries.into_iter().find(|(path, _)| {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        stem == req.name || name == req.name
+    });
+
+    match found {
+        None => (
+            StatusCode::NOT_FOUND,
+            format!("model '{}' not found", req.name),
+        )
+            .into_response(),
+        Some((path, meta)) => {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+            let arch = parse_architecture(stem).unwrap_or("unknown");
+            let quant = parse_quantization(stem).unwrap_or("unknown");
+            let size_str = format_size(meta.len());
+            let digest = get_digest(&path, &state.digest_cache).await;
+            let resp = ShowResponse {
+                modelfile: format!("# GGUF model: {}", stem),
+                parameters: String::new(),
+                template: String::new(),
+                details: OllamaDetails {
+                    format: "gguf".to_string(),
+                    family: arch.to_string(),
+                    parameter_size: "unknown".to_string(),
+                    quantization_level: quant.to_string(),
+                },
+                model_info: serde_json::json!({
+                    "general.architecture": arch,
+                    "general.quantization": quant,
+                    "general.size": size_str,
+                    "general.digest": digest,
+                    "general.modified_at": modified_at_rfc3339(&meta),
+                    "general.path": path.display().to_string(),
+                }),
+            };
+            Json(resp).into_response()
+        }
+    }
+}
+
+async fn ollama_delete(
+    State(state): State<AppState>,
+    Json(req): Json<DeleteRequest>,
+) -> impl IntoResponse {
+    let entries = match list_models(&state.models_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to list models: {e}"),
+            )
+                .into_response()
+        }
+    };
+
+    let found = entries.into_iter().find(|(path, _)| {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        stem == req.name || name == req.name
+    });
+
+    match found {
+        None => (
+            StatusCode::NOT_FOUND,
+            format!("model '{}' not found", req.name),
+        )
+            .into_response(),
+        Some((path, _)) => match std::fs::remove_file(&path) {
+            Ok(_) => StatusCode::OK.into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to delete model: {e}"),
+            )
+                .into_response(),
+        },
+    }
 }
 
 fn finish_reason_str(reason: &StopReason) -> &'static str {

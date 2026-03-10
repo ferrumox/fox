@@ -162,6 +162,64 @@ pub struct ModelInfo {
     pub object: String,
 }
 
+// --- Ollama Compatibility ---
+
+#[derive(Debug, Serialize)]
+pub struct OllamaDetails {
+    pub format: String,
+    pub family: String,
+    pub parameter_size: String,
+    pub quantization_level: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OllamaModel {
+    pub name: String,
+    pub size: u64,
+    pub digest: String,
+    pub details: OllamaDetails,
+    pub modified_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TagsResponse {
+    pub models: Vec<OllamaModel>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PsEntry {
+    pub name: String,
+    pub size: u64,
+    pub digest: String,
+    pub details: OllamaDetails,
+    pub expires_at: String,
+    pub size_vram: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PsResponse {
+    pub models: Vec<PsEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ShowRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ShowResponse {
+    pub modelfile: String,
+    pub parameters: String,
+    pub template: String,
+    pub details: OllamaDetails,
+    pub model_info: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteRequest {
+    pub name: String,
+}
+
 // --- Health ---
 
 #[derive(Debug, Serialize)]

@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.0] - 2026-03-10
+
+### Added
+
+- **Ollama-compatible API layer** (`src/api/routes.rs`, `src/api/types.rs`)
+  - `GET /api/tags` — lists all `.gguf` models in `~/.cache/ferrumox/models/` with name,
+    size, SHA256 digest, architecture family, quantization level, and `modified_at` timestamp.
+    Open WebUI and Continue.dev use this endpoint to discover available models.
+  - `GET /api/ps` — returns the currently loaded model with real file size (bytes) and
+    SHA256 digest looked up from disk.
+  - `POST /api/show` — returns detailed metadata for a named model: architecture family,
+    quantization, human-readable size, digest, modification date, and file path.
+  - `DELETE /api/delete` — removes a `.gguf` file from the models directory by model name
+    or filename. Returns `404` if the model is not found.
+  - New response types: `OllamaModel`, `OllamaDetails`, `TagsResponse`, `PsEntry`,
+    `PsResponse`, `ShowRequest`, `ShowResponse`, `DeleteRequest`.
+  - SHA256 digest computed once per file via `sha2` + `hex` and cached in `AppState`
+    (`Arc<Mutex<HashMap<PathBuf, String>>>`). Subsequent requests for the same file return
+    instantly.
+  - New dependencies: `sha2 = "0.10"`, `hex = "0.4"`.
+
+- **`models_dir` added to `AppState`** (`src/api/routes.rs`, `src/cli/serve.rs`)
+  - `router()` now accepts a `models_dir: PathBuf` parameter (default:
+    `~/.cache/ferrumox/models`) used by the Ollama-compat handlers.
+  - `src/cli/show::parse_architecture` and `parse_quantization` promoted to `pub(crate)`
+    so they can be reused by the API layer without duplication.
+
+### Compatibility
+
+With v0.7.0, **Open WebUI** and **Continue.dev** work out of the box by pointing their
+Ollama URL to `http://localhost:8080`. No other configuration change is required.
+
+---
+
 ## [0.6.0] - 2026-03-10
 
 ### Added

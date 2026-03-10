@@ -15,6 +15,7 @@ use crate::metrics::Metrics;
 use crate::scheduler::Scheduler;
 
 use super::get_gpu_memory_bytes;
+use super::models_dir as default_models_dir;
 use super::theme;
 
 #[derive(Parser, Debug, Clone)]
@@ -154,7 +155,8 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         .unwrap_or_default()
         .as_secs();
 
-    let app = router(engine.clone(), system_prompt, started_at)
+    let models_dir = default_models_dir();
+    let app = router(engine.clone(), system_prompt, started_at, models_dir)
         .layer(tower_http::cors::CorsLayer::permissive());
 
     tracing::info!("listening on {}", addr);
