@@ -38,6 +38,8 @@ pub struct AppState {
     pub models_dir: PathBuf,
     /// Cache of SHA256 digests keyed by file path. Computed once per file.
     pub digest_cache: Arc<Mutex<HashMap<PathBuf, String>>>,
+    /// HuggingFace API token for authenticated model pulls.
+    pub hf_token: Option<String>,
 }
 
 pub fn router(
@@ -45,6 +47,7 @@ pub fn router(
     system_prompt: Option<String>,
     started_at: u64,
     models_dir: PathBuf,
+    hf_token: Option<String>,
 ) -> Router {
     let state = AppState {
         engine,
@@ -52,11 +55,13 @@ pub fn router(
         started_at,
         models_dir,
         digest_cache: Arc::new(Mutex::new(HashMap::new())),
+        hf_token,
     };
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
         .route("/v1/models", get(models))
+        .route("/v1/embeddings", post(v1_embeddings))
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
         // Ollama-compatible endpoints
@@ -64,6 +69,8 @@ pub fn router(
         .route("/api/ps", get(ollama_ps))
         .route("/api/show", post(ollama_show))
         .route("/api/delete", delete(ollama_delete))
+        .route("/api/embed", post(ollama_embed))
+        .route("/api/pull", post(super::pull_handler::ollama_pull))
         .with_state(state)
 }
 
@@ -345,6 +352,76 @@ async fn ollama_delete(
                 .into_response(),
         },
     }
+}
+
+async fn v1_embeddings(
+    State(state): State<AppState>,
+    Json(req): Json<EmbeddingRequest>,
+) -> impl IntoResponse {
+    let inputs = req.input.into_vec();
+    let engine = &state.engine;
+    let mut data = Vec::with_capacity(inputs.len());
+    let mut total_tokens = 0u32;
+
+    for (i, text) in inputs.iter().enumerate() {
+        match engine.embed(text).await {
+            Ok(embedding) => {
+                let tokens = engine.tokenize(text).map(|t| t.len()).unwrap_or(0) as u32;
+                total_tokens += tokens;
+                data.push(EmbeddingObject {
+                    object: "embedding".to_string(),
+                    embedding,
+                    index: i,
+                });
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("embedding failed: {e}"),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    Json(EmbeddingResponse {
+        object: "list".to_string(),
+        data,
+        model: req.model,
+        usage: EmbeddingUsage {
+            prompt_tokens: total_tokens,
+            total_tokens,
+        },
+    })
+    .into_response()
+}
+
+async fn ollama_embed(
+    State(state): State<AppState>,
+    Json(req): Json<OllamaEmbedRequest>,
+) -> impl IntoResponse {
+    let inputs = req.input.into_vec();
+    let engine = &state.engine;
+    let mut embeddings = Vec::with_capacity(inputs.len());
+
+    for text in &inputs {
+        match engine.embed(text).await {
+            Ok(embedding) => embeddings.push(embedding),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("embedding failed: {e}"),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    Json(OllamaEmbedResponse {
+        model: req.model,
+        embeddings,
+    })
+    .into_response()
 }
 
 fn finish_reason_str(reason: &StopReason) -> &'static str {

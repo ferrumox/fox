@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.0] - 2026-03-10
+
+### Added
+
+- **Embeddings API** — unlocks RAG pipelines (LangChain, LlamaIndex, Open WebUI RAG, etc.)
+  - `POST /v1/embeddings` — OpenAI-compatible endpoint; accepts `input` as a string or array
+    of strings, returns `data[].embedding` vectors.
+  - `POST /api/embed` — Ollama-compatible endpoint; returns `embeddings: [[f32]]`.
+  - `InferenceEngine::embed()` async method; `Model::get_embeddings()` + `Model::embedding_dim()`
+    trait methods with full `LlamaCppModel` implementation via `llama_set_embeddings` /
+    `llama_get_embeddings_seq` FFI and stub fallback.
+  - New types: `EmbeddingInput` (untagged enum for String/Vec<String>), `EmbeddingRequest`,
+    `EmbeddingObject`, `EmbeddingUsage`, `EmbeddingResponse`, `OllamaEmbedRequest`,
+    `OllamaEmbedResponse`.
+
+- **`POST /api/pull` with SSE streaming** — download models from HuggingFace Hub via the
+  server API, identical to Ollama's pull flow.
+  - Emits newline-delimited JSON events: `pulling manifest` → `downloading` (with `digest`,
+    `total`, `completed` bytes) → `verifying sha256 digest` → `success`.
+  - Automatically selects Q4_K_M quantization when available, otherwise picks the first GGUF.
+  - New `--hf-token` flag on `fox serve` (also `HF_TOKEN` env var) forwarded to pulls.
+  - New `AppState.hf_token` field; new file `src/api/pull_handler.rs`.
+  - New types: `PullRequest`, `PullStatus`.
+
+- **Release binaries + `install.sh`** — one-command installation.
+  - `.github/workflows/release.yml` — triggered on `v*` tags; builds for four targets:
+    `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`,
+    `aarch64-apple-darwin`. Uploads tarballs as GitHub Release assets.
+  - `install.sh` — detects OS + arch, downloads the correct tarball, installs to
+    `/usr/local/bin/fox` (configurable via `--prefix`).
+  - `fox.service` — systemd unit for running `fox serve` as a daemon.
+
+### Changed
+
+- `Cargo.toml`: version bumped to `0.8.0`.
+- `src/api/routes.rs`: `router()` now takes an extra `hf_token: Option<String>` parameter.
+- `src/cli/serve.rs`: `ServeArgs` gains `--hf-token` / `HF_TOKEN`.
+
+---
+
 ## [0.7.0] - 2026-03-10
 
 ### Added

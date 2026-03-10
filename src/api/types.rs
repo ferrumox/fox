@@ -220,6 +220,83 @@ pub struct DeleteRequest {
     pub name: String,
 }
 
+// --- Embeddings (OpenAI-compatible) ---
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum EmbeddingInput {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl EmbeddingInput {
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            EmbeddingInput::Single(s) => vec![s],
+            EmbeddingInput::Multiple(v) => v,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EmbeddingRequest {
+    pub model: String,
+    pub input: EmbeddingInput,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbeddingObject {
+    pub object: String,
+    pub embedding: Vec<f32>,
+    pub index: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbeddingUsage {
+    pub prompt_tokens: u32,
+    pub total_tokens: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbeddingResponse {
+    pub object: String,
+    pub data: Vec<EmbeddingObject>,
+    pub model: String,
+    pub usage: EmbeddingUsage,
+}
+
+// --- Embeddings (Ollama-compatible) ---
+
+#[derive(Debug, Deserialize)]
+pub struct OllamaEmbedRequest {
+    pub model: String,
+    pub input: EmbeddingInput,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OllamaEmbedResponse {
+    pub model: String,
+    pub embeddings: Vec<Vec<f32>>,
+}
+
+// --- Pull (Ollama-compatible) ---
+
+#[derive(Debug, Deserialize)]
+pub struct PullRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PullStatus {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed: Option<u64>,
+}
+
 // --- Health ---
 
 #[derive(Debug, Serialize)]

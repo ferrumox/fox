@@ -71,6 +71,11 @@ pub struct ServeArgs {
     /// Use JSON log format (for production)
     #[arg(long, env = "FOX_JSON_LOGS")]
     pub json_logs: bool,
+
+    /// HuggingFace API token for authenticated model pulls via POST /api/pull.
+    /// Can also be set with the HF_TOKEN environment variable.
+    #[arg(long, env = "HF_TOKEN")]
+    pub hf_token: Option<String>,
 }
 
 pub async fn run_serve(args: ServeArgs) -> Result<()> {
@@ -156,7 +161,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         .as_secs();
 
     let models_dir = default_models_dir();
-    let app = router(engine.clone(), system_prompt, started_at, models_dir)
+    let app = router(engine.clone(), system_prompt, started_at, models_dir, args.hf_token)
         .layer(tower_http::cors::CorsLayer::permissive());
 
     tracing::info!("listening on {}", addr);
