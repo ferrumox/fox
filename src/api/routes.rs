@@ -2,7 +2,11 @@
 
 use axum::{
     extract::State,
-    response::{IntoResponse, sse::{Event, KeepAlive, Sse}},
+    http::header,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
     routing::{get, post},
     Json, Router,
 };
@@ -21,7 +25,30 @@ pub fn router(engine: Arc<InferenceEngine>) -> Router {
         .route("/v1/completions", post(completions))
         .route("/v1/models", get(models))
         .route("/health", get(health))
+        .route("/metrics", get(metrics_handler))
         .with_state(engine)
+}
+
+/// Prometheus text-format scrape endpoint.
+async fn metrics_handler() -> impl IntoResponse {
+    let encoder = prometheus::TextEncoder::new();
+    let metric_families = prometheus::gather();
+    let mut body = String::new();
+    if let Err(e) = encoder.encode_utf8(&metric_families, &mut body) {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain")],
+            format!("metrics encoding error: {e}"),
+        );
+    }
+    (
+        axum::http::StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
 }
 
 async fn health(State(engine): State<Arc<InferenceEngine>>) -> Json<HealthResponse> {
@@ -48,6 +75,7 @@ fn finish_reason_str(reason: &StopReason) -> &'static str {
         StopReason::Eos => "stop",
         StopReason::Length => "length",
         StopReason::Preempt => "stop",
+        StopReason::StopSequence => "stop",
     }
 }
 
@@ -70,17 +98,21 @@ async fn chat_completions(
         .collect();
     // Prepend system message if missing (helps Qwen, Llama, etc. generate properly)
     if messages.first().map(|(r, _)| r.as_str()) != Some("system") {
-        messages.insert(0, ("system".to_string(), "You are a helpful assistant.".to_string()));
+        messages.insert(
+            0,
+            (
+                "system".to_string(),
+                "You are a helpful assistant.".to_string(),
+            ),
+        );
     }
-    let prompt = engine
-        .apply_chat_template(&messages)
-        .unwrap_or_else(|_| {
-            messages
-                .iter()
-                .map(|(r, c)| format!("{}: {}", r, c))
-                .collect::<Vec<_>>()
-                .join("\n")
-        });
+    let prompt = engine.apply_chat_template(&messages).unwrap_or_else(|_| {
+        messages
+            .iter()
+            .map(|(r, c)| format!("{}: {}", r, c))
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
 
     // Tokenize using model's vocabulary
     let prompt_tokens: Vec<i32> = engine.tokenize(&prompt).unwrap_or_else(|_| {
@@ -98,6 +130,7 @@ async fn chat_completions(
         top_k: req.top_k.unwrap_or(0),
         repetition_penalty: req.repetition_penalty.unwrap_or(1.0).max(1.0),
         seed: req.seed,
+        stop: req.stop.clone(),
     };
     let prompt_tokens_len = prompt_tokens.len();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
@@ -108,10 +141,21 @@ async fn chat_completions(
 
     if req.stream {
         let stream = async_stream::stream! {
+            let mut completion_tokens: u32 = 0;
             while let Some(token) = rx.recv().await {
                 let content = token.text.clone();
                 let is_done = token.stop_reason.is_some();
                 let finish_reason = token.stop_reason.as_ref().map(finish_reason_str).map(str::to_string);
+                completion_tokens += 1;
+                let usage = if is_done {
+                    Some(Usage {
+                        prompt_tokens: prompt_tokens_len as u32,
+                        completion_tokens,
+                        total_tokens: prompt_tokens_len as u32 + completion_tokens,
+                    })
+                } else {
+                    None
+                };
                 let chunk = ChatCompletionChunk {
                     id: id.clone(),
                     object: "chat.completion.chunk".to_string(),
@@ -125,6 +169,7 @@ async fn chat_completions(
                         },
                         finish_reason,
                     }],
+                    usage,
                 };
                 let event = Event::default()
                     .json_data(chunk)
@@ -194,6 +239,7 @@ async fn completions(
         top_k: None,
         repetition_penalty: None,
         seed: None,
+        stop: None,
         stream: req.stream,
     };
 

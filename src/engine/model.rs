@@ -1,16 +1,26 @@
 // Model trait and LlamaCppModel implementation.
 // Uses llama.cpp FFI for GGUF loading and inference.
 
+#[cfg(not(ferrum_stub))]
 use std::cmp::Ordering;
+#[cfg(not(ferrum_stub))]
 use std::ffi::CString;
+#[cfg(not(ferrum_stub))]
 use std::os::raw::c_char;
+#[cfg(not(ferrum_stub))]
 use std::ptr::NonNull;
+#[cfg(not(ferrum_stub))]
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
-use rand::{Rng, SeedableRng};
+#[cfg(not(ferrum_stub))]
+use anyhow::anyhow;
+use anyhow::Result;
+#[cfg(not(ferrum_stub))]
 use rand::rngs::StdRng;
+#[cfg(not(ferrum_stub))]
+use rand::{Rng, SeedableRng};
 
+#[cfg(not(ferrum_stub))]
 use super::ffi;
 
 /// Model architecture configuration.
@@ -32,7 +42,10 @@ pub struct Logits {
 
 impl Logits {
     pub fn new(values: Vec<f32>, sampled_token: i32) -> Self {
-        Self { values, sampled_token }
+        Self {
+            values,
+            sampled_token,
+        }
     }
 }
 
@@ -60,6 +73,14 @@ pub struct InferenceRequestForModel {
     pub seed: Option<u64>,
     /// Previously generated token IDs (for repetition penalty).
     pub generated_token_ids: Vec<i32>,
+    /// Number of prompt tokens already in the KV cache from a prefix hit.
+    /// `do_prefill` submits only `prompt_tokens[skip_prefix_tokens..]` starting at
+    /// position `skip_prefix_tokens`.
+    pub skip_prefix_tokens: usize,
+    /// Sequence ID that holds the cached prefix KV data. When set, `do_prefill` calls
+    /// `llama_memory_seq_cp` to transfer positions 0..skip_prefix_tokens before adding
+    /// the remaining tokens to the batch.
+    pub prefix_seq_id: Option<i32>,
 }
 
 /// Backend model trait.
@@ -94,9 +115,22 @@ pub trait Model: Send + Sync {
     /// Must be called before a seq_id is reused for a new request; otherwise the new request
     /// will inherit stale positions from the previous occupant and llama_decode will fail.
     fn clear_sequence(&self, seq_id: i32);
+
+    /// Copy `token_count` tokens worth of KV cache from `src_seq_id` to `dst_seq_id`
+    /// (positions 0..token_count). Used by prefix caching: before prefilling a request whose
+    /// prompt matches a completed one, we copy the KV data so only the non-cached suffix
+    /// needs to be computed.
+    fn copy_sequence_range(&self, src_seq_id: i32, dst_seq_id: i32, token_count: i32);
+
+    /// Returns true if the loaded model's memory backend supports sequence copying
+    /// (`llama_memory_seq_cp`).  Standard transformer (attention-only) models return true;
+    /// recurrent / hybrid models (Mamba, Qwen3.5, etc.) return false.
+    /// Prefix caching must be disabled when this returns false.
+    fn supports_seq_copy(&self) -> bool;
 }
 
 /// Sample the highest-probability token (deterministic).
+#[cfg(not(ferrum_stub))]
 fn sample_greedy(logits: &[f32]) -> i32 {
     logits
         .iter()
@@ -107,6 +141,7 @@ fn sample_greedy(logits: &[f32]) -> i32 {
 }
 
 /// Apply repetition penalty in-place: divide positive logits and multiply negative ones.
+#[cfg(not(ferrum_stub))]
 fn apply_repetition_penalty(logits: &mut [f32], token_ids: &[i32], penalty: f32) {
     for &tid in token_ids {
         if tid >= 0 && (tid as usize) < logits.len() {
@@ -116,20 +151,33 @@ fn apply_repetition_penalty(logits: &mut [f32], token_ids: &[i32], penalty: f32)
     }
 }
 
-/// Full stochastic sampler: repetition penalty → temperature → top-K → top-P → weighted draw.
-///
-/// When `temperature` ≤ 0 the function falls back to greedy regardless of other parameters.
-/// The RNG is seeded per-request for reproducibility when `seed` is provided.
-fn sample_token(
-    logits: &[f32],
+/// Parameters for the full stochastic sampler.
+#[cfg(not(ferrum_stub))]
+struct SamplerParams<'a> {
     temperature: f32,
     top_p: f32,
     top_k: u32,
     repetition_penalty: f32,
-    generated_ids: &[i32],
+    generated_ids: &'a [i32],
     seed: Option<u64>,
     token_count: usize,
-) -> i32 {
+}
+
+/// Full stochastic sampler: repetition penalty → temperature → top-K → top-P → weighted draw.
+///
+/// When `temperature` ≤ 0 the function falls back to greedy regardless of other parameters.
+/// The RNG is seeded per-request for reproducibility when `seed` is provided.
+#[cfg(not(ferrum_stub))]
+fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
+    let SamplerParams {
+        temperature,
+        top_p,
+        top_k,
+        repetition_penalty,
+        generated_ids,
+        seed,
+        token_count,
+    } = p;
     let mut logits = logits.to_vec();
 
     // 1. Repetition penalty
@@ -215,7 +263,11 @@ pub struct LlamaCppModel {
 #[cfg(not(ferrum_stub))]
 impl LlamaCppModel {
     /// Load a GGUF model from path.
-    pub fn load(model_path: &std::path::Path, max_batch_size: usize, max_context_len: u32) -> Result<Self> {
+    pub fn load(
+        model_path: &std::path::Path,
+        max_batch_size: usize,
+        max_context_len: u32,
+    ) -> Result<Self> {
         unsafe {
             ffi::llama_backend_init();
         }
@@ -226,10 +278,9 @@ impl LlamaCppModel {
         let path_c = CString::new(path_cstr)?;
 
         let model_params = unsafe { ffi::llama_model_default_params() };
-        let model = unsafe {
-            ffi::llama_model_load_from_file(path_c.as_ptr(), model_params)
-        };
-        let model = NonNull::new(model).ok_or_else(|| anyhow!("llama_model_load_from_file failed"))?;
+        let model = unsafe { ffi::llama_model_load_from_file(path_c.as_ptr(), model_params) };
+        let model =
+            NonNull::new(model).ok_or_else(|| anyhow!("llama_model_load_from_file failed"))?;
 
         let vocab = unsafe { ffi::llama_model_get_vocab(model.as_ptr()) };
         if vocab.is_null() {
@@ -259,17 +310,20 @@ impl LlamaCppModel {
         ctx_params.n_batch = max_context_len.max(max_batch_size as u32);
         ctx_params.n_seq_max = 64;
 
-        let ctx = unsafe {
-            ffi::llama_init_from_model(model.as_ptr(), ctx_params)
-        };
+        let ctx = unsafe { ffi::llama_init_from_model(model.as_ptr(), ctx_params) };
         let ctx = NonNull::new(ctx).ok_or_else(|| {
             unsafe { ffi::llama_model_free(model.as_ptr()) };
             anyhow!("llama_init_from_model failed")
         })?;
 
+        // SAFETY: We manually implement Send + Sync for LlamaCppModel below.
+        // The Arc<Mutex<NonNull<...>>> is intentionally used here for shared ownership
+        // across clone (e.g. future multi-backend); the unsafe impls guarantee thread safety.
+        #[allow(clippy::arc_with_non_send_sync)]
+        let ctx_arc = Arc::new(std::sync::Mutex::new(ctx));
         Ok(Self {
             _model: model,
-            _ctx: Arc::new(std::sync::Mutex::new(ctx)),
+            _ctx: ctx_arc,
             vocab,
             config,
             eos_token,
@@ -333,7 +387,7 @@ impl LlamaCppModel {
                     token,
                     buf.as_mut_ptr() as *mut c_char,
                     buf.len() as i32,
-                    0,   // lstrip: keep leading spaces so words don't concatenate (e.g. "¡Hola!¿Enquépuedo...")
+                    0, // lstrip: keep leading spaces so words don't concatenate (e.g. "¡Hola!¿Enquépuedo...")
                     true, // special
                 )
             };
@@ -346,7 +400,7 @@ impl LlamaCppModel {
                         token,
                         buf.as_mut_ptr() as *mut c_char,
                         buf.len() as i32,
-                        0,   // lstrip: keep leading spaces
+                        0, // lstrip: keep leading spaces
                         true,
                     )
                 };
@@ -409,7 +463,7 @@ impl LlamaCppModel {
                     std::ffi::CStr::from_ptr(p).to_str().ok().map(|s| s as &str)
                 }
             };
-            if let Some(ref s) = from_model {
+            if let Some(s) = from_model {
                 vec![Some(s)]
             } else {
                 vec![None]
@@ -418,12 +472,12 @@ impl LlamaCppModel {
 
         // Built-in template names - llama_chat_apply_template looks them up by name
         let fallback_names = [
-            "chatml",      // Qwen, Phi, OpenHermes, many models
-            "llama3",      // Meta Llama 3
-            "phi3",        // Microsoft Phi-3
-            "llama2",      // Meta Llama 2, Mistral
-            "mistral-v1",  // Mistral
-            "gemma",       // Google Gemma
+            "chatml",     // Qwen, Phi, OpenHermes, many models
+            "llama3",     // Meta Llama 3
+            "phi3",       // Microsoft Phi-3
+            "llama2",     // Meta Llama 2, Mistral
+            "mistral-v1", // Mistral
+            "gemma",      // Google Gemma
         ];
 
         let mut template_strings: Vec<String> = templates_to_try
@@ -495,22 +549,75 @@ impl LlamaCppModel {
             return Ok(vec![]);
         }
 
-        let total_tokens: usize = requests.iter().map(|r| r.prompt_tokens.len()).sum();
+        // Copy cached prefix KV data into each request's sequence BEFORE building the batch.
+        //
+        // We copy positions 0..skip_prefix_tokens-1 (exclusive of the last "cached" position) so
+        // that the last prefix token is always re-submitted in the batch below.  This guarantees:
+        //   (a) the logits for the boundary position are freshly computed (not stale from seq_cp),
+        //   (b) total_tokens is always ≥ 1, avoiding an invalid pos=context_len decode call.
+        {
+            let ctx_guard = self
+                ._ctx
+                .lock()
+                .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+            let ctx = ctx_guard.as_ptr();
+            unsafe {
+                let mem = ffi::llama_get_memory(ctx as *const _);
+                if !mem.is_null() {
+                    // Only attempt seq_cp if the memory backend supports it.
+                    let can_copy = ffi::llama_memory_can_shift(mem);
+                    for req in requests.iter() {
+                        if let Some(src) = req.prefix_seq_id {
+                            if !can_copy {
+                                // Recurrent/hybrid model — seq_cp not supported; skip.
+                                continue;
+                            }
+                            // copy 0..skip-1; skip-1 position will be re-submitted in the batch
+                            let copy_end = req.skip_prefix_tokens.saturating_sub(1) as i32;
+                            if copy_end > 0 {
+                                ffi::llama_memory_seq_cp(mem, src, req.kv_seq_id, 0, copy_end);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Effective start of submission: one token before skip_prefix_tokens so the boundary
+        // position is always freshly computed (see seq_cp comment above).
+        let effective_skip = |r: &InferenceRequestForModel| {
+            r.skip_prefix_tokens
+                .saturating_sub(1)
+                .min(r.prompt_tokens.len())
+        };
+
+        let total_tokens: usize = requests
+            .iter()
+            .map(|r| r.prompt_tokens.len() - effective_skip(r))
+            .sum();
+
+        // total_tokens ≥ 1 because effective_skip < prompt_tokens.len() for any non-empty prompt.
         let n_seq_max = requests.len().max(1) as i32;
 
-        let mut batch = unsafe {
-            ffi::llama_batch_init(total_tokens as i32, 0, n_seq_max)
-        };
+        let mut batch = unsafe { ffi::llama_batch_init(total_tokens as i32, 0, n_seq_max) };
 
         let mut batch_logits_indices: Vec<i32> = Vec::with_capacity(requests.len());
         for req in requests.iter() {
             let seq_id = req.kv_seq_id;
-            for (pos, &token) in req.prompt_tokens.iter().enumerate() {
+            let start = effective_skip(req);
+            let tokens_to_submit = &req.prompt_tokens[start..];
+            if tokens_to_submit.is_empty() {
+                // Should be handled by the total_tokens == 0 branch above, but be defensive.
+                batch_logits_indices.push(-1);
+                continue;
+            }
+            for (local_pos, &token) in tokens_to_submit.iter().enumerate() {
+                let abs_pos = start + local_pos;
                 let idx = batch.n_tokens as usize;
-                let has_logits = pos == req.prompt_tokens.len() - 1;
+                let has_logits = abs_pos == req.prompt_tokens.len() - 1;
                 unsafe {
                     *batch.token.add(idx) = token;
-                    *batch.pos.add(idx) = pos as i32;
+                    *batch.pos.add(idx) = abs_pos as i32;
                     *batch.n_seq_id.add(idx) = 1;
                     let arr = *batch.seq_id.add(idx);
                     *arr.add(0) = seq_id;
@@ -523,7 +630,10 @@ impl LlamaCppModel {
             }
         }
 
-        let ctx_guard = self._ctx.lock().map_err(|e| anyhow!("lock poisoned: {}", e))?;
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
         let ctx = ctx_guard.as_ptr();
 
         let ret = unsafe { ffi::llama_decode(ctx, batch) };
@@ -547,17 +657,20 @@ impl LlamaCppModel {
                 results.push((req_id, Logits::new(vec![], self.eos_token)));
                 continue;
             }
-            let logits_slice: &[f32] = unsafe {
-                std::slice::from_raw_parts(logits_ptr, n_vocab as usize)
-            };
+            let logits_slice: &[f32] =
+                unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
             let sampled = if let Some(r) = req {
                 sample_token(
                     logits_slice,
-                    r.temperature, r.top_p, r.top_k,
-                    r.repetition_penalty,
-                    &r.generated_token_ids,
-                    r.seed,
-                    r.generated_tokens,
+                    SamplerParams {
+                        temperature: r.temperature,
+                        top_p: r.top_p,
+                        top_k: r.top_k,
+                        repetition_penalty: r.repetition_penalty,
+                        generated_ids: &r.generated_token_ids,
+                        seed: r.seed,
+                        token_count: r.generated_tokens,
+                    },
                 )
             } else {
                 sample_greedy(logits_slice)
@@ -583,10 +696,12 @@ impl LlamaCppModel {
         let mut batch = unsafe { ffi::llama_batch_init(n_tokens, 0, n_tokens) };
 
         for (batch_slot, req) in requests.iter().enumerate() {
-            let input_token = req.last_token.or_else(|| req.prompt_tokens.last().copied())
+            let input_token = req
+                .last_token
+                .or_else(|| req.prompt_tokens.last().copied())
                 .unwrap_or(self.eos_token);
             let pos = req.context_len as i32;
-            let seq_id = req.kv_seq_id;  // stable ID — never the batch slot index
+            let seq_id = req.kv_seq_id; // stable ID — never the batch slot index
 
             unsafe {
                 *batch.token.add(batch_slot) = input_token;
@@ -599,7 +714,10 @@ impl LlamaCppModel {
             batch.n_tokens += 1;
         }
 
-        let ctx_guard = self._ctx.lock().map_err(|e| anyhow!("lock poisoned: {}", e))?;
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
         let ctx = ctx_guard.as_ptr();
 
         let ret = unsafe { ffi::llama_decode(ctx, batch) };
@@ -618,17 +736,20 @@ impl LlamaCppModel {
                 results.push((req_id, Logits::new(vec![], self.eos_token)));
                 continue;
             }
-            let logits_slice: &[f32] = unsafe {
-                std::slice::from_raw_parts(logits_ptr, n_vocab as usize)
-            };
+            let logits_slice: &[f32] =
+                unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
             let sampled = if let Some(r) = req {
                 sample_token(
                     logits_slice,
-                    r.temperature, r.top_p, r.top_k,
-                    r.repetition_penalty,
-                    &r.generated_token_ids,
-                    r.seed,
-                    r.generated_tokens,
+                    SamplerParams {
+                        temperature: r.temperature,
+                        top_p: r.top_p,
+                        top_k: r.top_k,
+                        repetition_penalty: r.repetition_penalty,
+                        generated_ids: &r.generated_token_ids,
+                        seed: r.seed,
+                        token_count: r.generated_tokens,
+                    },
                 )
             } else {
                 sample_greedy(logits_slice)
@@ -696,6 +817,38 @@ impl Model for LlamaCppModel {
                 // p0=0, p1=-1 means "remove all positions for this sequence"
                 ffi::llama_memory_seq_rm(mem, seq_id, 0, -1);
             }
+        }
+    }
+
+    fn copy_sequence_range(&self, src_seq_id: i32, dst_seq_id: i32, token_count: i32) {
+        if token_count <= 0 {
+            return;
+        }
+        let ctx_guard = match self._ctx.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        unsafe {
+            let mem = ffi::llama_get_memory(ctx_guard.as_ptr() as *const _);
+            if !mem.is_null() {
+                ffi::llama_memory_seq_cp(mem, src_seq_id, dst_seq_id, 0, token_count);
+            }
+        }
+    }
+
+    fn supports_seq_copy(&self) -> bool {
+        let ctx_guard = match self._ctx.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        unsafe {
+            let mem = ffi::llama_get_memory(ctx_guard.as_ptr() as *const _);
+            if mem.is_null() {
+                return false;
+            }
+            // llama_memory_can_shift returns true for standard attention KV caches
+            // (which also support seq_cp).  Recurrent/hybrid models return false.
+            ffi::llama_memory_can_shift(mem)
         }
     }
 }
@@ -786,4 +939,10 @@ impl Model for LlamaCppModel {
     }
 
     fn clear_sequence(&self, _seq_id: i32) {}
+
+    fn copy_sequence_range(&self, _src_seq_id: i32, _dst_seq_id: i32, _token_count: i32) {}
+
+    fn supports_seq_copy(&self) -> bool {
+        false
+    }
 }

@@ -3,8 +3,8 @@
 // Total blocks computed from: gpu_memory_bytes * fraction / bytes_per_block
 // bytes_per_block = block_size × num_layers × num_heads_kv × head_dim × 2 (K+V) × 2 (f16)
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use anyhow::Result;
 use tracing::debug;
@@ -13,6 +13,46 @@ use crate::engine::model::ModelConfig;
 
 /// Physical block ID in the KV cache pool.
 pub type BlockId = usize;
+
+/// Logical-to-physical page table for a single request.
+///
+/// `entries[logical_block_index] = physical_block_id`
+///
+/// This explicit struct replaces the flat `Vec<BlockId>` so the logical→physical
+/// mapping is named and opaque to callers. It is also the integration point for
+/// future copy-on-write: when a block is shared (ref_count > 1) the caller must
+/// call `KVCacheManager::copy_on_write` before writing to it.
+#[derive(Debug, Clone, Default)]
+pub struct PageTable {
+    pub entries: Vec<BlockId>,
+}
+
+impl PageTable {
+    pub fn new(block_ids: Vec<BlockId>) -> Self {
+        Self { entries: block_ids }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn block_ids(&self) -> &[BlockId] {
+        &self.entries
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Extend the page table with newly allocated blocks.
+    pub fn extend(&mut self, ids: impl IntoIterator<Item = BlockId>) {
+        self.entries.extend(ids);
+    }
+}
 
 /// Configuration for KV cache sizing.
 /// Blocks = gpu_memory_bytes * fraction / bytes_per_block
@@ -37,7 +77,12 @@ fn compute_total_blocks(
 }
 
 /// Thread-safe KV cache block manager.
+///
 /// Uses a free list for O(1) allocation and deallocation.
+/// Maintains a per-block reference count to support copy-on-write semantics:
+/// when a block is shared between requests (e.g. via prefix caching), its
+/// ref_count > 1. A write to a shared block must first call `copy_on_write`
+/// to obtain an exclusive copy.
 #[derive(Debug)]
 pub struct KVCacheManager {
     /// Total number of blocks in the pool
@@ -48,6 +93,9 @@ pub struct KVCacheManager {
     free_list: Mutex<Vec<BlockId>>,
     /// Number of currently allocated blocks (for memory_usage)
     allocated_count: AtomicUsize,
+    /// Per-block reference count. ref_count[id] == 0 means the block is free.
+    /// ref_count[id] > 1 means the block is shared; CoW required before write.
+    ref_count: Vec<AtomicUsize>,
 }
 
 impl KVCacheManager {
@@ -74,11 +122,11 @@ impl KVCacheManager {
         );
 
         let free_list: Vec<BlockId> = (0..total_blocks).collect();
+        let ref_count: Vec<AtomicUsize> = (0..total_blocks).map(|_| AtomicUsize::new(0)).collect();
+
         debug!(
             total_blocks,
-            block_size,
-            gpu_memory_bytes,
-            "KV cache manager initialized"
+            block_size, gpu_memory_bytes, "KV cache manager initialized"
         );
 
         Self {
@@ -86,6 +134,7 @@ impl KVCacheManager {
             block_size,
             free_list: Mutex::new(free_list),
             allocated_count: AtomicUsize::new(0),
+            ref_count,
         }
     }
 
@@ -97,30 +146,91 @@ impl KVCacheManager {
         guard.len() >= n
     }
 
-    /// Allocate n blocks. Returns block IDs.
+    /// Allocate n blocks. Returns block IDs with ref_count set to 1.
     pub fn allocate(&self, n: usize) -> Result<Vec<BlockId>> {
-        let mut guard = self.free_list.lock().map_err(|e| anyhow::anyhow!("lock poisoned: {}", e))?;
+        let mut guard = self
+            .free_list
+            .lock()
+            .map_err(|e| anyhow::anyhow!("lock poisoned: {}", e))?;
         if guard.len() < n {
-            anyhow::bail!("Insufficient KV cache blocks: need {}, have {}", n, guard.len());
+            anyhow::bail!(
+                "Insufficient KV cache blocks: need {}, have {}",
+                n,
+                guard.len()
+            );
         }
         let mut ids = Vec::with_capacity(n);
         for _ in 0..n {
-            ids.push(guard.pop().expect("len checked"));
+            let id = guard.pop().expect("len checked");
+            self.ref_count[id].store(1, Ordering::Relaxed);
+            ids.push(id);
         }
         self.allocated_count.fetch_add(n, Ordering::Relaxed);
         Ok(ids)
     }
 
-    /// Free blocks by their IDs.
+    /// Decrement the reference count for each block.
+    /// A block is returned to the free list only when its ref_count reaches zero.
     pub fn free_blocks(&self, ids: &[BlockId]) {
         let mut guard = match self.free_list.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
+        let mut actually_freed = 0usize;
         for &id in ids {
-            guard.push(id);
+            if id >= self.total_blocks {
+                continue;
+            }
+            let prev = self.ref_count[id].fetch_sub(1, Ordering::AcqRel);
+            if prev <= 1 {
+                // ref_count hit zero (or was already zero — defensive): return to free list
+                self.ref_count[id].store(0, Ordering::Relaxed);
+                guard.push(id);
+                actually_freed += 1;
+            }
         }
-        self.allocated_count.fetch_sub(ids.len(), Ordering::Relaxed);
+        if actually_freed > 0 {
+            self.allocated_count
+                .fetch_sub(actually_freed, Ordering::Relaxed);
+        }
+    }
+
+    /// Increment the reference count of a block (used when sharing a block between requests
+    /// for prefix caching). The caller must eventually call `free_blocks` to release their hold.
+    pub fn retain_block(&self, id: BlockId) {
+        if id < self.total_blocks {
+            self.ref_count[id].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Copy-on-write: if `block_id` is shared (ref_count > 1), allocate a new exclusive
+    /// block and decrement the shared block's ref_count. Returns the new block ID.
+    /// Returns `None` if the block is already exclusive (ref_count == 1).
+    ///
+    /// Note: This only updates our block-tracking layer. The caller is responsible for
+    /// copying the actual KV data in llama.cpp via `model.copy_sequence_range`.
+    pub fn copy_on_write(&self, block_id: BlockId) -> Option<BlockId> {
+        if block_id >= self.total_blocks {
+            return None;
+        }
+        let rc = self.ref_count[block_id].load(Ordering::Acquire);
+        if rc <= 1 {
+            return None; // already exclusive
+        }
+        // Allocate a new block
+        let new_ids = self.allocate(1).ok()?;
+        let new_id = new_ids[0];
+        // Release our share of the old block
+        let prev = self.ref_count[block_id].fetch_sub(1, Ordering::AcqRel);
+        if prev <= 1 {
+            // Unlikely: another thread raced and freed it; put it back to free list
+            self.ref_count[block_id].store(0, Ordering::Relaxed);
+            if let Ok(mut guard) = self.free_list.lock() {
+                guard.push(block_id);
+            }
+            self.allocated_count.fetch_sub(1, Ordering::Relaxed);
+        }
+        Some(new_id)
     }
 
     /// Append one block for a request. Returns the block ID if allocated.
@@ -190,5 +300,64 @@ mod tests {
         let usage = mgr.memory_usage();
         assert!(usage > 0.0 && usage <= 1.0);
         mgr.free_blocks(&ids);
+    }
+
+    #[test]
+    fn test_ref_count_sharing() {
+        let config = test_model_config();
+        let mgr = KVCacheManager::new(&config, 1_000_000_000, 0.5, 16);
+
+        let ids = mgr.allocate(1).unwrap();
+        let id = ids[0];
+
+        // Retain shares the block (ref_count = 2)
+        mgr.retain_block(id);
+        assert_eq!(mgr.ref_count[id].load(Ordering::Relaxed), 2);
+
+        // Free once: ref_count = 1, block stays allocated
+        mgr.free_blocks(&[id]);
+        assert_eq!(mgr.ref_count[id].load(Ordering::Relaxed), 1);
+
+        // Free again: ref_count = 0, block goes back to free list
+        mgr.free_blocks(&[id]);
+        assert_eq!(mgr.ref_count[id].load(Ordering::Relaxed), 0);
+        assert!(mgr.can_allocate(1));
+    }
+
+    #[test]
+    fn test_copy_on_write() {
+        let config = test_model_config();
+        let mgr = KVCacheManager::new(&config, 1_000_000_000, 0.5, 16);
+
+        let ids = mgr.allocate(1).unwrap();
+        let id = ids[0];
+
+        // Exclusive block: CoW returns None
+        assert!(mgr.copy_on_write(id).is_none());
+
+        // Share the block
+        mgr.retain_block(id);
+
+        // CoW on shared block: returns a new block ID
+        let new_id = mgr.copy_on_write(id).expect("should CoW a shared block");
+        assert_ne!(new_id, id);
+
+        // Old block ref_count drops to 1 (was 2)
+        assert_eq!(mgr.ref_count[id].load(Ordering::Relaxed), 1);
+
+        mgr.free_blocks(&[id]);
+        mgr.free_blocks(&[new_id]);
+    }
+
+    #[test]
+    fn test_page_table() {
+        let ids = vec![0usize, 1, 2];
+        let pt = PageTable::new(ids.clone());
+        assert_eq!(pt.len(), 3);
+        assert_eq!(pt.block_ids(), ids.as_slice());
+        assert!(!pt.is_empty());
+
+        let empty = PageTable::default();
+        assert!(empty.is_empty());
     }
 }
