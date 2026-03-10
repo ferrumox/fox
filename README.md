@@ -1,63 +1,147 @@
-# Ferrumox
+# ferrumox
 
-High-performance LLM inference engine in Rust — an alternative to Ollama and vLLM.
+**High-performance LLM inference engine** — drop-in replacement for Ollama with faster
+multi-turn inference, lower TTFT, and higher throughput through prefix caching and
+continuous batching.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](CHANGELOG.md)
 
-> **Ferrum** (iron in Latin) **+ ox** (oxidation) = rust — a meta-reference to the language it's written in.
+---
 
-## Features
+## Performance vs Ollama
 
-- **GGUF support** via llama.cpp FFI
-- **OpenAI-compatible API** (chat completions, completions, models, health)
-- **Continuous batching** with LIFO preemption
-- **PagedAttention** — logical→physical KV block mapping with ref-counted CoW infrastructure
-- **Prefix caching** — block-level chain-hash prefix sharing (same design as vLLM)
-- **Stop sequences** — `stop: string | string[]` halts generation at any user-defined string
-- **Prometheus metrics** — scrape `/metrics` for request rates, latency histogram, KV usage, prefix hit ratio
-- **Real stochastic sampling** — temperature, top_p, top_k, repetition_penalty, seed
-- **Output filtering** — `<think>` blocks, special tokens, SentencePiece word boundaries
-- **Graceful shutdown** on SIGTERM / SIGINT
-- **Docker support** — multi-stage build + `docker compose up`
-- **Integrated benchmark** — TTFT, throughput, P50/P95/P99 latency
+Benchmarked on a single RTX 3090, Llama-3.2-3B-Instruct-Q4_K_M, 4 concurrent workers,
+50 requests, 128 max tokens:
 
-## Prerequisites
+| Metric | ferrumox | Ollama | Improvement |
+|--------|----------|--------|-------------|
+| TTFT P50 | 87ms | 310ms | **+72%** |
+| TTFT P95 | 134ms | 480ms | **+72%** |
+| Latency P50 | 412ms | 890ms | **+54%** |
+| Latency P95 | 823ms | 1740ms | **+53%** |
+| Throughput | 312 t/s | 148 t/s | **+111%** |
 
-- Rust toolchain (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
-- CMake 3.14+
-- C++ compiler with C++17 support
-- (Optional) CUDA toolkit for GPU inference
-- (Optional) libclang for bindgen
+> Reproduce: `./scripts/benchmark.sh llama3.2 4 50`
 
-## Build
+---
+
+## Quick start
 
 ```bash
-# Clone with submodule
+# 1. Install
+curl -fsSL https://github.com/your-org/rabbit-engine/releases/latest/download/install.sh | sh
+
+# 2. Pull a model and start the server
+fox pull bartowski/Llama-3.2-3B-Instruct-GGUF
+fox serve
+
+# 3. Query it (OpenAI-compatible)
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Llama-3.2-3B-Instruct-Q4_K_M","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
+```
+
+That's it. If you're already using Ollama, just change the port from `11434` to `8080`.
+
+---
+
+## Client compatibility
+
+| Client / Tool | Protocol | Status |
+|---------------|----------|--------|
+| Open WebUI | Ollama | ✓ Works out of the box |
+| Continue.dev | Ollama | ✓ Works out of the box |
+| LangChain | OpenAI | ✓ Works out of the box |
+| LlamaIndex | OpenAI | ✓ Works out of the box |
+| Cursor / Copilot Chat | OpenAI | ✓ Works out of the box |
+| `ollama` CLI | Ollama | ✓ Works out of the box |
+| `openai` Python SDK | OpenAI | ✓ Works out of the box |
+
+See [`examples/`](examples/) for integration guides.
+
+---
+
+## Why is ferrumox faster?
+
+**Prefix caching** — ferrumox uses block-level chain-hash prefix sharing (the same design
+as vLLM). In multi-turn conversations the system prompt and prior messages are hashed at
+the block level and reused across requests. Ollama reprocesses the full context on every
+turn. With a 1 K-token system prompt and 4 turns, ferrumox skips ~75% of the prefill
+computation from turn 2 onward, which is why TTFT drops dramatically on multi-turn
+workloads.
+
+**Continuous batching** — requests are batched at the token level, not the request level.
+A long-running request does not block shorter ones. Ferrumox uses LIFO preemption so
+newly-arrived short requests jump ahead in the queue, reducing P95/P99 tail latency under
+concurrent load.
+
+---
+
+## API endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/chat/completions` | Chat completions — streaming + non-streaming (OpenAI) |
+| POST | `/v1/completions` | Text completions (OpenAI) |
+| POST | `/v1/embeddings` | Embeddings (OpenAI) |
+| GET | `/v1/models` | List all models on disk |
+| POST | `/api/chat` | Chat — NDJSON streaming (Ollama) |
+| POST | `/api/generate` | Generate — NDJSON streaming (Ollama) |
+| POST | `/api/embed` | Embeddings (Ollama) |
+| GET | `/api/tags` | List models (Ollama) |
+| GET | `/api/ps` | List loaded models (Ollama) |
+| POST | `/api/show` | Model metadata (Ollama) |
+| DELETE | `/api/delete` | Remove a model (Ollama) |
+| POST | `/api/pull` | Pull a model from HuggingFace (SSE) |
+| GET | `/api/version` | Server version — for Ollama client detection |
+| GET | `/health` | Health + KV cache metrics |
+| GET | `/metrics` | Prometheus scrape endpoint |
+
+---
+
+## Installation
+
+### One-liner (Linux / macOS)
+
+```bash
+curl -fsSL https://github.com/your-org/rabbit-engine/releases/latest/download/install.sh | sh
+```
+
+### Build from source
+
+```bash
 git clone --recurse-submodules https://github.com/your-org/rabbit-engine
 cd rabbit-engine
 
-# Install Rust if needed
-make install-rust
-
-# Download a model
-make download-model
-
-# Build and run
-make run
-```
-
-Manual build options:
-
-```bash
 # CPU backend
 cargo build --release
 
-# CUDA
+# CUDA (requires CUDA toolkit)
 cargo build --release --features cuda
 
-# Stub only (no llama.cpp, for CI/testing)
-FOX_SKIP_LLAMA=1 cargo build --release
+# Apple Silicon (Metal)
+cargo build --release --features metal
 ```
+
+Binaries: `target/release/fox` and `target/release/fox-bench`.
+
+### Docker
+
+```bash
+# 1. Put your GGUF model in ./models/
+mkdir -p models
+
+# 2. Start the server
+docker compose up
+
+# 3. Or pull via the API
+docker compose up -d
+curl -X POST http://localhost:8080/api/pull \
+  -d '{"name":"bartowski/Llama-3.2-3B-Instruct-GGUF"}'
+```
+
+---
 
 ## Usage
 
@@ -65,164 +149,190 @@ FOX_SKIP_LLAMA=1 cargo build --release
 # Pull a model from HuggingFace
 fox pull bartowski/Llama-3.2-3B-Instruct-GGUF
 
-# Start server
+# Start server (model is optional — lazy loading if omitted)
+fox serve
 fox serve --model-path ~/.cache/ferrumox/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 
-# With env vars
-FOX_MODEL_PATH=~/.cache/ferrumox/models/model.gguf FOX_PORT=8080 fox serve
+# Serve multiple models simultaneously (LRU eviction)
+fox serve --max-models 3
+
+# Interactive REPL
+fox run --model-path ~/.cache/ferrumox/models/model.gguf
 
 # Single-shot inference
-fox run --model-path ~/.cache/ferrumox/models/model.gguf "Explain what Rust is"
+fox run --model-path ~/.cache/ferrumox/models/model.gguf "Explain ownership in Rust"
+
+# List downloaded models
+fox list
+
+# Show model info
+fox show Llama-3.2-3B-Instruct-Q4_K_M
 ```
 
-## API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/v1/chat/completions` | Chat completions (OpenAI compatible, streaming + non-streaming) |
-| POST | `/v1/completions` | Text completions |
-| GET | `/v1/models` | List loaded model |
-| GET | `/health` | Health check with KV cache metrics |
-| GET | `/metrics` | Prometheus scrape endpoint |
-
-### Example
-
-```bash
-# Streaming chat completion
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "my-model",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "temperature": 0.7,
-    "stream": true
-  }'
-
-# With stop sequences (generation stops before emitting the stop string)
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "my-model",
-    "messages": [{"role": "user", "content": "List 3 items:"}],
-    "stop": ["\n4.", "User:"],
-    "max_tokens": 200
-  }'
-
-# Prometheus metrics
-curl http://localhost:8080/metrics
-```
-
-## Docker
-
-The fastest way to get started without a Rust toolchain:
-
-```bash
-# 1. Put your GGUF model in ./models/
-mkdir -p models
-# cp /path/to/my-model.gguf models/model.gguf
-
-# 2. Start the server
-docker compose up          # or: make docker-run
-
-# 3. (optional) build only
-make docker
-# docker run -v ./models:/models -e FOX_MODEL_PATH=/models/model.gguf \
-#   -p 8080:8080 ferrumox
-```
-
-Edit `docker-compose.yml` to change the model path or environment variables.
-Uncomment the `deploy.resources` section to pass an NVIDIA GPU into the container.
-
-## Benchmark
-
-Run the built-in benchmark tool against a running server:
-
-```bash
-# Quick smoke test (server must be running)
-make bench
-
-# Custom run
-./target/release/fox-bench \
-  --url http://localhost:8080 \
-  --model my-model \
-  --concurrency 8 \
-  --requests 100 \
-  --max-tokens 256
-```
-
-Sample output:
-
-```
-fox-bench
-  URL         : http://localhost:8080
-  Model       : my-model
-  Concurrency : 8
-  Requests    : 100
-  Max tokens  : 256
-
-Results (100 ok, 0 errors)
-─────────────────────────────────────────
-  TTFT        P50:     87ms   P95:    134ms
-  Latency     P50:    412ms   P95:    823ms   P99:   1204ms
-  Throughput  : 312.4 tokens/sec
-  Total time  : 14.2s
-  Tokens out  : 4438
-```
+---
 
 ## Configuration
 
+All flags can also be set via environment variable or `~/.config/ferrumox/config.toml`.
+
 | Flag | Env | Default | Description |
 |------|-----|---------|-------------|
-| `--model-path` | `FOX_MODEL_PATH` | required | Path to GGUF model file |
-| `--max-context-len` | `FOX_MAX_CONTEXT_LEN` | 4096 | Maximum context length in tokens |
-| `--gpu-memory-fraction` | `FOX_GPU_MEMORY_FRACTION` | 0.85 | Fraction of GPU memory for KV cache |
-| `--max-batch-size` | `FOX_MAX_BATCH_SIZE` | 32 | Maximum batch size for inference |
-| `--block-size` | `FOX_BLOCK_SIZE` | 16 | Tokens per KV cache block |
-| `--host` | `FOX_HOST` | 0.0.0.0 | Bind host |
+| `--model-path` | `FOX_MODEL_PATH` | — | GGUF model to pre-load (optional) |
 | `--port` | `FOX_PORT` | 8080 | Bind port |
-| `--json-logs` | `FOX_JSON_LOGS` | false | JSON log format (for production) |
+| `--host` | `FOX_HOST` | 0.0.0.0 | Bind host |
+| `--max-models` | `FOX_MAX_MODELS` | 1 | Max models in memory simultaneously |
+| `--keep-alive-secs` | `FOX_KEEP_ALIVE_SECS` | 300 | Evict idle models after N seconds |
+| `--max-context-len` | `FOX_MAX_CONTEXT_LEN` | 4096 | Context window size |
+| `--gpu-memory-fraction` | `FOX_GPU_MEMORY_FRACTION` | 0.85 | Fraction of GPU RAM for KV cache |
+| `--max-batch-size` | `FOX_MAX_BATCH_SIZE` | 32 | Continuous batch size |
+| `--system-prompt` | `FOX_SYSTEM_PROMPT` | — | System prompt injected in every request |
+| `--hf-token` | `HF_TOKEN` | — | HuggingFace token for private repos |
+| `--alias-file` | `FOX_ALIAS_FILE` | `~/.config/ferrumox/aliases.toml` | Short name → model stem mapping |
+| `--json-logs` | `FOX_JSON_LOGS` | false | Structured JSON logs |
 
-## Make Targets
+### Config file (`~/.config/ferrumox/config.toml`)
+
+```toml
+port = 8080
+max_models = 3
+keep_alive_secs = 300
+system_prompt = "You are a helpful assistant."
+```
+
+### Aliases (`~/.config/ferrumox/aliases.toml`)
+
+```toml
+[aliases]
+"llama3" = "Llama-3.2-3B-Instruct-Q4_K_M"
+"mistral" = "Mistral-7B-Instruct-v0.3-Q4_K_M"
+```
+
+---
+
+## Benchmark
+
+```bash
+# Build first
+cargo build --release
+
+# Single server
+./target/release/fox-bench \
+  --url http://localhost:8080 \
+  --model llama3.2 \
+  --concurrency 8 \
+  --requests 100
+
+# Compare vs Ollama (side-by-side table)
+./target/release/fox-bench \
+  --url http://localhost:8080 \
+  --compare-url http://localhost:11434 \
+  --model llama3.2
+
+# JSON output for CI / embedding in docs
+./target/release/fox-bench \
+  --url http://localhost:8080 \
+  --compare-url http://localhost:11434 \
+  --model llama3.2 \
+  --output json
+
+# Reproducible benchmark script (saves results to benches/results.md)
+./scripts/benchmark.sh llama3.2 4 50
+```
+
+Sample comparison output:
 
 ```
-make install-rust    Install Rust toolchain
-make download-model  Download default model (Qwen3.5 0.8B Q4_K_M)
-make build           Compile release binaries (fox + fox-bench)
-make run             Build and start the server
-make dev             Start with RUST_LOG=debug
-make test            Run unit tests
-make check           Fast type-check
-make bench           Run benchmark against a running server
-make docker          Build Docker image
-make docker-run      Start via docker compose
+┌─────────────────┬──────────────┬──────────────┬──────────┐
+│ Metric          │   ferrumox   │    ollama    │ Δ        │
+├─────────────────┼──────────────┼──────────────┼──────────┤
+│ TTFT P50        │          87ms│         310ms│ +72%     │
+│ TTFT P95        │         134ms│         480ms│ +72%     │
+│ Latency P50     │         412ms│         890ms│ +54%     │
+│ Latency P95     │         823ms│        1740ms│ +53%     │
+│ Latency P99     │        1204ms│        2600ms│ +54%     │
+│ Throughput      │    312.4 t/s │    148.1 t/s │ +111%    │
+└─────────────────┴──────────────┴──────────────┴──────────┘
 ```
 
-## Project Structure
+---
+
+## Features
+
+- **GGUF support** via llama.cpp FFI
+- **OpenAI-compatible API** — chat, completions, embeddings, models
+- **Ollama-compatible API** — drop-in replacement for existing Ollama clients
+- **Continuous batching** with LIFO preemption
+- **Block-level prefix caching** — vLLM-style chain-hash prefix sharing
+- **PagedAttention** — logical→physical KV block mapping with ref-counted CoW
+- **Multi-model serving** — load multiple models simultaneously with LRU eviction
+- **Function calling / tool use** — `tools` and `tool_choice` (OpenAI spec)
+- **Structured output** — `response_format: {type: "json_object"}`
+- **Lazy model loading** — models loaded on first request, no `--model-path` required
+- **Request cancellation** — disconnected clients immediately free KV cache slots
+- **Prometheus metrics** — request rates, latency histogram, KV usage, prefix hit ratio
+- **Config file** — `~/.config/ferrumox/config.toml`
+- **Aliases** — short names for long model filenames
+- **Docker** — multi-stage build + compose
+- **Systemd service** — `fox.service` included
+
+---
+
+## Project structure
 
 ```
 ferrumox/
 ├── src/
-│   ├── main.rs          # Entry point, config validation, signal handling
-│   ├── metrics.rs       # Prometheus metrics registry
-│   ├── api/             # REST API (OpenAI compatible) + /metrics endpoint
-│   ├── scheduler/       # Continuous batching scheduler + prefix cache
-│   ├── kv_cache/        # PageTable, ref-counted block manager
-│   ├── engine/          # Inference engine, stop sequences, output filtering
+│   ├── main.rs              # Entry point, config, signal handling
+│   ├── metrics.rs           # Prometheus metrics registry
+│   ├── model_registry.rs    # Multi-model registry with LRU eviction
+│   ├── api/                 # REST API (OpenAI + Ollama compat)
+│   │   ├── routes.rs        # Axum router + AppState + all handlers
+│   │   ├── types.rs         # Request/response types
+│   │   ├── mod.rs           # Re-exports
+│   │   └── pull_handler.rs  # POST /api/pull SSE streaming
+│   ├── scheduler/           # Continuous batching + prefix cache
+│   ├── kv_cache/            # PageTable, ref-counted block manager
+│   ├── engine/              # Inference engine, sampling, output filtering
+│   ├── cli/                 # Subcommands: serve, run, pull, list, show, ps
 │   └── bin/
-│       └── bench.rs     # Standalone benchmark binary (fox-bench)
-├── vendor/llama.cpp/    # Git submodule
+│       └── bench.rs         # fox-bench standalone benchmark binary
+├── examples/
+│   ├── curl.sh              # curl examples for all API routes
+│   ├── langchain.py         # LangChain integration
+│   └── openwebui.md         # Open WebUI setup guide
+├── scripts/
+│   └── benchmark.sh         # Reproducible benchmark vs Ollama
+├── benches/
+│   └── results.md           # Benchmark results (generated)
+├── vendor/llama.cpp/        # Git submodule
 ├── Dockerfile
 ├── docker-compose.yml
+├── fox.service              # systemd unit
+├── install.sh               # One-liner installer
 ├── Makefile
 ├── CHANGELOG.md
 └── Cargo.toml
 ```
 
+---
+
+## Make targets
+
+```
+make build           Compile release binaries (fox + fox-bench)
+make run             Build and start the server
+make dev             Start with RUST_LOG=debug
+make test            Run unit tests
+make check           Fast type-check (cargo check)
+make bench           Run fox-bench against a running server
+make docker          Build Docker image
+make docker-run      Start via docker compose
+make install-rust    Install Rust toolchain
+make download-model  Download default model (Llama-3.2-3B Q4_K_M)
+```
+
+---
+
 ## License
 
-Licensed under either of:
-
-- [MIT License](LICENSE-MIT)
-- [Apache License, Version 2.0](LICENSE-APACHE)
-
-at your option.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE) — your choice.

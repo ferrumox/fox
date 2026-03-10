@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.0] - 2026-03-10
+
+### Added
+
+- **`fox-bench --compare-url <URL>`** — run the same workload against two servers in
+  parallel and display a side-by-side comparison table with improvement percentages for
+  TTFT P50/P95, latency P50/P95/P99, and throughput. Designed for benchmarking
+  ferrumox vs Ollama.
+
+- **`fox-bench --output json`** — emit the full benchmark report as structured JSON
+  (including `primary`, `comparison`, and `improvement` keys). Suitable for embedding
+  in CI pipelines or README generation.
+
+- **`fox-bench --label` / `--compare-label`** — custom labels for the two servers in
+  the comparison table (defaults: `ferrumox` / `ollama`).
+
+- **`scripts/benchmark.sh`** — reproducible benchmark script. Starts ferrumox if not
+  already running, detects Ollama, runs fox-bench, and appends results to
+  `benches/results.md` with timestamp, hardware, model, and all metrics.
+
+- **`examples/curl.sh`** — curl examples for all API routes (health, models, chat,
+  completions, embeddings, Ollama endpoints, JSON mode, stop sequences, metrics).
+
+- **`examples/openwebui.md`** — step-by-step guide to connect Open WebUI to ferrumox,
+  including Docker setup, multi-model config, and aliases.
+
+- **`examples/langchain.py`** — five LangChain integration examples: basic chat,
+  streaming, prompt templates + LLMChain, embeddings with cosine similarity, and
+  structured JSON output.
+
+- **README rewrite** — new developer-facing README with benchmark table, 3-command
+  quick start, client compatibility table, explanation of prefix caching and continuous
+  batching, full API reference, and project structure.
+
+### Changed
+
+- `Cargo.toml`: version bumped to `1.0.0`.
+- `src/api/routes.rs`: `GET /api/version` now returns `{"version":"1.0.0"}`.
+
+---
+
 ## [0.10.0] - 2026-03-10
 
 ### Added
