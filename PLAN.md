@@ -1,159 +1,166 @@
 # Plan — Ferrum Engine
 
-## Visión
-Motor de inferencia de LLMs en Rust, open source, con mayor throughput que vLLM y distribución más simple que Ollama. Diferencial clave: **un solo binario, sin Python, sin dependencias de runtime**.
+## Vision
+LLM inference engine in Rust, open source, with higher throughput than vLLM and simpler distribution than Ollama. Key differentiator: **a single binary, no Python, no runtime dependencies**.
 
 ---
 
-## Versiones lanzadas
+## Released versions
 
-### v0.1.0 (2026-03-08) — MVP funcional
-- API OpenAI-compatible: `POST /v1/chat/completions` (SSE streaming + non-streaming), `POST /v1/completions`, `GET /v1/models`, `GET /health`
-- Inference engine: llama.cpp FFI, GGUF, continuous batching con LIFO preemption
-- KV cache manager: block pool con free_list, cálculo automático desde GPU memory
-- Muestreo: temperature, top-p
-- Config completa: CLI flags + env vars
-- Shutdown graceful, logging estructurado (tracing, JSON mode)
+### v0.1.0 (2026-03-08) — Functional MVP
+- OpenAI-compatible API: `POST /v1/chat/completions` (SSE streaming + non-streaming), `POST /v1/completions`, `GET /v1/models`, `GET /health`
+- Inference engine: llama.cpp FFI, GGUF, continuous batching with LIFO preemption
+- KV cache manager: block pool with free_list, automatic calculation from GPU memory
+- Sampling: temperature, top-p
+- Full config: CLI flags + env vars
+- Graceful shutdown, structured logging (tracing, JSON mode)
 
-### v0.2.0 (2026-03-09) — Performance y observabilidad
-- Muestreo estocástico completo: top-K, repetition penalty, seed para reproducibilidad
-- Fix crítico: `kv_seq_id` estable por request (evita crashes de llama_decode con >1 request)
-- Docker support: Dockerfile multi-stage + docker-compose
-- `ferrum-bench`: benchmark integrado con TTFT P50/P95, throughput, latencia P50/P95/P99
-- `SamplingParams` struct unificado para agrupar hyper-params de sampling
+### v0.2.0 (2026-03-09) — Performance and observability
+- Full stochastic sampling: top-K, repetition penalty, seed for reproducibility
+- Critical fix: stable `kv_seq_id` per request (prevents llama_decode crashes with >1 request)
+- Docker support: multi-stage Dockerfile + docker-compose
+- `ferrum-bench`: integrated benchmark with TTFT P50/P95, throughput, latency P50/P95/P99
+- `SamplingParams` unified struct for grouping sampling hyper-parameters
 
-### v0.4.0 (próxima) — Prefix caching por bloque y swap CPU↔GPU
-- Prefix caching por bloque: compartir KV cache para prompts con prefijo común (system prompt + usuarios distintos)
-- Swap CPU↔GPU: persistir KV cache de requests preemptados en RAM en lugar de descartarlo
-- CoW real: ref_count + copy_on_write para bloques compartidos entre requests activos
+### v0.3.0 (2026-03-09) — Memory optimisation and complete API
+- PageTable: explicit logical→physical block mapping per request; ref_count + CoW infrastructure per block
+- Hash-based prefix caching: reuse KV cache across requests with identical prompts (skip re-prefill)
+- Stop sequences: `stop: string | string[]` with rolling-buffer cross-token-boundary detection
+- `GET /metrics` Prometheus: 8 metrics (request rate, latency histogram, KV usage, prefix hit ratio)
+- Streaming SSE: `usage` included in the final chunk (OpenAI spec)
+- Repo quality: GitHub Actions CI, `cargo fmt`, `clippy -D warnings` clean, 22 unit tests
 
-### v0.3.0 (2026-03-09) — Optimización de memoria y API completa
-- PageTable: mapping explícito lógico→físico por request; ref_count + CoW infrastructure por bloque
-- Prefix caching hash-based: reutilización del KV cache entre requests con prompt idéntico (skip re-prefill)
-- Stop sequences: `stop: string | string[]` con rolling-buffer detection cross-token-boundary
-- `GET /metrics` Prometheus: 8 métricas (request rate, latency histogram, KV usage, prefix hit ratio)
-- Streaming SSE: `usage` incluido en el chunk final (OpenAI spec)
-- Repo quality: GitHub Actions CI, cargo fmt, clippy -D warnings limpio, 45 tests unitarios
+### v0.3.1 (2026-03-09) — Patch release
+- Fix: SIGABRT crash on hybrid/recurrent models (Qwen3.5, Mamba) — `llama_memory_seq_cp` is
+  now only called when `llama_memory_can_shift()` returns true; prefix caching is automatically
+  disabled for unsupported backends
+- Fix: CUDA build — removed `cudarc` dep, corrected linker flags for `ggml-cuda` + driver API
+- Fix: prefix-cache boundary token submitted at wrong position (pos n instead of n-1)
+
+### v0.4.0 (next) — Block-level prefix caching and CPU↔GPU swap
+- Block-level prefix caching: share KV cache for prompts with a common prefix (system prompt + different users)
+- CPU↔GPU swap: persist KV cache of preempted requests in RAM instead of discarding it
+- True CoW: use ref_count + copy_on_write to share blocks between active requests
 
 ---
 
-## Fases
+## Phases
 
-### Fase 1 — MVP funcional `(Mes 1-3)` ✅ COMPLETADA
-**Meta: algo que funcione y se pueda mostrar**
+### Phase 1 — Functional MVP `(Month 1-3)` ✅ COMPLETED
+**Goal: something that works and can be demonstrated**
 
 ```
-Semana 1-2: Setup y FFI
-  [x] Proyecto Rust base con Cargo workspace
-  [x] build.rs con bindgen → llama.cpp
-  [x] Cargar modelo GGUF y generar tokens
-  [x] llama.cpp backend funcional
+Week 1-2: Setup and FFI
+  [x] Base Rust project with Cargo workspace
+  [x] build.rs with bindgen → llama.cpp
+  [x] Load GGUF model and generate tokens
+  [x] Functional llama.cpp backend
 
-Semana 3-4: Servidor básico
-  [x] axum con POST /v1/chat/completions y /v1/completions
-  [x] API OpenAI-compatible con streaming SSE
-  [x] Config por CLI con clap + env vars
-  [x] curl funcionando contra el servidor
+Week 3-4: Basic server
+  [x] axum with POST /v1/chat/completions and /v1/completions
+  [x] OpenAI-compatible API with SSE streaming
+  [x] CLI config with clap + env vars
+  [x] curl working against the server
 
-Semana 5-6: KV-Cache Manager
-  [x] PhysicalBlock pool con free_list
+Week 5-6: KV-Cache Manager
+  [x] PhysicalBlock pool with free_list
   [x] Allocate / free / can_allocate
-  [x] Cálculo automático de bloques desde memoria GPU disponible
-  [x] Tests unitarios del manager
+  [x] Automatic block calculation from available GPU memory
+  [x] Manager unit tests
 
-Semana 7-8: Scheduler + Continuous Batching
-  [x] InferenceRequest con estados (Waiting→Prefilling→Decoding→Finished)
-  [x] schedule_step() con admit / evict / preempt LIFO
-  [x] Engine loop principal con tokio + spawn_blocking para FFI
-  [x] Streaming SSE en la API
-  [x] kv_seq_id estable (fix crash multi-request)
+Week 7-8: Scheduler + Continuous Batching
+  [x] InferenceRequest with states (Waiting→Prefilling→Decoding→Finished)
+  [x] schedule_step() with admit / evict / LIFO preempt
+  [x] Main engine loop with tokio + spawn_blocking for FFI
+  [x] SSE streaming in the API
+  [x] Stable kv_seq_id (multi-request crash fix)
 
-Semana 9-10: Pulido MVP
-  [x] /health endpoint con métricas básicas
+Week 9-10: MVP polish
+  [x] /health endpoint with basic metrics
   [x] GET /v1/models
-  [x] Logging estructurado con tracing (pretty + JSON)
-  [x] README con instalación y ejemplos
-  [x] Docker image oficial + docker-compose
-  [x] ferrum-bench: benchmark integrado (TTFT, throughput, latencia percentiles)
-  [ ] Benchmark comparativo publicado vs Ollama (pendiente ejecución)
+  [x] Structured logging with tracing (pretty + JSON)
+  [x] README with installation and examples
+  [x] Official Docker image + docker-compose
+  [x] ferrum-bench: integrated benchmark (TTFT, throughput, latency percentiles)
+  [ ] Comparative benchmark published vs Ollama (pending execution)
 ```
 
-**Entregable:** servidor funcional, OpenAI-compatible, con continuous batching básico
+**Deliverable:** functional server, OpenAI-compatible, with basic continuous batching
 
 ---
 
-### Fase 2 — Performance `(Mes 3-6)`
-**Meta: superar a vLLM en throughput en hardware equivalente**
+### Phase 2 — Performance `(Month 3-6)`
+**Goal: outperform vLLM in throughput on equivalent hardware**
 
 ```
-Mes 3-4: Optimizaciones de memoria (v0.3.0) ✅
-  [x] PageTable: mapping explícito lógico→físico por request
-  [x] ref_count por bloque (infraestructura para CoW real)
-  [x] Prefix caching: reutilizar KV cache entre requests con prompt idéntico (exact-match)
-  [x] copy_on_write: infraestructura para bloques compartidos
+Month 3-4: Memory optimisations (v0.3.0) ✅
+  [x] PageTable: explicit logical→physical mapping per request
+  [x] ref_count per block (infrastructure for true CoW)
+  [x] Prefix caching: reuse KV cache across requests with identical prompts (exact-match)
+  [x] copy_on_write: infrastructure for shared blocks
 
-Mes 3-4: Extensiones de API (v0.3.0) ✅
-  [x] Stop sequences (parámetro stop: string[])
-  [x] Endpoint GET /metrics (Prometheus scrape format)
-  [x] Streaming: incluir usage en el último chunk
+Month 3-4: API extensions (v0.3.0) ✅
+  [x] Stop sequences (stop: string[] parameter)
+  [x] GET /metrics endpoint (Prometheus scrape format)
+  [x] Streaming: include usage in the final chunk
 
-Mes 4-5: Optimizaciones de memoria avanzadas (v0.4.0)
-  [ ] Prefix caching por bloque (shared KV prefix, no exact-match) — el vLLM real
-  [ ] Swap CPU↔GPU para requests preemptados (persistir KV en RAM en lugar de descartar)
-  [ ] CoW real: usar ref_count + copy_on_write para compartir bloques entre requests activos
+Month 4-5: Advanced memory optimisations (v0.4.0)
+  [ ] Block-level prefix caching (shared KV prefix, not exact-match) — the real vLLM approach
+  [ ] CPU↔GPU swap for preempted requests (persist KV in RAM instead of discarding)
+  [ ] True CoW: use ref_count + copy_on_write to share blocks between active requests
 
-Mes 4-5: Optimizaciones de cómputo
-  [ ] Flash Attention 2 via FFI (kernels C++ de Tri Dao)
-  [ ] Quantización AWQ y GPTQ (además de GGUF)
-  [ ] CUDA Graphs para decode steps repetitivos
-  [ ] Overlap prefill/decode con CUDA streams
+Month 4-5: Compute optimisations
+  [ ] Flash Attention 2 via FFI (Tri Dao C++ kernels)
+  [ ] AWQ and GPTQ quantisation (in addition to GGUF)
+  [ ] CUDA Graphs for repetitive decode steps
+  [ ] Prefill/decode overlap with CUDA streams
 
-Mes 5-6: Escalado
-  [ ] Tensor parallelism (multi-GPU, un modelo en varias GPUs)
-  [ ] Speculative decoding (modelo draft pequeño + modelo grande)
-  [ ] Prefill/decode disaggregation (máquinas separadas)
-  [ ] Benchmark completo: latencia P50/P95/P99, throughput, memory usage
+Month 5-6: Scaling
+  [ ] Tensor parallelism (multi-GPU, one model across multiple GPUs)
+  [ ] Speculative decoding (small draft model + large model)
+  [ ] Prefill/decode disaggregation (separate machines)
+  [ ] Full benchmark: latency P50/P95/P99, throughput, memory usage
 ```
 
-**Entregable:** benchmarks publicados, blog post técnico, primeros stars en GitHub
+**Deliverable:** published benchmarks, technical blog post, first GitHub stars
 
 ---
 
-### Fase 3 — Producto completo `(Mes 6-12)`
-**Meta: alternativa real con comunidad**
+### Phase 3 — Complete product `(Month 6-12)`
+**Goal: real alternative with a community**
 
 ```
-Mes 6-7: Experiencia de usuario
-  [ ] CLI tipo Ollama (ferrum pull llama3, ferrum run llama3)
-  [ ] Descarga automática de modelos desde HuggingFace Hub
-  [ ] Web UI básica para probar modelos (opcional)
+Month 6-7: User experience
+  [ ] Ollama-style CLI (ferrum pull llama3, ferrum run llama3)
+  [ ] Automatic model download from HuggingFace Hub
+  [ ] Basic web UI for testing models (optional)
 
-Mes 7-8: Ecosistema de modelos
-  [ ] Soporte safetensors nativo (sin llama.cpp para modelos HF)
-  [ ] candle como segundo backend (puro Rust)
-  [ ] Soporte Vision models (LLaVA, Qwen-VL)
-  [ ] Soporte Embedding models
+Month 7-8: Model ecosystem
+  [ ] Native safetensors support (without llama.cpp for HF models)
+  [ ] candle as a second backend (pure Rust)
+  [ ] Vision model support (LLaVA, Qwen-VL)
+  [ ] Embedding model support
 
-Mes 8-9: Observabilidad y producción
-  [ ] Métricas Prometheus completas (ya iniciado en v0.3.0)
-  [ ] Distributed tracing con OpenTelemetry
-  [ ] Rate limiting por API key
-  [ ] Autenticación básica
+Month 8-9: Observability and production
+  [ ] Full Prometheus metrics (started in v0.3.0)
+  [ ] Distributed tracing with OpenTelemetry
+  [ ] Rate limiting per API key
+  [ ] Basic authentication
 
-Mes 9-12: Comunidad
-  [ ] Documentación completa (mdBook)
-  [ ] Plugin system para custom samplers
-  [ ] Soporte Apple Silicon (Metal backend)
-  [ ] CI/CD con benchmarks automáticos en cada PR
+Month 9-12: Community
+  [ ] Full documentation (mdBook)
+  [ ] Plugin system for custom samplers
+  [ ] Apple Silicon support (Metal backend)
+  [ ] CI/CD with automatic benchmarks on every PR
 ```
 
 ---
 
-## Arquitectura actual (v0.3.0)
+## Current architecture (v0.3.1)
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                   Cliente                           │
+│                    Client                           │
 │         (curl, OpenAI SDK, LangChain...)            │
 └──────────────────────┬──────────────────────────────┘
                        │ HTTP / SSE
@@ -189,23 +196,23 @@ Mes 9-12: Comunidad
 
 ---
 
-## Métricas de éxito por fase
+## Success metrics per phase
 
-| Métrica | Fase 1 | Fase 2 | Fase 3 |
+| Metric | Phase 1 | Phase 2 | Phase 3 |
 |---|---|---|---|
-| Tokens/segundo (7B, A100) | >500 | >3000 | >5000 |
-| Latencia TTFT | <500ms | <100ms | <50ms |
-| Requests concurrentes | 8 | 64 | 256 |
-| Modelos soportados | GGUF | GGUF + AWQ | GGUF + safetensors |
+| Tokens/second (7B, A100) | >500 | >3000 | >5000 |
+| TTFT latency | <500ms | <100ms | <50ms |
+| Concurrent requests | 8 | 64 | 256 |
+| Supported models | GGUF | GGUF + AWQ | GGUF + safetensors |
 | GitHub stars | — | 500+ | 2000+ |
 
 ---
 
-## Comandos CLI
+## CLI commands
 
 ```
-ferrum serve       # arrancar el servidor
-ferrum-bench       # benchmark integrado (disponible desde v0.2.0)
-ferrum pull        # descargar modelo (pendiente Fase 3)
-ferrum run         # inferencia rápida desde CLI (pendiente Fase 3)
+ferrum serve       # start the server
+ferrum-bench       # integrated benchmark (available since v0.2.0)
+ferrum pull        # download model (pending Phase 3)
+ferrum run         # quick CLI inference (pending Phase 3)
 ```

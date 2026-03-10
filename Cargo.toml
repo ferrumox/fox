@@ -1,13 +1,13 @@
 [package]
 name = "ferrum-engine"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "High-performance LLM inference engine - alternative to Ollama and vLLM"
 license = "MIT OR Apache-2.0"
 
 [features]
 default = []
-cuda = ["cudarc"]
+cuda = []
 metal = []
 cpu-only = []
 
@@ -32,7 +32,6 @@ async-stream = "0.3"
 prometheus = "0.14"
 
 # Optional
-cudarc = { version = "0.12", optional = true }
 
 [build-dependencies]
 bindgen = "0.69"

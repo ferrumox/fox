@@ -121,6 +121,12 @@ pub trait Model: Send + Sync {
     /// prompt matches a completed one, we copy the KV data so only the non-cached suffix
     /// needs to be computed.
     fn copy_sequence_range(&self, src_seq_id: i32, dst_seq_id: i32, token_count: i32);
+
+    /// Returns true if the loaded model's memory backend supports sequence copying
+    /// (`llama_memory_seq_cp`).  Standard transformer (attention-only) models return true;
+    /// recurrent / hybrid models (Mamba, Qwen3.5, etc.) return false.
+    /// Prefix caching must be disabled when this returns false.
+    fn supports_seq_copy(&self) -> bool;
 }
 
 /// Sample the highest-probability token (deterministic).
@@ -544,7 +550,11 @@ impl LlamaCppModel {
         }
 
         // Copy cached prefix KV data into each request's sequence BEFORE building the batch.
-        // This must happen while holding the context lock, so we do it here in the blocking task.
+        //
+        // We copy positions 0..skip_prefix_tokens-1 (exclusive of the last "cached" position) so
+        // that the last prefix token is always re-submitted in the batch below.  This guarantees:
+        //   (a) the logits for the boundary position are freshly computed (not stale from seq_cp),
+        //   (b) total_tokens is always ≥ 1, avoiding an invalid pos=context_len decode call.
         {
             let ctx_guard = self
                 ._ctx
@@ -554,16 +564,18 @@ impl LlamaCppModel {
             unsafe {
                 let mem = ffi::llama_get_memory(ctx as *const _);
                 if !mem.is_null() {
+                    // Only attempt seq_cp if the memory backend supports it.
+                    let can_copy = ffi::llama_memory_can_shift(mem);
                     for req in requests.iter() {
                         if let Some(src) = req.prefix_seq_id {
-                            if req.skip_prefix_tokens > 0 {
-                                ffi::llama_memory_seq_cp(
-                                    mem,
-                                    src,
-                                    req.kv_seq_id,
-                                    0,
-                                    req.skip_prefix_tokens as i32,
-                                );
+                            if !can_copy {
+                                // Recurrent/hybrid model — seq_cp not supported; skip.
+                                continue;
+                            }
+                            // copy 0..skip-1; skip-1 position will be re-submitted in the batch
+                            let copy_end = req.skip_prefix_tokens.saturating_sub(1) as i32;
+                            if copy_end > 0 {
+                                ffi::llama_memory_seq_cp(mem, src, req.kv_seq_id, 0, copy_end);
                             }
                         }
                     }
@@ -571,18 +583,20 @@ impl LlamaCppModel {
             }
         }
 
-        // Count only the tokens that actually need to be prefilled (after the cached prefix).
+        // Effective start of submission: one token before skip_prefix_tokens so the boundary
+        // position is always freshly computed (see seq_cp comment above).
+        let effective_skip = |r: &InferenceRequestForModel| {
+            r.skip_prefix_tokens
+                .saturating_sub(1)
+                .min(r.prompt_tokens.len())
+        };
+
         let total_tokens: usize = requests
             .iter()
-            .map(|r| r.prompt_tokens.len().saturating_sub(r.skip_prefix_tokens))
+            .map(|r| r.prompt_tokens.len() - effective_skip(r))
             .sum();
 
-        if total_tokens == 0 {
-            // All tokens were covered by prefix cache — sample from the last cached position.
-            // We do a minimal 1-token decode for each request at the last prompt position.
-            return self.do_decode(req_ids, requests);
-        }
-
+        // total_tokens ≥ 1 because effective_skip < prompt_tokens.len() for any non-empty prompt.
         let n_seq_max = requests.len().max(1) as i32;
 
         let mut batch = unsafe { ffi::llama_batch_init(total_tokens as i32, 0, n_seq_max) };
@@ -590,7 +604,7 @@ impl LlamaCppModel {
         let mut batch_logits_indices: Vec<i32> = Vec::with_capacity(requests.len());
         for req in requests.iter() {
             let seq_id = req.kv_seq_id;
-            let start = req.skip_prefix_tokens.min(req.prompt_tokens.len());
+            let start = effective_skip(req);
             let tokens_to_submit = &req.prompt_tokens[start..];
             if tokens_to_submit.is_empty() {
                 // Should be handled by the total_tokens == 0 branch above, but be defensive.
@@ -821,6 +835,22 @@ impl Model for LlamaCppModel {
             }
         }
     }
+
+    fn supports_seq_copy(&self) -> bool {
+        let ctx_guard = match self._ctx.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        unsafe {
+            let mem = ffi::llama_get_memory(ctx_guard.as_ptr() as *const _);
+            if mem.is_null() {
+                return false;
+            }
+            // llama_memory_can_shift returns true for standard attention KV caches
+            // (which also support seq_cp).  Recurrent/hybrid models return false.
+            ffi::llama_memory_can_shift(mem)
+        }
+    }
 }
 
 // ==================== Stub implementation (when FERRUM_SKIP_LLAMA or no llama.cpp) ====================
@@ -911,4 +941,8 @@ impl Model for LlamaCppModel {
     fn clear_sequence(&self, _seq_id: i32) {}
 
     fn copy_sequence_range(&self, _src_seq_id: i32, _dst_seq_id: i32, _token_count: i32) {}
+
+    fn supports_seq_copy(&self) -> bool {
+        false
+    }
 }

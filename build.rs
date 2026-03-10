@@ -70,6 +70,32 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=dl");
     println!("cargo:rustc-link-lib=dylib=gomp"); // OpenMP
 
+    if env::var("CARGO_FEATURE_CUDA").is_ok() {
+        // CUDA backend static library (produced by llama.cpp cmake with GGML_CUDA=ON)
+        println!(
+            "cargo:rustc-link-search=native={}",
+            build_dir
+                .join("ggml")
+                .join("src")
+                .join("ggml-cuda")
+                .display()
+        );
+        println!("cargo:rustc-link-lib=static=ggml-cuda");
+
+        // Link CUDA runtime and cuBLAS
+        let cuda_path = env::var("CUDA_PATH").unwrap_or_else(|_| "/usr/local/cuda".to_string());
+        // Support both /cuda/lib64 and /cuda/targets/x86_64-linux/lib layouts
+        println!("cargo:rustc-link-search=native={}/lib64", cuda_path);
+        println!(
+            "cargo:rustc-link-search=native={}/targets/x86_64-linux/lib",
+            cuda_path
+        );
+        println!("cargo:rustc-link-lib=dylib=cuda"); // Driver API (cuDeviceGet, cuMemCreate…)
+        println!("cargo:rustc-link-lib=dylib=cudart");
+        println!("cargo:rustc-link-lib=dylib=cublas");
+        println!("cargo:rustc-link-lib=dylib=cublasLt");
+    }
+
     #[cfg(target_os = "linux")]
     {
         println!("cargo:rustc-link-lib=dylib=m");

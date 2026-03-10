@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.1] - 2026-03-10
+
+### Fixed
+
+- **Crash on hybrid/recurrent models** (`src/engine/model.rs`, `src/engine/mod.rs`)
+  - Qwen3.5, Mamba, and other hybrid architectures use `llama_memory_recurrent` instead of
+    the standard attention KV cache. Calling `llama_memory_seq_cp` on those models triggered
+    `GGML_ASSERT(is_full && "seq_cp() is only supported for full KV buffers")` inside
+    llama.cpp, terminating the process with `SIGABRT` on the second request with an identical
+    prompt.
+  - Added `Model::supports_seq_copy()` backed by `llama_memory_can_shift()`: returns `true`
+    only for full KV cache backends (standard attention-only transformers).
+  - `InferenceEngine::new()` stores the result as `supports_prefix_cache` and logs it at
+    startup.
+  - `do_prefill` now guards `llama_memory_seq_cp` with a `can_shift` check as a second safety
+    net.
+  - Prefix caching is automatically disabled for incompatible models; all other features
+    (stop sequences, metrics, streaming usage) remain fully functional.
+
+- **CUDA build** (`build.rs`, `Cargo.toml`)
+  - Removed the optional `cudarc` dependency (only used to query GPU memory, but its
+    `build.rs` requires a CUDA-version feature flag that caused `--features cuda` to fail with
+    a compile error). Replaced with a `nvidia-smi` subprocess call — no extra dependencies.
+  - `build.rs` now links `ggml-cuda`, `libcuda` (driver API), `libcudart`, `libcublas`, and
+    `libcublasLt`, searching both `/cuda/lib64` and `/cuda/targets/x86_64-linux/lib` to
+    support different CUDA installation layouts.
+
+- **Prefix-cache boundary token position** (`src/engine/model.rs`)
+  - `do_prefill` was copying positions `0..skip_prefix_tokens` via `seq_cp` and then
+    submitting the last prompt token at the wrong position (`context_len` instead of
+    `skip_prefix_tokens - 1`). Changed to copy `0..skip_prefix_tokens-1` and always
+    re-submit the boundary token in the batch at the correct position, ensuring valid
+    positional encodings and correct logits.
+
+---
+
 ## [0.3.0] - 2026-03-10
 
 ### Added
