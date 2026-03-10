@@ -9,7 +9,10 @@ High-performance LLM inference engine in Rust — an alternative to Ollama and v
 - **GGUF support** via llama.cpp FFI
 - **OpenAI-compatible API** (chat completions, completions, models, health)
 - **Continuous batching** with LIFO preemption
-- **KV-cache management** with block-based allocation
+- **PagedAttention** — logical→physical KV block mapping with ref-counted CoW infrastructure
+- **Prefix caching** — reuse KV cache for requests with an identical full prompt (exact-match; block-level prefix sharing planned for v0.4.0)
+- **Stop sequences** — `stop: string | string[]` halts generation at any user-defined string
+- **Prometheus metrics** — scrape `/metrics` for request rates, latency histogram, KV usage, prefix hit ratio
 - **Real stochastic sampling** — temperature, top_p, top_k, repetition_penalty, seed
 - **Output filtering** — `<think>` blocks, special tokens, SentencePiece word boundaries
 - **Graceful shutdown** on SIGTERM / SIGINT
@@ -75,10 +78,12 @@ make run MAX_CONTEXT_LEN=8192 PORT=9000
 | POST | `/v1/completions` | Text completions |
 | GET | `/v1/models` | List loaded model |
 | GET | `/health` | Health check with KV cache metrics |
+| GET | `/metrics` | Prometheus scrape endpoint |
 
 ### Example
 
 ```bash
+# Streaming chat completion
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -87,6 +92,19 @@ curl http://localhost:8080/v1/chat/completions \
     "temperature": 0.7,
     "stream": true
   }'
+
+# With stop sequences (generation stops before emitting the stop string)
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "my-model",
+    "messages": [{"role": "user", "content": "List 3 items:"}],
+    "stop": ["\n4.", "User:"],
+    "max_tokens": 200
+  }'
+
+# Prometheus metrics
+curl http://localhost:8080/metrics
 ```
 
 ## Docker
@@ -181,10 +199,11 @@ ferrum-engine/
 ├── src/
 │   ├── main.rs          # Entry point, config validation, signal handling
 │   ├── config.rs        # CLI/env configuration
-│   ├── api/             # REST API (OpenAI compatible)
-│   ├── scheduler/       # Continuous batching scheduler
-│   ├── kv_cache/        # KV-cache block manager
-│   ├── engine/          # Inference engine + llama.cpp FFI
+│   ├── metrics.rs       # Prometheus metrics registry
+│   ├── api/             # REST API (OpenAI compatible) + /metrics endpoint
+│   ├── scheduler/       # Continuous batching scheduler + prefix cache
+│   ├── kv_cache/        # PageTable, ref-counted block manager
+│   ├── engine/          # Inference engine, stop sequences, output filtering
 │   └── bin/
 │       └── bench.rs     # Standalone benchmark binary
 ├── vendor/llama.cpp/    # Git submodule

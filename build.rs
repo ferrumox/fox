@@ -8,7 +8,9 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(ferrum_stub)");
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let llama_root = PathBuf::from(&manifest_dir).join("vendor").join("llama.cpp");
+    let llama_root = PathBuf::from(&manifest_dir)
+        .join("vendor")
+        .join("llama.cpp");
 
     if env::var("FERRUM_SKIP_LLAMA").is_ok() || !llama_root.exists() {
         if !llama_root.exists() {
@@ -50,8 +52,14 @@ fn main() {
     let build_dir = dst.join("build");
 
     // llama.cpp puts libllama.a in build/src, ggml libs in build/ggml/src
-    println!("cargo:rustc-link-search=native={}", build_dir.join("src").display());
-    println!("cargo:rustc-link-search=native={}", build_dir.join("ggml").join("src").display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        build_dir.join("src").display()
+    );
+    println!(
+        "cargo:rustc-link-search=native={}",
+        build_dir.join("ggml").join("src").display()
+    );
 
     println!("cargo:rustc-link-lib=static=llama");
     println!("cargo:rustc-link-lib=static=ggml");
@@ -61,6 +69,32 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=pthread");
     println!("cargo:rustc-link-lib=dylib=dl");
     println!("cargo:rustc-link-lib=dylib=gomp"); // OpenMP
+
+    if env::var("CARGO_FEATURE_CUDA").is_ok() {
+        // CUDA backend static library (produced by llama.cpp cmake with GGML_CUDA=ON)
+        println!(
+            "cargo:rustc-link-search=native={}",
+            build_dir
+                .join("ggml")
+                .join("src")
+                .join("ggml-cuda")
+                .display()
+        );
+        println!("cargo:rustc-link-lib=static=ggml-cuda");
+
+        // Link CUDA runtime and cuBLAS
+        let cuda_path = env::var("CUDA_PATH").unwrap_or_else(|_| "/usr/local/cuda".to_string());
+        // Support both /cuda/lib64 and /cuda/targets/x86_64-linux/lib layouts
+        println!("cargo:rustc-link-search=native={}/lib64", cuda_path);
+        println!(
+            "cargo:rustc-link-search=native={}/targets/x86_64-linux/lib",
+            cuda_path
+        );
+        println!("cargo:rustc-link-lib=dylib=cuda"); // Driver API (cuDeviceGet, cuMemCreate…)
+        println!("cargo:rustc-link-lib=dylib=cudart");
+        println!("cargo:rustc-link-lib=dylib=cublas");
+        println!("cargo:rustc-link-lib=dylib=cublasLt");
+    }
 
     #[cfg(target_os = "linux")]
     {
@@ -72,10 +106,7 @@ fn main() {
     let ggml_include = llama_root.join("ggml").join("include");
     let ggml_build_include = llama_root.join("build").join("ggml").join("include");
 
-    let mut include_paths = vec![
-        llama_include.clone(),
-        ggml_include.clone(),
-    ];
+    let mut include_paths = vec![llama_include.clone(), ggml_include.clone()];
     if ggml_build_include.exists() {
         include_paths.push(ggml_build_include);
     }

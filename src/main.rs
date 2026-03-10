@@ -8,6 +8,7 @@ use ferrum_engine::config::Config;
 use ferrum_engine::engine::model::{LlamaCppModel, Model};
 use ferrum_engine::engine::InferenceEngine;
 use ferrum_engine::kv_cache::KVCacheManager;
+use ferrum_engine::metrics::Metrics;
 use ferrum_engine::scheduler::Scheduler;
 
 #[tokio::main]
@@ -38,7 +39,11 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!("loading model from {:?}", config.model_path);
-    let model = LlamaCppModel::load(&config.model_path, config.max_batch_size, config.max_context_len)?;
+    let model = LlamaCppModel::load(
+        &config.model_path,
+        config.max_batch_size,
+        config.max_context_len,
+    )?;
     let model_config = model.model_config();
 
     // Derive a human-readable model name from the file stem (e.g. "qwen2-7b-instruct-q4")
@@ -61,21 +66,43 @@ async fn main() -> Result<()> {
     let scheduler = Scheduler::new(kv_cache.clone(), config.max_batch_size);
     let scheduler = std::sync::Arc::new(scheduler);
 
+    let metrics = match Metrics::new() {
+        Ok(m) => {
+            tracing::info!("Prometheus metrics registered; scrape at /metrics");
+            Some(std::sync::Arc::new(m))
+        }
+        Err(e) => {
+            tracing::warn!("failed to register Prometheus metrics: {}", e);
+            None
+        }
+    };
+
     let model = std::sync::Arc::new(model);
-    let engine = InferenceEngine::new(model.clone(), scheduler.clone(), kv_cache.clone(), model_name);
+    let engine = InferenceEngine::new(
+        model.clone(),
+        scheduler.clone(),
+        kv_cache.clone(),
+        model_name,
+        metrics,
+    );
     let engine = std::sync::Arc::new(engine);
 
-    let addr: std::net::SocketAddr = format!("{}:{}", config.host, config.port)
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid bind address '{}:{}': {}", config.host, config.port, e))?;
+    let addr: std::net::SocketAddr =
+        format!("{}:{}", config.host, config.port)
+            .parse()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid bind address '{}:{}': {}",
+                    config.host,
+                    config.port,
+                    e
+                )
+            })?;
     let app = router(engine.clone()).layer(tower_http::cors::CorsLayer::permissive());
 
     tracing::info!("listening on {}", addr);
 
-    let server = axum::serve(
-        tokio::net::TcpListener::bind(addr).await?,
-        app,
-    );
+    let server = axum::serve(tokio::net::TcpListener::bind(addr).await?, app);
 
     let engine_loop = {
         let engine = engine.clone();
@@ -112,8 +139,8 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate())
-            .expect("failed to install SIGTERM handler");
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => {}
             _ = sigterm.recv() => {}
@@ -125,14 +152,20 @@ async fn shutdown_signal() {
 }
 
 fn get_gpu_memory_bytes() -> usize {
+    // Query total GPU memory via nvidia-smi (works with any CUDA version, no extra deps).
+    // Falls back to 8 GiB if the GPU is unavailable or nvidia-smi is not installed.
     #[cfg(feature = "cuda")]
+    if let Ok(out) = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .output()
     {
-        if let Ok(cu) = cudarc::driver::CudaDevice::new(0) {
-            if let Ok((_free, total)) = cu.get_mem_info() {
-                return total;
+        if out.status.success() {
+            if let Ok(s) = std::str::from_utf8(&out.stdout) {
+                if let Ok(mib) = s.trim().parse::<usize>() {
+                    return mib * 1024 * 1024;
+                }
             }
         }
     }
-    // Fallback: 8 GB
     8 * 1024 * 1024 * 1024
 }
