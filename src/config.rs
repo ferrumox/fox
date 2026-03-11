@@ -78,8 +78,14 @@ fn config_path() -> PathBuf {
     if let Ok(p) = std::env::var("FOX_CONFIG") {
         return PathBuf::from(p);
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".config/ferrumox/config.toml")
+    // Platform-appropriate config directory:
+    // Linux:   ~/.config/ferrumox/config.toml
+    // macOS:   ~/Library/Application Support/ferrumox/config.toml
+    // Windows: %APPDATA%\ferrumox\config.toml
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("ferrumox")
+        .join("config.toml")
 }
 
 #[cfg(test)]

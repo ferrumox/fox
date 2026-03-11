@@ -1,6 +1,7 @@
 // CLI entry point — dispatch to subcommands.
 
 pub mod list;
+pub mod models;
 pub mod ps;
 pub mod pull;
 pub mod rm;
@@ -40,6 +41,8 @@ pub enum Command {
     Show(show::ShowArgs),
     /// Show running model servers
     Ps(ps::PsArgs),
+    /// List curated models available to pull
+    Models(models::ModelsArgs),
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -56,20 +59,28 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Rm(args) => rm::run_rm(args).await,
         Command::Show(args) => show::run_show(args).await,
         Command::Ps(args) => ps::run_ps(args).await,
+        Command::Models(args) => models::run_models(args).await,
     }
 }
 
 /// Query total GPU memory via nvidia-smi. Falls back to 8 GiB on CPU-only builds.
 pub(crate) fn get_gpu_memory_bytes() -> usize {
     #[cfg(feature = "cuda")]
-    if let Ok(out) = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
-        .output()
     {
-        if out.status.success() {
-            if let Ok(s) = std::str::from_utf8(&out.stdout) {
-                if let Ok(mib) = s.trim().parse::<usize>() {
-                    return mib * 1024 * 1024;
+        let nvidia_smi = if cfg!(target_os = "windows") {
+            "nvidia-smi.exe"
+        } else {
+            "nvidia-smi"
+        };
+        if let Ok(out) = std::process::Command::new(nvidia_smi)
+            .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+            .output()
+        {
+            if out.status.success() {
+                if let Ok(s) = std::str::from_utf8(&out.stdout) {
+                    if let Ok(mib) = s.trim().parse::<usize>() {
+                        return mib * 1024 * 1024;
+                    }
                 }
             }
         }
@@ -77,21 +88,28 @@ pub(crate) fn get_gpu_memory_bytes() -> usize {
     8 * 1024 * 1024 * 1024
 }
 
-/// Expand a leading `~` to the user's home directory.
+/// Expand a leading `~` to the user's home directory (cross-platform).
 pub(crate) fn expand_tilde(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
     if s.starts_with("~/") || s == "~" {
-        if let Ok(home) = std::env::var("HOME") {
+        if let Some(home) = dirs::home_dir() {
             let rest = s.strip_prefix("~").unwrap_or("");
-            return PathBuf::from(home).join(rest.trim_start_matches('/'));
+            return home.join(rest.trim_start_matches('/'));
         }
     }
     path.to_path_buf()
 }
 
-/// Default models directory: `~/.cache/ferrumox/models`.
+/// Default models directory (platform-appropriate).
+///
+/// - Linux:   `~/.cache/ferrumox/models`
+/// - macOS:   `~/Library/Caches/ferrumox/models`
+/// - Windows: `%LOCALAPPDATA%\ferrumox\models`
 pub(crate) fn models_dir() -> PathBuf {
-    expand_tilde(Path::new("~/.cache/ferrumox/models"))
+    dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("ferrumox")
+        .join("models")
 }
 
 /// List all `.gguf` files in `dir`, sorted by filename.

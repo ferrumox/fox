@@ -40,6 +40,7 @@ lru = "0.16.3"
 dashmap = "6"
 toml = "0.8"
 bytes = "1"
+dirs = "5"
 
 # Optional
 

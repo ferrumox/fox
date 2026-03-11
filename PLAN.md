@@ -245,3 +245,8 @@ ferrum run         # single-shot terminal inference (available since v0.4.0)
 ferrum pull        # download GGUF model from HuggingFace Hub (available since v0.4.0)
 ferrum-bench       # integrated benchmark (available since v0.2.0)
 ```
+
+### Ideas
+
+- MCP
+- WebGPU Inference

@@ -1,7 +1,8 @@
 // `fox pull` — download a GGUF model from HuggingFace Hub.
 //
 // Usage:
-//   fox pull bartowski/Llama-3.2-1B-Instruct-GGUF
+//   fox pull llama3.2                                    (registry shortname)
+//   fox pull bartowski/Llama-3.2-1B-Instruct-GGUF       (HF repo)
 //   fox pull bartowski/Llama-3.2-1B-Instruct-GGUF --filename Llama-3.2-1B-Instruct-Q4_K_M.gguf
 //   fox pull bartowski/Llama-3.2-1B-Instruct-GGUF --output-dir ./models
 
@@ -13,14 +14,15 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use super::theme;
+use crate::registry::Registry;
 
 const HF_API_BASE: &str = "https://huggingface.co/api/models";
 const HF_CDN_BASE: &str = "https://huggingface.co";
 
 #[derive(Parser, Debug)]
 pub struct PullArgs {
-    /// HuggingFace model ID in the form `owner/repo`
-    /// (e.g. `bartowski/Llama-3.2-1B-Instruct-GGUF`)
+    /// Model name (e.g. `llama3.2`, `mistral`) or HuggingFace repo (`owner/repo`).
+    /// Run `fox models` to see available shortnames.
     pub model_id: String,
 
     /// Specific GGUF filename to download.
@@ -29,9 +31,9 @@ pub struct PullArgs {
     pub filename: Option<String>,
 
     /// Directory where the model file will be saved.
-    /// Defaults to `~/.cache/ferrumox/models/`
-    #[arg(long, default_value = "~/.cache/ferrumox/models")]
-    pub output_dir: PathBuf,
+    /// Defaults to the platform cache directory (e.g. ~/.cache/ferrumox/models).
+    #[arg(long)]
+    pub output_dir: Option<PathBuf>,
 
     /// HuggingFace API token for private or gated models
     #[arg(long, env = "HF_TOKEN")]
@@ -39,13 +41,33 @@ pub struct PullArgs {
 }
 
 pub async fn run_pull(args: PullArgs) -> Result<()> {
-    let output_dir = super::expand_tilde(&args.output_dir);
+    let output_dir = match args.output_dir {
+        Some(ref d) => super::expand_tilde(d),
+        None => super::models_dir(),
+    };
     std::fs::create_dir_all(&output_dir)
         .with_context(|| format!("creating output dir {:?}", output_dir))?;
 
+    // Resolve model shortname via registry (e.g. "llama3.2" → real HF repo + recommended file).
+    let registry = Registry::load();
+    let (hf_repo, registry_filename) = if let Some((_canonical, entry)) =
+        registry.resolve(&args.model_id)
+    {
+        eprintln!(
+            "Resolved '{}' → {} ({})",
+            args.model_id, entry.repo, entry.recommended
+        );
+        (entry.repo, Some(entry.recommended))
+    } else {
+        (args.model_id.clone(), None)
+    };
+
+    // filename: --filename flag > registry recommended > interactive
+    let filename_override = args.filename.or(registry_filename);
+
     // 1. Fetch model metadata from HF Hub API.
-    eprintln!("Fetching model info for {}…", args.model_id);
-    let url = format!("{}/{}", HF_API_BASE, args.model_id);
+    eprintln!("Fetching model info for {}…", hf_repo);
+    let url = format!("{}/{}", HF_API_BASE, hf_repo);
     let client = build_client(args.hf_token.as_deref())?;
     let resp = client
         .get(&url)
@@ -80,18 +102,18 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         anyhow::bail!(
             "No .gguf files found in `{}`. \
              This repository may not contain GGUF quantizations.",
-            args.model_id
+            hf_repo
         );
     }
 
     // 3. Resolve which file to download.
-    let filename = match args.filename {
+    let filename = match filename_override {
         Some(f) => {
             if !gguf_files.contains(&f) {
                 anyhow::bail!(
                     "File `{}` not found in `{}`. Available GGUF files:\n{}",
                     f,
-                    args.model_id,
+                    hf_repo,
                     gguf_files
                         .iter()
                         .map(|s| format!("  - {}", s))
@@ -119,7 +141,7 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
 
     let download_url = format!(
         "{}/{}/resolve/main/{}",
-        HF_CDN_BASE, args.model_id, filename
+        HF_CDN_BASE, hf_repo, filename
     );
     eprintln!("Downloading {} …", filename);
 

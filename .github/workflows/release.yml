@@ -7,7 +7,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  FOX_SKIP_LLAMA: "1"
 
 jobs:
   build:
@@ -20,15 +19,33 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
             use_cross: false
+            features: ""
+            ext: ""
+            archive: tar
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04
             use_cross: true
+            features: ""
+            ext: ""
+            archive: tar
           - target: x86_64-apple-darwin
             runner: macos-13
             use_cross: false
+            features: "metal"
+            ext: ""
+            archive: tar
           - target: aarch64-apple-darwin
             runner: macos-latest
             use_cross: false
+            features: "metal"
+            ext: ""
+            archive: tar
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            use_cross: false
+            features: ""
+            ext: ".exe"
+            archive: zip
 
     steps:
       - uses: actions/checkout@v4
@@ -54,25 +71,39 @@ jobs:
         if: matrix.use_cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Build (native)
-        if: "!matrix.use_cross"
+      - name: Build (native, no features)
+        if: "!matrix.use_cross && matrix.features == ''"
         run: cargo build --release --bin fox --target ${{ matrix.target }}
+
+      - name: Build (native, with features)
+        if: "!matrix.use_cross && matrix.features != ''"
+        run: cargo build --release --bin fox --target ${{ matrix.target }} --features ${{ matrix.features }}
 
       - name: Build (cross)
         if: matrix.use_cross
         run: cross build --release --bin fox --target ${{ matrix.target }}
 
-      - name: Package tarball
+      - name: Package tarball (Unix)
+        if: matrix.archive == 'tar'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           TARGET="${{ matrix.target }}"
-          BINARY="target/$TARGET/release/fox"
           TARBALL="fox-${VERSION}-${TARGET}.tar.gz"
           tar czf "$TARBALL" -C "target/$TARGET/release" fox
-          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+          echo "ASSET=$TARBALL" >> "$GITHUB_ENV"
+
+      - name: Package zip (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $version = "$env:GITHUB_REF_NAME" -replace '^v', ''
+          $target  = "${{ matrix.target }}"
+          $zip     = "fox-${version}-${target}.zip"
+          Compress-Archive -Path "target\$target\release\fox.exe" -DestinationPath $zip
+          "ASSET=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.TARBALL }}
+          files: ${{ env.ASSET }}

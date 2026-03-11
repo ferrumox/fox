@@ -1,0 +1,84 @@
+{
+  "models": {
+    "llama3.2": {
+      "aliases": ["llama3", "llama"],
+      "repo": "bartowski/Llama-3.2-3B-Instruct-GGUF",
+      "recommended": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+      "description": "Meta Llama 3.2 3B — fast, great for general chat",
+      "size_gb": 2.0,
+      "tags": ["chat", "general", "fast"]
+    },
+    "llama3.1": {
+      "aliases": ["llama3.1:8b"],
+      "repo": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+      "recommended": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+      "description": "Meta Llama 3.1 8B — well-rounded instruction model",
+      "size_gb": 4.9,
+      "tags": ["chat", "general", "reasoning"]
+    },
+    "mistral": {
+      "aliases": ["mistral7b", "mistral:7b"],
+      "repo": "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+      "recommended": "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+      "description": "Mistral 7B Instruct v0.3 — reliable all-rounder",
+      "size_gb": 4.4,
+      "tags": ["chat", "general", "fast"]
+    },
+    "phi4": {
+      "aliases": ["phi-4", "phi4:14b"],
+      "repo": "bartowski/phi-4-GGUF",
+      "recommended": "phi-4-Q4_K_M.gguf",
+      "description": "Microsoft Phi-4 14B — strong reasoning, efficient",
+      "size_gb": 8.4,
+      "tags": ["chat", "reasoning", "coding"]
+    },
+    "phi3.5": {
+      "aliases": ["phi3", "phi-3.5"],
+      "repo": "bartowski/Phi-3.5-mini-instruct-GGUF",
+      "recommended": "Phi-3.5-mini-instruct-Q4_K_M.gguf",
+      "description": "Microsoft Phi-3.5 mini 3.8B — tiny but capable",
+      "size_gb": 2.4,
+      "tags": ["chat", "fast", "edge"]
+    },
+    "gemma3": {
+      "aliases": ["gemma", "gemma3:4b"],
+      "repo": "bartowski/gemma-3-4b-it-GGUF",
+      "recommended": "gemma-3-4b-it-Q4_K_M.gguf",
+      "description": "Google Gemma 3 4B — strong small model from Google",
+      "size_gb": 2.5,
+      "tags": ["chat", "general", "fast"]
+    },
+    "qwen2.5": {
+      "aliases": ["qwen", "qwen2.5:7b"],
+      "repo": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+      "recommended": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+      "description": "Alibaba Qwen 2.5 7B — excellent multilingual support",
+      "size_gb": 4.7,
+      "tags": ["chat", "multilingual", "coding"]
+    },
+    "deepseek-r1": {
+      "aliases": ["deepseek", "r1"],
+      "repo": "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF",
+      "recommended": "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+      "description": "DeepSeek R1 Distill 7B — chain-of-thought reasoning",
+      "size_gb": 4.7,
+      "tags": ["reasoning", "math", "thinking"]
+    },
+    "codellama": {
+      "aliases": ["code", "codellama:7b"],
+      "repo": "bartowski/CodeLlama-7b-Instruct-GGUF",
+      "recommended": "CodeLlama-7b-Instruct-Q4_K_M.gguf",
+      "description": "Code Llama 7B Instruct — optimized for code generation",
+      "size_gb": 4.4,
+      "tags": ["coding", "chat"]
+    },
+    "nomic-embed": {
+      "aliases": ["embed", "nomic"],
+      "repo": "nomic-ai/nomic-embed-text-v1.5-GGUF",
+      "recommended": "nomic-embed-text-v1.5.Q4_K_M.gguf",
+      "description": "Nomic Embed Text v1.5 — high-quality text embeddings",
+      "size_gb": 0.1,
+      "tags": ["embeddings", "search", "rag"]
+    }
+  }
+}

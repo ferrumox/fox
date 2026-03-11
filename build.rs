@@ -86,10 +86,34 @@ fn main() {
     println!("cargo:rustc-link-lib=static=ggml");
     println!("cargo:rustc-link-lib=static=ggml-cpu");
     println!("cargo:rustc-link-lib=static=ggml-base");
-    println!("cargo:rustc-link-lib=dylib=stdc++");
-    println!("cargo:rustc-link-lib=dylib=pthread");
-    println!("cargo:rustc-link-lib=dylib=dl");
-    println!("cargo:rustc-link-lib=dylib=gomp"); // OpenMP
+
+    // Platform-conditional system libraries.
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    match target_os.as_str() {
+        "linux" => {
+            println!("cargo:rustc-link-lib=dylib=stdc++");
+            println!("cargo:rustc-link-lib=dylib=pthread");
+            println!("cargo:rustc-link-lib=dylib=dl");
+            println!("cargo:rustc-link-lib=dylib=gomp");
+            println!("cargo:rustc-link-lib=dylib=m");
+        }
+        "macos" => {
+            // macOS uses libc++ (not libstdc++); pthread is part of libSystem.
+            println!("cargo:rustc-link-lib=dylib=c++");
+            if env::var("CARGO_FEATURE_METAL").is_ok() {
+                println!("cargo:rustc-link-lib=static=ggml-metal");
+                println!("cargo:rustc-link-lib=framework=Foundation");
+                println!("cargo:rustc-link-lib=framework=Metal");
+                println!("cargo:rustc-link-lib=framework=MetalKit");
+            }
+        }
+        "windows" => {
+            // MSVC links the C++ runtime automatically; no extra flags needed.
+        }
+        _ => {
+            println!("cargo:rustc-link-lib=dylib=stdc++");
+        }
+    }
 
     if env::var("CARGO_FEATURE_CUDA").is_ok() {
         // CUDA backend static library (produced by llama.cpp cmake with GGML_CUDA=ON)
@@ -134,11 +158,6 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib=cudart");
         println!("cargo:rustc-link-lib=dylib=cublas");
         println!("cargo:rustc-link-lib=dylib=cublasLt");
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        println!("cargo:rustc-link-lib=dylib=m");
     }
 
     // Generate bindings with bindgen
