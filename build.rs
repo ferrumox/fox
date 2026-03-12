@@ -40,8 +40,27 @@ fn main() {
 
     // Feature-based backend selection
     if env::var("CARGO_FEATURE_CUDA").is_ok() {
-        if env::var("CUDA_PATH").is_ok() {
-            cmake_config.define("GGML_CUDA", "ON");
+        cmake_config.define("GGML_CUDA", "ON");
+
+        // Resolve nvcc: CUDACXX env var → `which nvcc` → /usr/local/cuda fallback.
+        let nvcc = env::var("CUDACXX").unwrap_or_else(|_| {
+            std::process::Command::new("which")
+                .arg("nvcc")
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        String::from_utf8(o.stdout)
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "/usr/local/cuda/bin/nvcc".to_string())
+        });
+        if std::path::Path::new(&nvcc).exists() {
+            cmake_config.define("CMAKE_CUDA_COMPILER", &nvcc);
         }
     } else if env::var("CARGO_FEATURE_METAL").is_ok() {
         cmake_config.define("GGML_METAL", "ON");
@@ -82,8 +101,27 @@ fn main() {
         );
         println!("cargo:rustc-link-lib=static=ggml-cuda");
 
-        // Link CUDA runtime and cuBLAS
-        let cuda_path = env::var("CUDA_PATH").unwrap_or_else(|_| "/usr/local/cuda".to_string());
+        // Link CUDA runtime and cuBLAS.
+        // Derive cuda_root from nvcc location (strip /bin/nvcc suffix).
+        let cuda_path = env::var("CUDA_PATH").unwrap_or_else(|_| {
+            std::process::Command::new("which")
+                .arg("nvcc")
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        String::from_utf8(o.stdout).ok().and_then(|s| {
+                            std::path::Path::new(s.trim())
+                                .parent() // .../bin
+                                .and_then(|p| p.parent()) // cuda root
+                                .map(|p| p.to_string_lossy().into_owned())
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "/usr/local/cuda".to_string())
+        });
         // Support both /cuda/lib64 and /cuda/targets/x86_64-linux/lib layouts
         println!("cargo:rustc-link-search=native={}/lib64", cuda_path);
         println!(

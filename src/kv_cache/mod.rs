@@ -3,8 +3,9 @@
 // Total blocks computed from: gpu_memory_bytes * fraction / bytes_per_block
 // bytes_per_block = block_size × num_layers × num_heads_kv × head_dim × 2 (K+V) × 2 (f16)
 
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 use tracing::debug;
@@ -13,6 +14,49 @@ use crate::engine::model::ModelConfig;
 
 /// Physical block ID in the KV cache pool.
 pub type BlockId = usize;
+
+// ---------------------------------------------------------------------------
+// Block-level chain hashing
+// ---------------------------------------------------------------------------
+
+/// Process-stable random state for block hashing (same as the scheduler's).
+/// A separate `OnceLock` ensures the seed is consistent across kv_cache and scheduler.
+static BLOCK_HASH_STATE: OnceLock<ahash::RandomState> = OnceLock::new();
+
+/// Compute the chain hash for one block.
+///
+/// # Chain hash design
+/// `h_N = hash(h_{N-1} ‖ tokens_N)`
+///
+/// Starting with `parent_hash = 0` for the first block, each block's hash
+/// captures the full prefix up to (and including) that block.  Two request
+/// prompts that share their first K blocks will therefore produce identical
+/// hashes at each of the first K block boundaries, enabling block-level prefix
+/// cache matches even when the prompts diverge afterwards.
+pub fn compute_block_hash(parent_hash: u64, tokens: &[i32]) -> u64 {
+    let state = BLOCK_HASH_STATE.get_or_init(ahash::RandomState::new);
+    let mut h = state.build_hasher();
+    parent_hash.hash(&mut h);
+    tokens.hash(&mut h);
+    h.finish()
+}
+
+/// Compute the chain hashes for all *complete* blocks of `tokens`.
+/// Returns one hash per full block (length = `tokens.len() / block_size`).
+/// The partial trailing block (if any) is intentionally excluded because its
+/// content can still change as more tokens are appended during decoding.
+pub fn prompt_block_hashes(tokens: &[i32], block_size: usize) -> Vec<u64> {
+    let full_blocks = tokens.len() / block_size;
+    let mut h = 0u64;
+    (0..full_blocks)
+        .map(|i| {
+            let start = i * block_size;
+            let end = start + block_size;
+            h = compute_block_hash(h, &tokens[start..end]);
+            h
+        })
+        .collect()
+}
 
 /// Logical-to-physical page table for a single request.
 ///
@@ -248,6 +292,17 @@ impl KVCacheManager {
         } else {
             (allocated / total).min(1.0)
         }
+    }
+
+    /// Returns `true` if `block_id` is currently shared (ref_count > 1).
+    ///
+    /// Used by the decode path to decide whether copy-on-write is needed before
+    /// llama.cpp writes a new token into this block's KV slot.
+    pub fn is_shared(&self, block_id: BlockId) -> bool {
+        if block_id >= self.total_blocks {
+            return false;
+        }
+        self.ref_count[block_id].load(Ordering::Acquire) > 1
     }
 
     pub fn block_size(&self) -> usize {
