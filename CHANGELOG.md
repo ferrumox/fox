@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`fox search <query>`** — search HuggingFace Hub for GGUF models in real time.
+  Results are sorted by downloads (default) or likes (`--sort likes`), show repo name,
+  download count, and like count, and mark already-downloaded models with `✓`.
+  Supports multi-word queries (`fox search qwen coder`) and `--limit N`.
+
+- **`fox pull` friendly name resolution** — `fox pull` now searches HuggingFace
+  automatically when given a friendly name instead of a raw `owner/repo` path.
+  The top result by downloads is selected.
+
+- **`fox pull` model spec syntax** — extended pull syntax for specifying size and
+  quantization without knowing the exact filename:
+  - `fox pull gemma3` — top HF result, balanced quant auto-selected
+  - `fox pull gemma3:12b` — top result for "gemma3 12b"
+  - `fox pull gemma3:12b-q4` — top result for "gemma3 12b", Q4 variant (picks `Q4_K_M`)
+  - `fox pull owner/repo:q5` — exact repo + quant prefix
+  - When a quant prefix matches multiple files (e.g. `q4` → `Q4_K_M`, `Q4_K_S`, `Q4_0`),
+    the most balanced variant is selected automatically (`Q4_K_M` > `Q4_K_S` > `Q4_0`).
+
 - **`fox-bench --compare-url <URL>`** — run the same workload against two servers in
   parallel and display a side-by-side comparison table with improvement percentages for
   TTFT P50/P95, latency P50/P95/P99, and throughput. Designed for benchmarking

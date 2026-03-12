@@ -14,6 +14,7 @@ continuous batching.
 Benchmarked on a single RTX 3090, Llama-3.2-3B-Instruct-Q4_K_M, 4 concurrent workers,
 50 requests, 128 max tokens:
 
+<!-- BENCH_TABLE_START -->
 | Metric | ferrumox | Ollama | Improvement |
 |--------|----------|--------|-------------|
 | TTFT P50 | 87ms | 310ms | **+72%** |
@@ -21,8 +22,9 @@ Benchmarked on a single RTX 3090, Llama-3.2-3B-Instruct-Q4_K_M, 4 concurrent wor
 | Latency P50 | 412ms | 890ms | **+54%** |
 | Latency P95 | 823ms | 1740ms | **+53%** |
 | Throughput | 312 t/s | 148 t/s | **+111%** |
+<!-- BENCH_TABLE_END -->
 
-> Reproduce: `./scripts/benchmark.sh llama3.2 4 50`
+> Reproduce: `./scripts/benchmark.sh gemma3 4 50` · Docker: `./scripts/benchmark.sh gemma3 4 50 --docker`
 
 ---
 
@@ -33,7 +35,7 @@ Benchmarked on a single RTX 3090, Llama-3.2-3B-Instruct-Q4_K_M, 4 concurrent wor
 curl -fsSL https://github.com/ManuelSLemos/ferrum-engine/releases/latest/download/install.sh | sh
 
 # 2. Pull a model and start the server
-fox pull bartowski/Llama-3.2-3B-Instruct-GGUF
+fox pull llama3.2          # searches HuggingFace, picks best result
 fox serve
 
 # 3. Query it (OpenAI-compatible)
@@ -148,7 +150,7 @@ docker compose up
 # 3. Or pull via the API
 docker compose up -d
 curl -X POST http://localhost:8080/api/pull \
-  -d '{"name":"bartowski/Llama-3.2-3B-Instruct-GGUF"}'
+  -d '{"name":"llama3.2"}'
 ```
 
 ---
@@ -156,8 +158,20 @@ curl -X POST http://localhost:8080/api/pull \
 ## Usage
 
 ```bash
-# Pull a model from HuggingFace
-fox pull bartowski/Llama-3.2-3B-Instruct-GGUF
+# Search HuggingFace for GGUF models
+fox search gemma
+fox search qwen coder --limit 5
+fox search gemma --sort likes
+
+# Pull a model — searches HuggingFace automatically
+fox pull gemma3                    # top result for "gemma3", balanced quant
+fox pull gemma3:12b                # top result for "gemma3 12b"
+fox pull gemma3:12b-q4             # top result for "gemma3 12b", Q4 variant
+fox pull gemma3:12b-q8             # top result for "gemma3 12b", Q8 variant
+
+# Pull a specific HuggingFace repo directly
+fox pull bartowski/gemma-3-12b-it-GGUF
+fox pull bartowski/gemma-3-12b-it-GGUF:q5   # repo + quant prefix
 
 # Start server (model is optional — lazy loading if omitted)
 fox serve
@@ -177,12 +191,6 @@ fox list
 
 # Show model info
 fox show Llama-3.2-3B-Instruct-Q4_K_M
-
-# List curated models available to pull
-fox models
-
-# Pull by short name (resolves via built-in registry)
-fox pull llama3.2
 ```
 
 ---

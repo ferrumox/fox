@@ -6,6 +6,7 @@ pub mod ps;
 pub mod pull;
 pub mod rm;
 pub mod run;
+pub mod search;
 pub mod serve;
 pub mod show;
 pub mod theme;
@@ -43,6 +44,8 @@ pub enum Command {
     Ps(ps::PsArgs),
     /// List curated models available to pull
     Models(models::ModelsArgs),
+    /// Search HuggingFace Hub for GGUF models
+    Search(search::SearchArgs),
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -60,6 +63,7 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Show(args) => show::run_show(args).await,
         Command::Ps(args) => ps::run_ps(args).await,
         Command::Models(args) => models::run_models(args).await,
+        Command::Search(args) => search::run_search(args).await,
     }
 }
 
