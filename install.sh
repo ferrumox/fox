@@ -2,13 +2,13 @@
 # install.sh — Install fox (ferrumox) from GitHub Releases.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/your-org/ferrumox/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ManuelSLemos/ferrum-engine/main/install.sh | bash
 #   or
 #   ./install.sh [--version v0.8.0] [--prefix /usr/local]
 
 set -euo pipefail
 
-REPO="your-org/ferrumox"
+REPO="ManuelSLemos/ferrum-engine"
 VERSION="${FOX_VERSION:-latest}"
 PREFIX="${FOX_PREFIX:-/usr/local}"
 BIN_DIR="$PREFIX/bin"

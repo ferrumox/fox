@@ -30,7 +30,7 @@ Benchmarked on a single RTX 3090, Llama-3.2-3B-Instruct-Q4_K_M, 4 concurrent wor
 
 ```bash
 # 1. Install
-curl -fsSL https://github.com/your-org/rabbit-engine/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/ManuelSLemos/ferrum-engine/releases/latest/download/install.sh | sh
 
 # 2. Pull a model and start the server
 fox pull bartowski/Llama-3.2-3B-Instruct-GGUF
@@ -102,16 +102,26 @@ concurrent load.
 
 ## Installation
 
-### One-liner (Linux / macOS)
+### Linux / macOS
 
 ```bash
-curl -fsSL https://github.com/your-org/rabbit-engine/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/ManuelSLemos/ferrum-engine/releases/latest/download/install.sh | sh
 ```
+
+Supports `x86_64` and `arm64` (Apple Silicon with Metal).
+
+### Windows
+
+```powershell
+irm https://raw.githubusercontent.com/ManuelSLemos/ferrum-engine/main/install.ps1 | iex
+```
+
+Installs `fox.exe` to `%LOCALAPPDATA%\ferrumox\bin` and offers to add it to your PATH.
 
 ### Build from source
 
 ```bash
-git clone --recurse-submodules https://github.com/your-org/rabbit-engine
+git clone --recurse-submodules https://github.com/ManuelSLemos/ferrum-engine
 cd rabbit-engine
 
 # CPU backend
@@ -167,6 +177,12 @@ fox list
 
 # Show model info
 fox show Llama-3.2-3B-Instruct-Q4_K_M
+
+# List curated models available to pull
+fox models
+
+# Pull by short name (resolves via built-in registry)
+fox pull llama3.2
 ```
 
 ---
