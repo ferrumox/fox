@@ -57,7 +57,12 @@ fn write_aliases(path: &PathBuf, aliases: &HashMap<String, String>) -> Result<()
     let mut sorted: Vec<(&String, &String)> = aliases.iter().collect();
     sorted.sort_by_key(|(k, _)| k.as_str());
     for (k, v) in sorted {
-        content.push_str(&format!("{} = {:?}\n", k, v));
+        let needs_quotes = !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if needs_quotes {
+            content.push_str(&format!("{:?} = {:?}\n", k, v));
+        } else {
+            content.push_str(&format!("{} = {:?}\n", k, v));
+        }
     }
     std::fs::write(path, content)?;
     Ok(())

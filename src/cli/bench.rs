@@ -64,7 +64,8 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
     spinner.enable_steady_tick(Duration::from_millis(80));
 
     let load_start = Instant::now();
-    let model = LlamaCppModel::load(&model_path, 1, args.max_context_len)?;
+    let gpu_memory_bytes_load = get_gpu_memory_bytes();
+    let model = LlamaCppModel::load(&model_path, 1, args.max_context_len, gpu_memory_bytes_load, 0.85)?;
     let model_config = model.model_config();
     let load_elapsed = load_start.elapsed();
 

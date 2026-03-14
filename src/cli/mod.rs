@@ -96,24 +96,17 @@ pub async fn run() -> anyhow::Result<()> {
     }
 }
 
-/// Query total GPU memory via nvidia-smi. Falls back to 8 GiB on CPU-only builds.
+/// Query total GPU memory via nvidia-smi. Falls back to 8 GiB if no GPU is found.
 pub(crate) fn get_gpu_memory_bytes() -> usize {
-    #[cfg(feature = "cuda")]
+    let nvidia_smi = if cfg!(target_os = "windows") { "nvidia-smi.exe" } else { "nvidia-smi" };
+    if let Ok(out) = std::process::Command::new(nvidia_smi)
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .output()
     {
-        let nvidia_smi = if cfg!(target_os = "windows") {
-            "nvidia-smi.exe"
-        } else {
-            "nvidia-smi"
-        };
-        if let Ok(out) = std::process::Command::new(nvidia_smi)
-            .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
-            .output()
-        {
-            if out.status.success() {
-                if let Ok(s) = std::str::from_utf8(&out.stdout) {
-                    if let Ok(mib) = s.trim().parse::<usize>() {
-                        return mib * 1024 * 1024;
-                    }
+        if out.status.success() {
+            if let Ok(s) = std::str::from_utf8(&out.stdout) {
+                if let Ok(mib) = s.trim().parse::<usize>() {
+                    return mib * 1024 * 1024;
                 }
             }
         }

@@ -7,9 +7,6 @@ license = "MIT OR Apache-2.0"
 
 [features]
 default = []
-cuda = []
-metal = []
-cpu-only = []
 
 [dependencies]
 tokio = { version = "1.41", features = ["rt-multi-thread", "sync", "time", "macros", "signal", "process"] }

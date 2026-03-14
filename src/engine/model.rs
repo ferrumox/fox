@@ -375,6 +375,19 @@ pub struct LlamaCppModel {
     eos_token: i32,
 }
 
+/// Query current free GPU memory in bytes via nvidia-smi.
+/// Returns None on CPU-only systems or when nvidia-smi is unavailable.
+#[cfg(not(fox_stub))]
+fn query_gpu_free_bytes() -> Option<usize> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !out.status.success() { return None; }
+    let mib: usize = std::str::from_utf8(&out.stdout).ok()?.trim().parse().ok()?;
+    Some(mib * 1024 * 1024)
+}
+
 #[cfg(not(fox_stub))]
 impl LlamaCppModel {
     /// Load a GGUF model from path.
@@ -382,7 +395,15 @@ impl LlamaCppModel {
         model_path: &std::path::Path,
         max_batch_size: usize,
         max_context_len: u32,
+        gpu_memory_bytes: usize,
+        gpu_memory_fraction: f32,
     ) -> Result<Self> {
+        // Load GPU/CPU backends compiled as dynamic libraries (GGML_BACKEND_DL).
+        // Passing null searches the executable's directory and cwd — fox ships
+        // libggml-cuda.so and libggml-cpu.so next to the binary.
+        // On non-DL builds this is a no-op (backends are statically linked).
+        unsafe { ffi::ggml_backend_load_all_from_path(std::ptr::null()) };
+
         unsafe {
             ffi::llama_backend_init();
         }
@@ -392,7 +413,9 @@ impl LlamaCppModel {
             .ok_or_else(|| anyhow!("model path not valid UTF-8"))?;
         let path_c = CString::new(path_cstr)?;
 
-        let model_params = unsafe { ffi::llama_model_default_params() };
+        let mut model_params = unsafe { ffi::llama_model_default_params() };
+        // Offload all layers to GPU (-1 = all). On CPU-only builds llama.cpp ignores this.
+        model_params.n_gpu_layers = -1;
         let model = unsafe { ffi::llama_model_load_from_file(path_c.as_ptr(), model_params) };
         let model =
             NonNull::new(model).ok_or_else(|| anyhow!("llama_model_load_from_file failed"))?;
@@ -421,11 +444,25 @@ impl LlamaCppModel {
 
         let mut ctx_params = unsafe { ffi::llama_context_default_params() };
         // n_seq_max controls how many concurrent sequences the KV cache tracks.
-        // Must be >= max_batch_size for serving, and large enough for prefix-cache
-        // seq_cp operations (needs at least 2 slots). Using max(max_batch_size, 4)
-        // ensures n_ctx_seq = n_ctx / n_seq_max gives reasonable per-seq context.
         let n_seq = (max_batch_size as u32).max(4);
-        ctx_params.n_ctx = max_context_len * n_seq;
+
+        // Cap total KV context to fit in available GPU (or RAM) memory.
+        // Query FREE memory now (after model weights are loaded) so we don't OOM.
+        // Falls back to gpu_memory_bytes * fraction if nvidia-smi is unavailable.
+        let free_bytes = query_gpu_free_bytes().unwrap_or(
+            (gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize
+        );
+        let budget_bytes = (free_bytes as f64 * gpu_memory_fraction as f64) as usize;
+        // bytes_per_token = 2 (K+V) * n_head_kv * head_dim * 2 (fp16) * n_layer
+        let bytes_per_token = 2 * n_head_kv * head_dim * 2 * n_layer;
+        let max_tokens_by_mem = if bytes_per_token > 0 && budget_bytes > 0 {
+            (budget_bytes / bytes_per_token) as u32
+        } else {
+            max_context_len * n_seq
+        };
+        // Honour the user's max_context_len per sequence, but don't exceed memory budget.
+        let n_ctx = (max_context_len * n_seq).min(max_tokens_by_mem).max(max_context_len);
+        ctx_params.n_ctx = n_ctx;
         // n_batch must be at least as large as n_ctx to handle full prompts in one pass
         ctx_params.n_batch = max_context_len.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;

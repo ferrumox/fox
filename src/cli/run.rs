@@ -137,7 +137,8 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
     spinner.set_message("Loading model…");
     spinner.enable_steady_tick(Duration::from_millis(80));
 
-    let model = LlamaCppModel::load(&model_path, 1, args.max_context_len)?;
+    let gpu_memory_bytes_load = get_gpu_memory_bytes();
+    let model = LlamaCppModel::load(&model_path, 1, args.max_context_len, gpu_memory_bytes_load, args.gpu_memory_fraction)?;
     let model_config = model.model_config();
 
     spinner.finish_and_clear();

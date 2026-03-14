@@ -247,7 +247,7 @@ async fn load_model(name: &str, path: &Path, cfg: &RegistryConfig) -> Result<Eng
     tracing::info!("loading model '{}' from {:?}", name, path);
 
     let model = tokio::task::spawn_blocking(move || {
-        LlamaCppModel::load(&path, max_batch_size, max_context_len)
+        LlamaCppModel::load(&path, max_batch_size, max_context_len, gpu_memory_bytes, gpu_memory_fraction)
     })
     .await
     .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;

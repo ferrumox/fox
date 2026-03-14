@@ -220,9 +220,9 @@ impl Scheduler {
                     let id = req.id;
                     req.page_table = PageTable::new(hit.block_ids);
                     req.page_table.extend(new_ids);
-                    req.kv_seq_id = pool.pop().expect("pool non-empty checked above");
+                    req.kv_seq_id = hit.seq_id;
                     req.skip_prefix_tokens = cached_tokens;
-                    req.prefix_seq_id = Some(hit.seq_id);
+                    req.prefix_seq_id = None;
                     req.stop_reason = None;
                     req.state = batch::RequestState::Prefilling;
                     self.prefix_hits.fetch_add(1, Ordering::Relaxed);
