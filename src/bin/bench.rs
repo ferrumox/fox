@@ -5,6 +5,7 @@
 //!   - TTFT  (time to first token): P50 / P95
 //!   - Total latency per request:   P50 / P95 / P99
 //!   - Aggregate throughput:        tokens / second
+//!   - System metrics:              CPU%, memory MB, GPU util (if available)
 //!
 //! Usage (single server):
 //!   fox-bench --url http://localhost:8080 \
@@ -101,6 +102,26 @@ struct RequestResult {
     tokens_generated: usize,
 }
 
+/// System resource sample taken at one point in time.
+struct SystemSample {
+    cpu_pct: f64,
+    mem_mb: f64,
+    gpu_util_pct: Option<f64>,
+    gpu_mem_mb: Option<f64>,
+}
+
+/// Aggregated system resource statistics over a benchmark run.
+#[derive(Debug, Serialize)]
+struct SysStats {
+    cpu_avg: f64,
+    cpu_peak: f64,
+    mem_mb_peak: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gpu_util_avg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gpu_mem_mb_peak: Option<f64>,
+}
+
 /// Aggregated statistics for a single server run.
 #[derive(Debug, Serialize)]
 struct RunStats {
@@ -116,6 +137,8 @@ struct RunStats {
     throughput_tokens_per_sec: f64,
     total_time_secs: f64,
     total_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sys_metrics: Option<SysStats>,
 }
 
 /// Full benchmark report (single or comparison).
@@ -146,6 +169,7 @@ struct ImprovementStats {
 #[derive(Debug, Deserialize)]
 struct SseChunk {
     choices: Vec<SseChoice>,
+    usage: Option<SseUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +181,136 @@ struct SseChoice {
 #[derive(Debug, Deserialize)]
 struct SseDelta {
     content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SseUsage {
+    completion_tokens: usize,
+    #[allow(dead_code)]
+    prompt_tokens: usize,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// System metrics sampling
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Read /proc/stat line 0 → (idle, total) jiffies.
+#[cfg(target_os = "linux")]
+fn read_proc_stat() -> Option<(u64, u64)> {
+    let content = std::fs::read_to_string("/proc/stat").ok()?;
+    let first = content.lines().next()?;
+    let nums: Vec<u64> = first
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    if nums.len() < 4 {
+        return None;
+    }
+    // Fields: user nice system idle iowait irq softirq ...
+    let idle = nums.get(3).copied().unwrap_or(0) + nums.get(4).copied().unwrap_or(0);
+    let total: u64 = nums.iter().sum();
+    Some((idle, total))
+}
+
+/// Read /proc/meminfo → used memory in MB.
+#[cfg(target_os = "linux")]
+fn read_mem_mb() -> f64 {
+    let Ok(content) = std::fs::read_to_string("/proc/meminfo") else {
+        return 0.0;
+    };
+    let mut total_kb = 0u64;
+    let mut available_kb = 0u64;
+    for line in content.lines() {
+        if line.starts_with("MemTotal:") {
+            total_kb = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+        } else if line.starts_with("MemAvailable:") {
+            available_kb = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+        }
+    }
+    (total_kb.saturating_sub(available_kb)) as f64 / 1024.0
+}
+
+/// Query nvidia-smi for GPU utilization and memory used.
+async fn query_nvidia_smi() -> Option<(f64, f64)> {
+    let output = tokio::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader,nounits"])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().next()?;
+    let mut parts = line.split(',');
+    let util: f64 = parts.next()?.trim().parse().ok()?;
+    let mem: f64 = parts.next()?.trim().parse().ok()?;
+    Some((util, mem))
+}
+
+async fn sample_system() -> SystemSample {
+    // CPU: diff two /proc/stat reads 500ms apart (Linux only).
+    #[cfg(target_os = "linux")]
+    let cpu_pct = {
+        if let (Some((idle1, total1)), _) = (read_proc_stat(), ()) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Some((idle2, total2)) = read_proc_stat() {
+                let d_total = total2.saturating_sub(total1) as f64;
+                let d_idle = idle2.saturating_sub(idle1) as f64;
+                if d_total > 0.0 {
+                    (1.0 - d_idle / d_total) * 100.0
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            }
+        } else {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            0.0
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let cpu_pct = 0.0_f64;
+
+    #[cfg(target_os = "linux")]
+    let mem_mb = read_mem_mb();
+    #[cfg(not(target_os = "linux"))]
+    let mem_mb = 0.0_f64;
+
+    let (gpu_util_pct, gpu_mem_mb) = match query_nvidia_smi().await {
+        Some((u, m)) => (Some(u), Some(m)),
+        None => (None, None),
+    };
+
+    SystemSample { cpu_pct, mem_mb, gpu_util_pct, gpu_mem_mb }
+}
+
+fn aggregate_samples(samples: Vec<SystemSample>) -> Option<SysStats> {
+    if samples.is_empty() {
+        return None;
+    }
+    let n = samples.len() as f64;
+    let cpu_avg = samples.iter().map(|s| s.cpu_pct).sum::<f64>() / n;
+    let cpu_peak = samples.iter().map(|s| s.cpu_pct).fold(0.0_f64, f64::max);
+    let mem_mb_peak = samples.iter().map(|s| s.mem_mb).fold(0.0_f64, f64::max);
+
+    let gpu_samples: Vec<f64> = samples.iter().filter_map(|s| s.gpu_util_pct).collect();
+    let gpu_util_avg = if gpu_samples.is_empty() {
+        None
+    } else {
+        Some(gpu_samples.iter().sum::<f64>() / gpu_samples.len() as f64)
+    };
+
+    let gpu_mem_peak: Vec<f64> = samples.iter().filter_map(|s| s.gpu_mem_mb).collect();
+    let gpu_mem_mb_peak = if gpu_mem_peak.is_empty() {
+        None
+    } else {
+        Some(gpu_mem_peak.iter().cloned().fold(0.0_f64, f64::max))
+    };
+
+    Some(SysStats { cpu_avg, cpu_peak, mem_mb_peak, gpu_util_avg, gpu_mem_mb_peak })
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -176,7 +330,8 @@ async fn run_request(
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 1.0,
-        "stream": true
+        "stream": true,
+        "stream_options": {"include_usage": true}
     });
 
     let start = Instant::now();
@@ -194,7 +349,8 @@ async fn run_request(
 
     let mut stream = response.bytes_stream();
     let mut ttft: Option<Duration> = None;
-    let mut tokens_generated: usize = 0;
+    let mut chunk_count: usize = 0;
+    let mut actual_tokens: Option<usize> = None;
     let mut buf = String::new();
 
     while let Some(chunk) = stream.next().await {
@@ -214,6 +370,10 @@ async fn run_request(
                 break;
             }
             if let Ok(chunk) = serde_json::from_str::<SseChunk>(data) {
+                // Capture real token count from usage field (final chunk).
+                if let Some(ref u) = chunk.usage {
+                    actual_tokens = Some(u.completion_tokens);
+                }
                 for choice in &chunk.choices {
                     if choice
                         .delta
@@ -224,7 +384,7 @@ async fn run_request(
                         if ttft.is_none() {
                             ttft = Some(start.elapsed());
                         }
-                        tokens_generated += 1;
+                        chunk_count += 1;
                     }
                     if choice.finish_reason.is_some() {
                         break;
@@ -236,6 +396,7 @@ async fn run_request(
 
     let total = start.elapsed();
     let ttft = ttft.unwrap_or(total);
+    let tokens_generated = actual_tokens.unwrap_or(chunk_count);
 
     Ok(RequestResult {
         ttft,
@@ -282,6 +443,20 @@ async fn run_workload(
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let mut handles = Vec::with_capacity(requests);
 
+    // Spawn background system-metrics poller.
+    let (sys_tx, mut sys_rx) = tokio::sync::mpsc::unbounded_channel::<SystemSample>();
+    let sys_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let sample = sample_system().await;
+            if sys_tx.send(sample).is_err() {
+                break;
+            }
+        }
+    });
+
     let bench_start = Instant::now();
 
     for _ in 0..requests {
@@ -318,6 +493,15 @@ async fn run_workload(
 
     let elapsed = bench_start.elapsed();
 
+    // Stop the metrics poller and collect samples.
+    sys_task.abort();
+    let _ = sys_task.await;
+    let mut samples = Vec::new();
+    while let Ok(s) = sys_rx.try_recv() {
+        samples.push(s);
+    }
+    let sys_metrics = aggregate_samples(samples);
+
     if results.is_empty() {
         bail!("All {} requests failed against {}", errors, url);
     }
@@ -343,6 +527,7 @@ async fn run_workload(
         throughput_tokens_per_sec: throughput,
         total_time_secs: elapsed.as_secs_f64(),
         total_tokens,
+        sys_metrics,
     })
 }
 
@@ -400,6 +585,19 @@ fn compute_improvement(primary: &RunStats, compare: &RunStats) -> ImprovementSta
 // Text output helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
+fn print_sys_stats(sys: &SysStats) {
+    println!("─────────────────────────────────────────");
+    println!("  System metrics (during run)");
+    println!(
+        "  CPU         avg: {:>5.1}%   peak: {:>5.1}%",
+        sys.cpu_avg, sys.cpu_peak
+    );
+    println!("  Memory peak : {:.0} MB", sys.mem_mb_peak);
+    if let (Some(util), Some(mem)) = (sys.gpu_util_avg, sys.gpu_mem_mb_peak) {
+        println!("  GPU util avg: {:.1}%   GPU mem peak: {:.0} MB", util, mem);
+    }
+}
+
 fn print_single(stats: &RunStats) {
     println!(
         "Results ({} ok, {} errors)",
@@ -420,6 +618,10 @@ fn print_single(stats: &RunStats) {
     );
     println!("  Total time  : {:.2}s", stats.total_time_secs);
     println!("  Tokens out  : {}", stats.total_tokens);
+
+    if let Some(ref sys) = stats.sys_metrics {
+        print_sys_stats(sys);
+    }
 }
 
 fn fmt_improvement(pct: f64) -> String {
@@ -521,6 +723,30 @@ fn print_comparison(primary: &RunStats, compare: &RunStats, imp: &ImprovementSta
         compare.requests_err,
         compare.label
     );
+
+    // Show system metrics for primary server.
+    if let Some(ref sys) = primary.sys_metrics {
+        println!();
+        println!("  System ({}):", primary.label);
+        println!(
+            "    CPU avg {:.1}%  peak {:.1}%   Mem peak {:.0} MB",
+            sys.cpu_avg, sys.cpu_peak, sys.mem_mb_peak
+        );
+        if let (Some(util), Some(mem)) = (sys.gpu_util_avg, sys.gpu_mem_mb_peak) {
+            println!("    GPU util avg {:.1}%   GPU mem peak {:.0} MB", util, mem);
+        }
+    }
+    if let Some(ref sys) = compare.sys_metrics {
+        println!();
+        println!("  System ({}):", compare.label);
+        println!(
+            "    CPU avg {:.1}%  peak {:.1}%   Mem peak {:.0} MB",
+            sys.cpu_avg, sys.cpu_peak, sys.mem_mb_peak
+        );
+        if let (Some(util), Some(mem)) = (sys.gpu_util_avg, sys.gpu_mem_mb_peak) {
+            println!("    GPU util avg {:.1}%   GPU mem peak {:.0} MB", util, mem);
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
