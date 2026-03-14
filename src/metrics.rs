@@ -1,4 +1,4 @@
-// Prometheus metrics registry for ferrum-engine.
+// Prometheus metrics registry for ferrumox.
 // All metrics are registered once at startup via Metrics::new()
 // and exposed on GET /metrics in the Prometheus text exposition format.
 
@@ -33,37 +33,37 @@ impl Metrics {
     pub fn new() -> Result<Self> {
         Ok(Self {
             requests_total: register_int_counter_vec!(
-                "ferrum_requests_total",
+                "ferrumox_requests_total",
                 "Total inference requests completed",
                 &["finish_reason"]
             )?,
             tokens_generated_total: register_int_counter!(
-                "ferrum_tokens_generated_total",
+                "ferrumox_tokens_generated_total",
                 "Total tokens generated across all requests"
             )?,
             request_latency_seconds: register_histogram!(HistogramOpts::new(
-                "ferrum_request_latency_seconds",
+                "ferrumox_request_latency_seconds",
                 "End-to-end request latency in seconds (submit → last token)"
             )
             .buckets(vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,]))?,
             kv_cache_usage_ratio: register_gauge!(
-                "ferrum_kv_cache_usage_ratio",
+                "ferrumox_kv_cache_usage_ratio",
                 "KV cache memory usage ratio [0.0, 1.0]"
             )?,
             queue_depth: register_int_gauge!(
-                "ferrum_queue_depth",
+                "ferrumox_queue_depth",
                 "Number of requests waiting in the scheduler queue"
             )?,
             active_requests: register_int_gauge!(
-                "ferrum_active_requests",
+                "ferrumox_active_requests",
                 "Number of requests currently being processed (prefill + decode)"
             )?,
             prefix_cache_hits_total: register_int_counter!(
-                "ferrum_prefix_cache_hits_total",
+                "ferrumox_prefix_cache_hits_total",
                 "Prefix cache hits (prompt KV data reused from a previous request)"
             )?,
             prefix_cache_misses_total: register_int_counter!(
-                "ferrum_prefix_cache_misses_total",
+                "ferrumox_prefix_cache_misses_total",
                 "Prefix cache misses (full prefill required)"
             )?,
         })

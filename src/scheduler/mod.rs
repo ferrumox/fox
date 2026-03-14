@@ -9,14 +9,15 @@ pub use batch::{
 };
 
 use std::collections::VecDeque;
-use std::hash::{BuildHasher, Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tracing::{debug, info};
 
-use crate::kv_cache::{compute_block_hash, prompt_block_hashes, BlockId, KVCacheManager, PageTable};
+use crate::kv_cache::{
+    compute_block_hash, prompt_block_hashes, BlockId, KVCacheManager, PageTable,
+};
 
 // ---------------------------------------------------------------------------
 // Prefix cache
@@ -49,9 +50,7 @@ static HASH_STATE: std::sync::OnceLock<ahash::RandomState> = std::sync::OnceLock
 /// than DefaultHasher, stable within a single process run).
 pub fn hash_tokens(tokens: &[i32]) -> u64 {
     let state = HASH_STATE.get_or_init(ahash::RandomState::new);
-    let mut h = state.build_hasher();
-    tokens.hash(&mut h);
-    h.finish()
+    state.hash_one(tokens)
 }
 
 // ---------------------------------------------------------------------------
@@ -438,7 +437,13 @@ impl Scheduler {
             // Zero out seq ownership so schedule_step won't double-free.
             req.kv_seq_id = -1;
 
-            pcache.put(final_hash, PrefixCacheEntry { seq_id, block_ids: cached_blocks });
+            pcache.put(
+                final_hash,
+                PrefixCacheEntry {
+                    seq_id,
+                    block_ids: cached_blocks,
+                },
+            );
             debug!(
                 request_id = req_id,
                 full_blocks,
@@ -665,8 +670,14 @@ mod tests {
 
         // Verify skip_prefix_tokens was set to 16 (one full block)
         let running = sched.running_batch.lock().unwrap();
-        let req_b = running.iter().find(|r| r.id == 2).expect("req B in running");
-        assert_eq!(req_b.skip_prefix_tokens, 16, "should skip exactly one full block");
+        let req_b = running
+            .iter()
+            .find(|r| r.id == 2)
+            .expect("req B in running");
+        assert_eq!(
+            req_b.skip_prefix_tokens, 16,
+            "should skip exactly one full block"
+        );
     }
 
     #[test]

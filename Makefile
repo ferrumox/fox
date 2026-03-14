@@ -1,4 +1,4 @@
-# Makefile for ferrum-engine
+# Makefile for ferrumox
 # Usage: make build && make run
 
 PATH := $(HOME)/.cargo/bin:$(PATH)
@@ -79,7 +79,7 @@ build:
 run: build
 	@test -f "$(MODEL_PATH)" || \
 		(echo "Model not found at $(MODEL_PATH). Run: make download-model" && exit 1)
-	./target/release/ferrum-engine \
+	./target/release/fox \
 		--model-path $(MODEL_PATH) \
 		--host $(HOST) \
 		--port $(PORT) \
@@ -90,7 +90,7 @@ run: build
 dev: build
 	@test -f "$(MODEL_PATH)" || \
 		(echo "Model not found at $(MODEL_PATH). Run: make download-model" && exit 1)
-	RUST_LOG=debug ./target/release/ferrum-engine \
+	RUST_LOG=debug ./target/release/fox \
 		--model-path $(MODEL_PATH) \
 		--host $(HOST) \
 		--port $(PORT) \
@@ -103,7 +103,7 @@ test:
 
 bench: build
 	@echo "Running benchmark against $(HOST):$(PORT)..."
-	./target/release/ferrum-bench \
+	./target/release/fox-bench \
 		--url http://$(HOST):$(PORT) \
 		--model $(MODEL_FILE) \
 		--concurrency $(BENCH_CONCURRENCY) \
@@ -112,7 +112,7 @@ bench: build
 		--prompt "$(BENCH_PROMPT)"
 
 docker:
-	docker build -t ferrum-engine:latest .
+	docker build -t ferrumox:latest .
 
 docker-run:
 	docker compose up

@@ -1,8 +1,10 @@
-# Ferrum Engine
+# Ferrumox
 
 High-performance LLM inference engine in Rust — an alternative to Ollama and vLLM.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+
+> **Ferrum** (iron in Latin) **+ ox** (oxidation) = rust — a meta-reference to the language it's written in.
 
 ## Features
 
@@ -10,7 +12,7 @@ High-performance LLM inference engine in Rust — an alternative to Ollama and v
 - **OpenAI-compatible API** (chat completions, completions, models, health)
 - **Continuous batching** with LIFO preemption
 - **PagedAttention** — logical→physical KV block mapping with ref-counted CoW infrastructure
-- **Prefix caching** — reuse KV cache for requests with an identical full prompt (exact-match; block-level prefix sharing planned for v0.4.0)
+- **Prefix caching** — block-level chain-hash prefix sharing (same design as vLLM)
 - **Stop sequences** — `stop: string | string[]` halts generation at any user-defined string
 - **Prometheus metrics** — scrape `/metrics` for request rates, latency histogram, KV usage, prefix hit ratio
 - **Real stochastic sampling** — temperature, top_p, top_k, repetition_penalty, seed
@@ -37,7 +39,7 @@ cd rabbit-engine
 # Install Rust if needed
 make install-rust
 
-# Download a model (Qwen3.5 0.8B by default)
+# Download a model
 make download-model
 
 # Build and run
@@ -54,20 +56,23 @@ cargo build --release
 cargo build --release --features cuda
 
 # Stub only (no llama.cpp, for CI/testing)
-FERRUM_SKIP_LLAMA=1 cargo build --release
+FOX_SKIP_LLAMA=1 cargo build --release
 ```
 
 ## Usage
 
 ```bash
+# Pull a model from HuggingFace
+fox pull bartowski/Llama-3.2-3B-Instruct-GGUF
+
 # Start server
-ferrum-engine --model-path /path/to/model.gguf
+fox serve --model-path ~/.cache/ferrumox/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 
 # With env vars
-FERRUM_MODEL_PATH=/path/to/model.gguf FERRUM_PORT=8080 ferrum-engine
+FOX_MODEL_PATH=~/.cache/ferrumox/models/model.gguf FOX_PORT=8080 fox serve
 
-# Override context length and port
-make run MAX_CONTEXT_LEN=8192 PORT=9000
+# Single-shot inference
+fox run --model-path ~/.cache/ferrumox/models/model.gguf "Explain what Rust is"
 ```
 
 ## API Endpoints
@@ -121,8 +126,8 @@ docker compose up          # or: make docker-run
 
 # 3. (optional) build only
 make docker
-# docker run -v ./models:/models -e FERRUM_MODEL_PATH=/models/model.gguf \
-#   -p 8080:8080 ferrum-engine
+# docker run -v ./models:/models -e FOX_MODEL_PATH=/models/model.gguf \
+#   -p 8080:8080 ferrumox
 ```
 
 Edit `docker-compose.yml` to change the model path or environment variables.
@@ -137,7 +142,7 @@ Run the built-in benchmark tool against a running server:
 make bench
 
 # Custom run
-./target/release/ferrum-bench \
+./target/release/fox-bench \
   --url http://localhost:8080 \
   --model my-model \
   --concurrency 8 \
@@ -148,7 +153,7 @@ make bench
 Sample output:
 
 ```
-ferrum-bench
+fox-bench
   URL         : http://localhost:8080
   Model       : my-model
   Concurrency : 8
@@ -168,21 +173,21 @@ Results (100 ok, 0 errors)
 
 | Flag | Env | Default | Description |
 |------|-----|---------|-------------|
-| `--model-path` | `FERRUM_MODEL_PATH` | required | Path to GGUF model file |
-| `--max-context-len` | `FERRUM_MAX_CONTEXT_LEN` | 4096 | Maximum context length in tokens |
-| `--gpu-memory-fraction` | `FERRUM_GPU_MEMORY_FRACTION` | 0.85 | Fraction of GPU memory for KV cache |
-| `--max-batch-size` | `FERRUM_MAX_BATCH_SIZE` | 32 | Maximum batch size for inference |
-| `--block-size` | `FERRUM_BLOCK_SIZE` | 16 | Tokens per KV cache block |
-| `--host` | `FERRUM_HOST` | 0.0.0.0 | Bind host |
-| `--port` | `FERRUM_PORT` | 8080 | Bind port |
-| `--json-logs` | `FERRUM_JSON_LOGS` | false | JSON log format (for production) |
+| `--model-path` | `FOX_MODEL_PATH` | required | Path to GGUF model file |
+| `--max-context-len` | `FOX_MAX_CONTEXT_LEN` | 4096 | Maximum context length in tokens |
+| `--gpu-memory-fraction` | `FOX_GPU_MEMORY_FRACTION` | 0.85 | Fraction of GPU memory for KV cache |
+| `--max-batch-size` | `FOX_MAX_BATCH_SIZE` | 32 | Maximum batch size for inference |
+| `--block-size` | `FOX_BLOCK_SIZE` | 16 | Tokens per KV cache block |
+| `--host` | `FOX_HOST` | 0.0.0.0 | Bind host |
+| `--port` | `FOX_PORT` | 8080 | Bind port |
+| `--json-logs` | `FOX_JSON_LOGS` | false | JSON log format (for production) |
 
 ## Make Targets
 
 ```
 make install-rust    Install Rust toolchain
 make download-model  Download default model (Qwen3.5 0.8B Q4_K_M)
-make build           Compile release binaries (engine + bench)
+make build           Compile release binaries (fox + fox-bench)
 make run             Build and start the server
 make dev             Start with RUST_LOG=debug
 make test            Run unit tests
@@ -195,17 +200,16 @@ make docker-run      Start via docker compose
 ## Project Structure
 
 ```
-ferrum-engine/
+ferrumox/
 ├── src/
 │   ├── main.rs          # Entry point, config validation, signal handling
-│   ├── config.rs        # CLI/env configuration
 │   ├── metrics.rs       # Prometheus metrics registry
 │   ├── api/             # REST API (OpenAI compatible) + /metrics endpoint
 │   ├── scheduler/       # Continuous batching scheduler + prefix cache
 │   ├── kv_cache/        # PageTable, ref-counted block manager
 │   ├── engine/          # Inference engine, stop sequences, output filtering
 │   └── bin/
-│       └── bench.rs     # Standalone benchmark binary
+│       └── bench.rs     # Standalone benchmark binary (fox-bench)
 ├── vendor/llama.cpp/    # Git submodule
 ├── Dockerfile
 ├── docker-compose.yml

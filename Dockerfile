@@ -34,10 +34,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/ferrum-engine /usr/local/bin/ferrum-engine
-COPY --from=builder /app/target/release/ferrum-bench  /usr/local/bin/ferrum-bench
+COPY --from=builder /app/target/release/fox       /usr/local/bin/fox
+COPY --from=builder /app/target/release/fox-bench  /usr/local/bin/fox-bench
 
 # Default port
 EXPOSE 8080
 
-ENTRYPOINT ["ferrum-engine"]
+ENTRYPOINT ["fox"]

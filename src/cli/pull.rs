@@ -1,9 +1,9 @@
-// `ferrum pull` — download a GGUF model from HuggingFace Hub.
+// `fox pull` — download a GGUF model from HuggingFace Hub.
 //
 // Usage:
-//   ferrum pull bartowski/Llama-3.2-1B-Instruct-GGUF
-//   ferrum pull bartowski/Llama-3.2-1B-Instruct-GGUF --filename Llama-3.2-1B-Instruct-Q4_K_M.gguf
-//   ferrum pull bartowski/Llama-3.2-1B-Instruct-GGUF --output-dir ./models
+//   fox pull bartowski/Llama-3.2-1B-Instruct-GGUF
+//   fox pull bartowski/Llama-3.2-1B-Instruct-GGUF --filename Llama-3.2-1B-Instruct-Q4_K_M.gguf
+//   fox pull bartowski/Llama-3.2-1B-Instruct-GGUF --output-dir ./models
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
+
+use super::theme;
 
 const HF_API_BASE: &str = "https://huggingface.co/api/models";
 const HF_CDN_BASE: &str = "https://huggingface.co";
@@ -27,8 +29,8 @@ pub struct PullArgs {
     pub filename: Option<String>,
 
     /// Directory where the model file will be saved.
-    /// Defaults to `~/.cache/ferrum/models/`
-    #[arg(long, default_value = "~/.cache/ferrum/models")]
+    /// Defaults to `~/.cache/ferrumox/models/`
+    #[arg(long, default_value = "~/.cache/ferrumox/models")]
     pub output_dir: PathBuf,
 
     /// HuggingFace API token for private or gated models
@@ -37,7 +39,7 @@ pub struct PullArgs {
 }
 
 pub async fn run_pull(args: PullArgs) -> Result<()> {
-    let output_dir = expand_tilde(&args.output_dir);
+    let output_dir = super::expand_tilde(&args.output_dir);
     std::fs::create_dir_all(&output_dir)
         .with_context(|| format!("creating output dir {:?}", output_dir))?;
 
@@ -60,10 +62,7 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         );
     }
 
-    let meta: serde_json::Value = resp
-        .json()
-        .await
-        .context("parsing HF API response")?;
+    let meta: serde_json::Value = resp.json().await.context("parsing HF API response")?;
 
     // 2. Extract .gguf file list from `siblings`.
     let siblings = meta["siblings"]
@@ -93,7 +92,11 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
                     "File `{}` not found in `{}`. Available GGUF files:\n{}",
                     f,
                     args.model_id,
-                    gguf_files.iter().map(|s| format!("  - {}", s)).collect::<Vec<_>>().join("\n")
+                    gguf_files
+                        .iter()
+                        .map(|s| format!("  - {}", s))
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 );
             }
             f
@@ -160,8 +163,8 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
 
     // Write to a temp file first, rename on success.
     let tmp_dest = dest.with_extension("gguf.part");
-    let mut file = std::fs::File::create(&tmp_dest)
-        .with_context(|| format!("creating {:?}", tmp_dest))?;
+    let mut file =
+        std::fs::File::create(&tmp_dest).with_context(|| format!("creating {:?}", tmp_dest))?;
 
     let mut stream = resp;
     while let Some(chunk) = stream
@@ -169,8 +172,7 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         .await
         .context("error reading download stream")?
     {
-        file.write_all(&chunk)
-            .context("error writing to file")?;
+        file.write_all(&chunk).context("error writing to file")?;
         pb.inc(chunk.len() as u64);
     }
     pb.finish_with_message("download complete");
@@ -178,14 +180,22 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
     std::fs::rename(&tmp_dest, &dest)
         .with_context(|| format!("renaming {:?} to {:?}", tmp_dest, dest))?;
 
-    eprintln!("\nSaved to: {}", dest.display());
-    eprintln!(
-        "Run with:  ferrum run --model-path \"{}\" \"Your prompt here\"",
-        dest.display()
+    eprintln!();
+    theme::print_success(&format!("Saved to {}", dest.display()));
+    theme::eprint_styled(
+        None,
+        false,
+        true,
+        &format!("     Run:   fox run --model-path \"{}\"\n", dest.display()),
     );
-    eprintln!(
-        "Serve:     ferrum serve --model-path \"{}\"",
-        dest.display()
+    theme::eprint_styled(
+        None,
+        false,
+        true,
+        &format!(
+            "     Serve: fox serve --model-path \"{}\"\n",
+            dest.display()
+        ),
     );
 
     Ok(())
@@ -202,7 +212,7 @@ fn build_client(token: Option<&str>) -> Result<reqwest::Client> {
     }
     reqwest::Client::builder()
         .default_headers(headers)
-        .user_agent("ferrum-engine/0.4.0")
+        .user_agent("ferrumox/0.6.0")
         .build()
         .context("building HTTP client")
 }
@@ -216,16 +226,4 @@ fn select_file_interactive(files: &[String]) -> Result<String> {
         .interact()
         .context("interactive selection")?;
     Ok(files[selection].clone())
-}
-
-/// Expand a leading `~` to the user's home directory.
-fn expand_tilde(path: &std::path::Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    if s.starts_with("~/") || s == "~" {
-        if let Ok(home) = std::env::var("HOME") {
-            let rest = s.strip_prefix("~").unwrap_or("");
-            return PathBuf::from(home).join(rest.trim_start_matches('/'));
-        }
-    }
-    path.to_path_buf()
 }

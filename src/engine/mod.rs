@@ -35,6 +35,7 @@ const CONTROL_TOKEN_PATTERNS: &[&str] = &[
 // ---------------------------------------------------------------------------
 
 /// Per-request mutable state for output processing.
+#[derive(Default)]
 struct PerRequestState {
     /// True while we are inside a `<think>…</think>` block.
     in_thinking: bool,
@@ -48,17 +49,6 @@ struct PerRequestState {
     /// Rolling suffix of recently emitted text (length ≤ 2 × max_stop_len).
     /// Used to detect *user-supplied* stop strings that span multiple tokens.
     text_buffer: String,
-}
-
-impl Default for PerRequestState {
-    fn default() -> Self {
-        Self {
-            in_thinking: false,
-            show_thinking: false,
-            pending_output: String::new(),
-            text_buffer: String::new(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -172,10 +162,7 @@ fn find_holdback_start(text: &str) -> usize {
             continue;
         }
         let suffix = &text[i..];
-        if CONTROL_TOKEN_PATTERNS
-            .iter()
-            .any(|p| p.starts_with(suffix))
-        {
+        if CONTROL_TOKEN_PATTERNS.iter().any(|p| p.starts_with(suffix)) {
             return i;
         }
     }
@@ -383,9 +370,7 @@ impl InferenceEngine {
                             prefill_ids.len()
                         );
                         for req_id in &prefill_ids {
-                            engine
-                                .scheduler
-                                .mark_finished(*req_id, StopReason::Length);
+                            engine.scheduler.mark_finished(*req_id, StopReason::Length);
                         }
                     }
                 }
@@ -405,9 +390,7 @@ impl InferenceEngine {
                             decode_ids.len()
                         );
                         for req_id in &decode_ids {
-                            engine
-                                .scheduler
-                                .mark_finished(*req_id, StopReason::Length);
+                            engine.scheduler.mark_finished(*req_id, StopReason::Length);
                         }
                     }
                 }
@@ -583,8 +566,7 @@ impl InferenceEngine {
                 let (filtered, control_stop) = apply_output_filter(state, &raw_text);
 
                 // Stage 2: user-supplied stop strings checked on the rolling buffer.
-                let (text, user_stop) =
-                    check_stop_sequences(state, filtered, &req.sampling.stop);
+                let (text, user_stop) = check_stop_sequences(state, filtered, &req.sampling.stop);
 
                 (text, control_stop || user_stop)
             };
