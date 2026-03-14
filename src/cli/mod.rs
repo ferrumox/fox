@@ -1,5 +1,7 @@
 // CLI entry point — dispatch to subcommands.
 
+pub mod alias;
+pub mod bench;
 pub mod list;
 pub mod models;
 pub mod ps;
@@ -33,6 +35,8 @@ pub enum Command {
     Serve(serve::ServeArgs),
     /// Run single-shot inference and stream output to stdout
     Run(run::RunArgs),
+    /// Benchmark model load time and inference throughput
+    Bench(bench::BenchArgs),
     /// Download a GGUF model from HuggingFace Hub
     Pull(pull::PullArgs),
     /// List downloaded models
@@ -47,11 +51,14 @@ pub enum Command {
     Models(models::ModelsArgs),
     /// Search HuggingFace Hub for GGUF models
     Search(search::SearchArgs),
+    /// Manage model name aliases
+    Alias(alias::AliasArgs),
 }
 
 /// Known subcommand names — anything else is treated as `fox run <arg>`.
 const SUBCOMMANDS: &[&str] = &[
-    "serve", "run", "pull", "list", "rm", "show", "ps", "models", "search", "help",
+    "serve", "run", "bench", "pull", "list", "rm", "show", "ps", "models", "search", "alias",
+    "help",
 ];
 
 pub async fn run() -> anyhow::Result<()> {
@@ -77,6 +84,7 @@ pub async fn run() -> anyhow::Result<()> {
     match cli.command {
         Command::Serve(args) => serve::run_serve(args).await,
         Command::Run(args) => run::run_run(args).await,
+        Command::Bench(args) => bench::run_bench(args).await,
         Command::Pull(args) => pull::run_pull(args).await,
         Command::List(args) => list::run_list(args).await,
         Command::Rm(args) => rm::run_rm(args).await,
@@ -84,6 +92,7 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Ps(args) => ps::run_ps(args).await,
         Command::Models(args) => models::run_models(args).await,
         Command::Search(args) => search::run_search(args).await,
+        Command::Alias(args) => alias::run_alias(args).await,
     }
 }
 

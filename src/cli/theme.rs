@@ -159,3 +159,10 @@ pub fn print_kv_pair(key: &str, value: &str) {
     print_styled(None, true, true, &format!("{:<14}", key));
     println!("  {}", value);
 }
+
+/// Print `  <key bold+dim padded to 14>  <value>` to stderr, followed by a newline.
+pub fn eprint_kv_pair(key: &str, value: &str) {
+    eprint!("  ");
+    eprint_styled(None, true, true, &format!("{:<14}", key));
+    eprintln!("  {}", value);
+}

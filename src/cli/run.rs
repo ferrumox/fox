@@ -203,12 +203,36 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
     loop {
         theme::print_prompt_glyph();
 
-        // Read line via spawn_blocking to avoid blocking the tokio runtime thread,
+        // Read input via spawn_blocking to avoid blocking the tokio runtime thread,
         // which would starve the engine loop task running concurrently.
+        // Typing `"""` on its own line enters multiline mode; a second `"""` submits.
         let result = tokio::task::spawn_blocking(|| {
-            let mut line = String::new();
-            let n = std::io::stdin().read_line(&mut line)?;
-            Ok::<(String, usize), std::io::Error>((line, n))
+            let mut first_line = String::new();
+            let n = std::io::stdin().read_line(&mut first_line)?;
+            if n == 0 {
+                return Ok::<(String, usize), std::io::Error>((first_line, 0));
+            }
+            if first_line.trim() == "\"\"\"" {
+                let mut buf = String::new();
+                let mut total = n;
+                loop {
+                    eprint!("  · ");
+                    let _ = std::io::stderr().flush();
+                    let mut line = String::new();
+                    let m = std::io::stdin().read_line(&mut line)?;
+                    if m == 0 {
+                        break;
+                    }
+                    total += m;
+                    if line.trim() == "\"\"\"" {
+                        break;
+                    }
+                    buf.push_str(&line);
+                }
+                Ok((buf, total))
+            } else {
+                Ok((first_line, n))
+            }
         })
         .await
         .expect("spawn_blocking panicked");
@@ -263,14 +287,17 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
         let elapsed = start.elapsed();
 
         println!();
+        let secs = elapsed.as_secs_f64();
+        let toks_per_sec = if secs > 0.0 { token_count as f64 / secs } else { 0.0 };
         theme::eprint_styled(
             None,
             false,
             true,
             &format!(
-                "  {} tokens · {:.1}s\n\n",
+                "  {} tokens · {:.1}s · {:.1} tok/s\n\n",
                 token_count,
-                elapsed.as_secs_f64()
+                secs,
+                toks_per_sec
             ),
         );
 
