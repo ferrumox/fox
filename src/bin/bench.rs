@@ -1,4 +1,4 @@
-//! ferrum-bench — integrated benchmark tool for ferrum-engine.
+//! fox-bench — integrated benchmark tool for ferrumox.
 //!
 //! Launches N concurrent workers, each sending `--requests` chat completions
 //! to the target server, and reports:
@@ -7,7 +7,7 @@
 //!   - Aggregate throughput:        tokens / second
 //!
 //! Usage:
-//!   ferrum-bench --url http://localhost:8080 \
+//!   fox-bench --url http://localhost:8080 \
 //!     --model my-model \
 //!     --concurrency 8 \
 //!     --requests 50 \
@@ -30,9 +30,9 @@ use tokio::sync::Semaphore;
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Parser)]
-#[command(name = "ferrum-bench", about = "Benchmark tool for ferrum-engine")]
+#[command(name = "fox-bench", about = "Benchmark tool for ferrumox")]
 struct Args {
-    /// Base URL of the ferrum-engine server.
+    /// Base URL of the ferrumox server.
     #[arg(long, default_value = "http://localhost:8080")]
     url: String,
 
@@ -196,7 +196,7 @@ fn percentile(sorted: &[Duration], pct: f64) -> Duration {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    println!("ferrum-bench");
+    println!("fox-bench");
     println!("  URL         : {}", args.url);
     println!("  Model       : {}", args.model);
     println!("  Concurrency : {}", args.concurrency);

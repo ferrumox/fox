@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   # Skip llama.cpp FFI compilation in CI — uses the stub backend instead.
-  FERRUM_SKIP_LLAMA: "1"
+  FOX_SKIP_LLAMA: "1"
 
 jobs:
   check:

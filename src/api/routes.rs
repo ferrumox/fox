@@ -26,12 +26,19 @@ pub struct AppState {
     /// Injected as the first message when no system message is present.
     /// `None` disables injection entirely.
     pub system_prompt: Option<String>,
+    /// Unix timestamp (seconds) when the server started.
+    pub started_at: u64,
 }
 
-pub fn router(engine: Arc<InferenceEngine>, system_prompt: Option<String>) -> Router {
+pub fn router(
+    engine: Arc<InferenceEngine>,
+    system_prompt: Option<String>,
+    started_at: u64,
+) -> Router {
     let state = AppState {
         engine,
         system_prompt,
+        started_at,
     };
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
@@ -71,6 +78,8 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         kv_cache_usage: engine.kv_cache_usage(),
         queue_depth: engine.queue_depth(),
         active_requests: engine.active_requests(),
+        model_name: engine.model_name().to_string(),
+        started_at: state.started_at,
     })
 }
 

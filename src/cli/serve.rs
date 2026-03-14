@@ -1,6 +1,7 @@
-// `ferrum serve` — start the OpenAI-compatible HTTP inference server.
+// `fox serve` — start the OpenAI-compatible HTTP inference server.
 
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use clap::Parser;
@@ -14,35 +15,36 @@ use crate::metrics::Metrics;
 use crate::scheduler::Scheduler;
 
 use super::get_gpu_memory_bytes;
+use super::theme;
 
 #[derive(Parser, Debug, Clone)]
 pub struct ServeArgs {
     /// Path to the GGUF model file
-    #[arg(long, env = "FERRUM_MODEL_PATH")]
+    #[arg(long, env = "FOX_MODEL_PATH")]
     pub model_path: PathBuf,
 
     /// Fraction of GPU memory to use for KV cache (0.0-1.0)
-    #[arg(long, default_value = "0.85", env = "FERRUM_GPU_MEMORY_FRACTION")]
+    #[arg(long, default_value = "0.85", env = "FOX_GPU_MEMORY_FRACTION")]
     pub gpu_memory_fraction: f32,
 
     /// Maximum batch size for inference
-    #[arg(long, default_value = "32", env = "FERRUM_MAX_BATCH_SIZE")]
+    #[arg(long, default_value = "32", env = "FOX_MAX_BATCH_SIZE")]
     pub max_batch_size: usize,
 
     /// Tokens per KV block
-    #[arg(long, default_value = "16", env = "FERRUM_BLOCK_SIZE")]
+    #[arg(long, default_value = "16", env = "FOX_BLOCK_SIZE")]
     pub block_size: usize,
 
     /// Host to bind the server to
-    #[arg(long, default_value = "0.0.0.0", env = "FERRUM_HOST")]
+    #[arg(long, default_value = "0.0.0.0", env = "FOX_HOST")]
     pub host: String,
 
     /// Port to bind the server to
-    #[arg(long, default_value = "8080", env = "FERRUM_PORT")]
+    #[arg(long, default_value = "8080", env = "FOX_PORT")]
     pub port: u16,
 
     /// Maximum context length (tokens)
-    #[arg(long, default_value = "4096", env = "FERRUM_MAX_CONTEXT_LEN")]
+    #[arg(long, default_value = "4096", env = "FOX_MAX_CONTEXT_LEN")]
     pub max_context_len: u32,
 
     /// Default system prompt injected when no system message is present.
@@ -50,7 +52,7 @@ pub struct ServeArgs {
     #[arg(
         long,
         default_value = "You are a helpful assistant.",
-        env = "FERRUM_SYSTEM_PROMPT"
+        env = "FOX_SYSTEM_PROMPT"
     )]
     pub system_prompt: String,
 
@@ -62,11 +64,11 @@ pub struct ServeArgs {
     ///
     /// Note: swap transfer is currently a placeholder pending llama.cpp tensor-access
     /// API availability.  The flag is accepted to avoid breaking future config files.
-    #[arg(long, default_value = "0.0", env = "FERRUM_SWAP_FRACTION")]
+    #[arg(long, default_value = "0.0", env = "FOX_SWAP_FRACTION")]
     pub swap_fraction: f32,
 
     /// Use JSON log format (for production)
-    #[arg(long, env = "FERRUM_JSON_LOGS")]
+    #[arg(long, env = "FOX_JSON_LOGS")]
     pub json_logs: bool,
 }
 
@@ -134,16 +136,12 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         metrics,
     ));
 
-    let addr: std::net::SocketAddr = format!("{}:{}", args.host, args.port)
-        .parse()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "invalid bind address '{}:{}': {}",
-                args.host,
-                args.port,
-                e
-            )
-        })?;
+    let addr: std::net::SocketAddr =
+        format!("{}:{}", args.host, args.port)
+            .parse()
+            .map_err(|e| {
+                anyhow::anyhow!("invalid bind address '{}:{}': {}", args.host, args.port, e)
+            })?;
 
     let system_prompt = if args.system_prompt.is_empty() {
         None
@@ -151,10 +149,22 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         Some(args.system_prompt)
     };
 
-    let app = router(engine.clone(), system_prompt)
+    let started_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let app = router(engine.clone(), system_prompt, started_at)
         .layer(tower_http::cors::CorsLayer::permissive());
 
     tracing::info!("listening on {}", addr);
+    theme::print_serve_ready(
+        args.model_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("model"),
+        &addr.to_string(),
+    );
 
     let server = axum::serve(tokio::net::TcpListener::bind(addr).await?, app);
 

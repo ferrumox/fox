@@ -170,6 +170,8 @@ pub struct HealthResponse {
     pub kv_cache_usage: f32,
     pub queue_depth: usize,
     pub active_requests: usize,
+    pub model_name: String,
+    pub started_at: u64,
 }
 
 #[cfg(test)]

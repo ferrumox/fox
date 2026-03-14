@@ -2,5 +2,5 @@
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    ferrum_engine::cli::run().await
+    ferrumox::cli::run().await
 }

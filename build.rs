@@ -6,15 +6,17 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    println!("cargo:rustc-check-cfg=cfg(ferrum_stub)");
+    println!("cargo:rustc-check-cfg=cfg(fox_stub)");
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let llama_root = PathBuf::from(&manifest_dir)
         .join("vendor")
         .join("llama.cpp");
 
-    if env::var("FERRUM_SKIP_LLAMA").is_ok() || !llama_root.exists() {
+    if env::var("FOX_SKIP_LLAMA").is_ok() || !llama_root.exists() {
         if !llama_root.exists() {
-            println!("cargo:warning=llama.cpp not found. Set FERRUM_SKIP_LLAMA=1 to build with stubs only.");
+            println!(
+                "cargo:warning=llama.cpp not found. Set FOX_SKIP_LLAMA=1 to build with stubs only."
+            );
         }
         // Generate minimal stub bindings (empty but valid module)
         let out = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -23,7 +25,7 @@ fn main() {
             "// Stub - llama.cpp not built. Build with vendor/llama.cpp present for full functionality.\n#[allow(dead_code)] const _STUB: () = ();\n",
         )
         .unwrap();
-        println!("cargo:rustc-cfg=ferrum_stub");
+        println!("cargo:rustc-cfg=fox_stub");
         return;
     }
 
