@@ -11,6 +11,7 @@ pub mod serve;
 pub mod show;
 pub mod theme;
 
+use std::collections::HashMap;
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -48,12 +49,31 @@ pub enum Command {
     Search(search::SearchArgs),
 }
 
+/// Known subcommand names — anything else is treated as `fox run <arg>`.
+const SUBCOMMANDS: &[&str] = &[
+    "serve", "run", "pull", "list", "rm", "show", "ps", "models", "search", "help",
+];
+
 pub async fn run() -> anyhow::Result<()> {
     // Load config file before clap parses CLI args so env-var-backed flags
     // pick up config values as their effective defaults.
     crate::config::load_config_into_env();
 
-    let cli = Cli::parse();
+    // If the first non-flag argument is not a known subcommand, inject "run"
+    // so that `fox llama "Hello"` works as `fox run llama "Hello"`.
+    let raw: Vec<String> = std::env::args().collect();
+    let effective: Vec<String> = match raw.get(1).map(String::as_str) {
+        Some(first)
+            if !first.starts_with('-') && !SUBCOMMANDS.contains(&first) =>
+        {
+            let mut v = vec![raw[0].clone(), "run".to_string()];
+            v.extend(raw[1..].iter().cloned());
+            v
+        }
+        _ => raw,
+    };
+
+    let cli = Cli::parse_from(effective);
     match cli.command {
         Command::Serve(args) => serve::run_serve(args).await,
         Command::Run(args) => run::run_run(args).await,
@@ -148,6 +168,121 @@ pub(crate) fn format_size(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / 1_000_000.0)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+/// Load model aliases from a TOML file.
+/// Defaults to `~/.config/ferrumox/aliases.toml` if `path` is `None`.
+pub(crate) fn load_aliases(path: Option<PathBuf>) -> HashMap<String, String> {
+    let path = path.unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        PathBuf::from(home).join(".config/ferrumox/aliases.toml")
+    });
+
+    if !path.exists() {
+        return HashMap::new();
+    }
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+
+    #[derive(serde::Deserialize)]
+    struct AliasesFile {
+        #[serde(default)]
+        aliases: HashMap<String, String>,
+    }
+
+    match toml::from_str::<AliasesFile>(&content) {
+        Ok(f) => f.aliases,
+        Err(_) => HashMap::new(),
+    }
+}
+
+/// Resolve a user-supplied model name (or path) to `(stem, PathBuf)`.
+///
+/// Resolution order:
+/// 1. If `name` points to an existing file on disk → use it directly.
+/// 2. Alias lookup from `alias_file` (defaults to `~/.config/ferrumox/aliases.toml`).
+/// 3. Exact case-insensitive stem match inside `models_dir()`.
+/// 4. Starts-with match.
+/// 5. Contains match.
+///
+/// On failure prints available models and returns an error.
+pub(crate) fn resolve_model_path(
+    name: &str,
+    alias_file: Option<&Path>,
+) -> anyhow::Result<(String, PathBuf)> {
+    // 1. Direct path on disk
+    let as_path = PathBuf::from(name);
+    if as_path.exists() && as_path.is_file() {
+        let stem = as_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(name)
+            .to_string();
+        return Ok((stem, as_path));
+    }
+
+    // 2. Alias lookup
+    let aliases = load_aliases(alias_file.map(|p| p.to_path_buf()));
+    let resolved = aliases
+        .get(name)
+        .map(String::as_str)
+        .unwrap_or(name);
+
+    let dir = models_dir();
+    let entries = list_models(&dir).unwrap_or_default();
+    let lower = resolved.to_lowercase();
+
+    // Exact match
+    for (path, _) in &entries {
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            if stem.eq_ignore_ascii_case(resolved) {
+                return Ok((stem.to_string(), path.clone()));
+            }
+        }
+    }
+
+    // Starts-with
+    for (path, _) in &entries {
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            if stem.to_lowercase().starts_with(&lower) {
+                return Ok((stem.to_string(), path.clone()));
+            }
+        }
+    }
+
+    // Contains
+    for (path, _) in &entries {
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            if stem.to_lowercase().contains(&lower) {
+                return Ok((stem.to_string(), path.clone()));
+            }
+        }
+    }
+
+    // Nothing found — show available models
+    let available: Vec<String> = entries
+        .iter()
+        .filter_map(|(p, _)| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .collect();
+
+    if available.is_empty() {
+        anyhow::bail!(
+            "model '{}' not found and no models are available in {}.\n\
+             Run `fox pull <model>` to download one.",
+            name,
+            dir.display()
+        );
+    } else {
+        anyhow::bail!(
+            "model '{}' not found in {}.\nAvailable models:\n  {}",
+            name,
+            dir.display(),
+            available.join("\n  ")
+        );
     }
 }
 

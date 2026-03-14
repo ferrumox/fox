@@ -1,8 +1,9 @@
 // `fox run` — single-shot inference or interactive REPL, streaming output to stdout.
 // Reuses the full engine stack (Scheduler + InferenceEngine) without an HTTP server.
 //
-// fox run --model-path model.gguf "Hello"   → one-shot
-// fox run --model-path model.gguf           → opens interactive REPL
+// fox run llama "Hello"   → one-shot (resolved from models_dir)
+// fox run llama           → opens interactive REPL
+// fox run /abs/path/to/model.gguf "Hello"  → direct path
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -19,17 +20,23 @@ use crate::kv_cache::KVCacheManager;
 use crate::scheduler::{InferenceRequest, SamplingParams};
 
 use super::get_gpu_memory_bytes;
+use super::resolve_model_path;
 use super::theme;
 
 #[derive(Parser, Debug)]
 pub struct RunArgs {
-    /// Path to the GGUF model file
-    #[arg(long, env = "FOX_MODEL_PATH")]
-    pub model_path: PathBuf,
+    /// Model name, alias, or path to a GGUF file.
+    /// Resolved against ~/.cache/ferrumox/models with alias → exact → prefix → contains fallback.
+    #[arg(env = "FOX_MODEL_PATH")]
+    pub model: String,
 
     /// The prompt to send to the model.
     /// If omitted, an interactive chat session is started.
     pub prompt: Option<String>,
+
+    /// Path to aliases TOML file (default: ~/.config/ferrumox/aliases.toml)
+    #[arg(long, env = "FOX_ALIAS_FILE")]
+    pub alias_file: Option<PathBuf>,
 
     /// Maximum number of tokens to generate per turn
     #[arg(long, default_value = "512")]
@@ -101,6 +108,26 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
             .init();
     }
 
+    // Resolve model — auto-pull from HuggingFace if not found locally.
+    let (model_name, model_path) =
+        match resolve_model_path(&args.model, args.alias_file.as_deref()) {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!(
+                    "Model '{}' not found locally. Pulling from HuggingFace…",
+                    args.model
+                );
+                super::pull::run_pull(super::pull::PullArgs {
+                    model_id: args.model.clone(),
+                    filename: None,
+                    output_dir: None,
+                    hf_token: std::env::var("HF_TOKEN").ok(),
+                })
+                .await?;
+                resolve_model_path(&args.model, args.alias_file.as_deref())?
+            }
+        };
+
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
         ProgressStyle::with_template("  {spinner:.cyan} {msg}")
@@ -110,7 +137,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
     spinner.set_message("Loading model…");
     spinner.enable_steady_tick(Duration::from_millis(80));
 
-    let model = LlamaCppModel::load(&args.model_path, 1, args.max_context_len)?;
+    let model = LlamaCppModel::load(&model_path, 1, args.max_context_len)?;
     let model_config = model.model_config();
 
     spinner.finish_and_clear();
@@ -124,13 +151,6 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         args.block_size,
     ));
     let scheduler = std::sync::Arc::new(crate::scheduler::Scheduler::new(kv_cache.clone(), 1));
-
-    let model_name = args
-        .model_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("default")
-        .to_string();
 
     let model = std::sync::Arc::new(model);
     let engine = std::sync::Arc::new(InferenceEngine::new(

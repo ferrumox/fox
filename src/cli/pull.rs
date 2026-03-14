@@ -301,19 +301,24 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
     std::fs::rename(&tmp_dest, &dest)
         .with_context(|| format!("renaming {:?} to {:?}", tmp_dest, dest))?;
 
+    let stem = dest
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&filename);
+
     eprintln!();
     theme::print_success(&format!("Saved to {}", dest.display()));
     theme::eprint_styled(
         None,
         false,
         true,
-        &format!("     Run:   fox run --model-path \"{}\"\n", dest.display()),
+        &format!("     Run:   fox run {}\n", stem),
     );
     theme::eprint_styled(
         None,
         false,
         true,
-        &format!("     Serve: fox serve --model-path \"{}\"\n", dest.display()),
+        &format!("     Serve: fox serve\n"),
     );
 
     Ok(())

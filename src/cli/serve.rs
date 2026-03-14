@@ -1,6 +1,5 @@
 // `fox serve` — start the OpenAI-compatible HTTP inference server.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,6 +13,7 @@ use crate::model_registry::{ModelRegistry, RegistryConfig};
 
 use super::get_gpu_memory_bytes;
 use super::list_models;
+use super::load_aliases;
 use super::models_dir as default_models_dir;
 use super::theme;
 
@@ -241,38 +241,3 @@ async fn shutdown_signal() {
     ctrl_c.await;
 }
 
-fn load_aliases(path: Option<PathBuf>) -> HashMap<String, String> {
-    let path = path.unwrap_or_else(|| {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(home).join(".config/ferrumox/aliases.toml")
-    });
-
-    if !path.exists() {
-        return HashMap::new();
-    }
-
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("failed to read alias file {:?}: {}", path, e);
-            return HashMap::new();
-        }
-    };
-
-    #[derive(serde::Deserialize)]
-    struct AliasesFile {
-        #[serde(default)]
-        aliases: HashMap<String, String>,
-    }
-
-    match toml::from_str::<AliasesFile>(&content) {
-        Ok(f) => {
-            tracing::info!("loaded {} alias(es) from {:?}", f.aliases.len(), path);
-            f.aliases
-        }
-        Err(e) => {
-            tracing::warn!("failed to parse alias file {:?}: {}", path, e);
-            HashMap::new()
-        }
-    }
-}
