@@ -1052,14 +1052,21 @@ impl Model for LlamaCppModel {
 
     fn stop_tokens(&self) -> Vec<String> {
         let mut result: Vec<String> = Vec::new();
-        // Enumerate every EOG (end-of-generation) token the vocab exposes.
-        // `llama_vocab_eos` / `llama_vocab_eot` often return the same token ID and can
-        // miss additional EOG tokens like `<|end|>` (token 200020 on Phi-4).
-        // Iterating the whole vocab with `llama_vocab_is_eog` catches all of them.
+        // Collect the text form of every control token in the vocabulary.
+        //
+        // This includes:
+        //   - EOG tokens (EOS/EOT variants like `<|endoftext|>`, `<|end|>`)
+        //   - Role-separator tokens (`<|user|>`, `<|system|>`, `<|assistant|>`, …)
+        //
+        // Both categories must be treated as stop signals: if the model emits any
+        // of them mid-generation it has crossed a turn boundary and should stop.
+        // `is_eog_token()` already handles the token-ID path; these text patterns
+        // are needed for the rare case where llama.cpp returns the token ID as a
+        // non-EOG but the text representation is a control delimiter.
         let n_tokens = unsafe { ffi::llama_vocab_n_tokens(self.vocab) };
         for token_id in 0..n_tokens {
-            let is_eog = unsafe { ffi::llama_vocab_is_eog(self.vocab, token_id) };
-            if !is_eog {
+            let is_control = unsafe { ffi::llama_vocab_is_control(self.vocab, token_id) };
+            if !is_control {
                 continue;
             }
             if let Ok(s) = self.token_to_piece_impl(token_id) {

@@ -400,6 +400,20 @@ impl Scheduler {
             return false;
         }
 
+        // Do not cache if the inference seq_id pool is currently empty.
+        // The finished request's seq_id has not yet been returned to the pool;
+        // if we donate it to the prefix cache, the pool remains empty and the
+        // next request will be unable to start (pool.is_empty() → not admitted).
+        {
+            let pool = match self.seq_id_pool.lock() {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            if pool.is_empty() {
+                return false;
+            }
+        }
+
         for req in running.iter_mut() {
             if req.id != req_id || req.kv_seq_id < 0 {
                 continue;
