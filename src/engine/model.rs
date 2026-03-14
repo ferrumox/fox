@@ -142,6 +142,11 @@ pub trait Model: Send + Sync {
     /// Run a forward pass in embedding mode and return the sequence embedding vector.
     /// Uses sequence slot 0; caller must not have an active inference request on slot 0.
     fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>>;
+
+    /// Return the text forms of the model's EOS and EOT tokens.
+    /// Used as base stop sequences so generation halts on model-native terminators
+    /// even when the token ID is not caught by `is_eog_token`.
+    fn stop_tokens(&self) -> Vec<String>;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +237,10 @@ impl Model for StubModel {
 
     fn get_embeddings(&self, _tokens: &[i32]) -> Result<Vec<f32>> {
         Ok(vec![0.1, 0.2, 0.3, 0.4])
+    }
+
+    fn stop_tokens(&self) -> Vec<String> {
+        vec![]
     }
 }
 
@@ -1040,6 +1049,29 @@ impl Model for LlamaCppModel {
     fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>> {
         self.do_get_embeddings(tokens)
     }
+
+    fn stop_tokens(&self) -> Vec<String> {
+        let mut result: Vec<String> = Vec::new();
+        // Enumerate every EOG (end-of-generation) token the vocab exposes.
+        // `llama_vocab_eos` / `llama_vocab_eot` often return the same token ID and can
+        // miss additional EOG tokens like `<|end|>` (token 200020 on Phi-4).
+        // Iterating the whole vocab with `llama_vocab_is_eog` catches all of them.
+        let n_tokens = unsafe { ffi::llama_vocab_n_tokens(self.vocab) };
+        for token_id in 0..n_tokens {
+            let is_eog = unsafe { ffi::llama_vocab_is_eog(self.vocab, token_id) };
+            if !is_eog {
+                continue;
+            }
+            if let Ok(s) = self.token_to_piece_impl(token_id) {
+                let s = s.replace(super::SPM_SPACE, " ");
+                let s = s.trim().to_string();
+                if !s.is_empty() && !result.contains(&s) {
+                    result.push(s);
+                }
+            }
+        }
+        result
+    }
 }
 
 // ==================== Stub implementation (when FOX_SKIP_LLAMA or no llama.cpp) ====================
@@ -1150,6 +1182,10 @@ impl Model for LlamaCppModel {
     fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>> {
         let _ = tokens;
         Ok(vec![0.0f32; self.embedding_dim()])
+    }
+
+    fn stop_tokens(&self) -> Vec<String> {
+        vec![]
     }
 }
 

@@ -49,6 +49,10 @@ struct PerRequestState {
     /// Rolling suffix of recently emitted text (length ≤ 2 × max_stop_len).
     /// Used to detect *user-supplied* stop strings that span multiple tokens.
     text_buffer: String,
+    /// Model-native stop token strings (EOS/EOT text forms) treated exactly like
+    /// `CONTROL_TOKEN_PATTERNS`: held back in `pending_output` until the full
+    /// pattern is assembled, then suppressed and generation stops.
+    model_control_patterns: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -73,6 +77,12 @@ fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (String, bool)
         return (String::new(), false);
     }
 
+    // Build combined pattern list: static patterns + model-native stop token strings.
+    // SAFETY: the Vec<&str> borrows from `state.model_control_patterns` which lives for
+    // the duration of this call.  We reborrow `state` fields individually below to
+    // avoid a borrow-checker conflict with `state.pending_output`.
+    let patterns = all_control_patterns(&state.model_control_patterns);
+
     // 1. Enter <think> block (usually a single special token like 248068 for Qwen3.5).
     if raw.contains("<think>") {
         state.in_thinking = true;
@@ -96,7 +106,7 @@ fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (String, bool)
             // Any text after </think> in the same token also needs to be flushed.
             if after_tag < raw.len() {
                 state.pending_output.push_str(&raw[after_tag..]);
-                let (rest, stop) = flush_pending_output(&mut state.pending_output);
+                let (rest, stop) = flush_pending_output(&mut state.pending_output, &patterns);
                 out.push_str(&rest);
                 if stop {
                     return (out, true);
@@ -111,7 +121,7 @@ fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (String, bool)
                 state.pending_output.push_str(&raw[after..]);
             }
         }
-        return flush_pending_output(&mut state.pending_output);
+        return flush_pending_output(&mut state.pending_output, &patterns);
     }
 
     // 3. Inside a thinking block.
@@ -127,7 +137,7 @@ fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (String, bool)
     // 4. Normal text: push through the pending buffer; hold back any partial
     //    control-token prefix (e.g. `<` that could be the start of `<|im_end|>`).
     state.pending_output.push_str(raw);
-    flush_pending_output(&mut state.pending_output)
+    flush_pending_output(&mut state.pending_output, &patterns)
 }
 
 /// Flush as much of `pending` as is safe.
@@ -136,9 +146,12 @@ fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (String, bool)
 ///    *before* the pattern and signal stop (the pattern itself is discarded).
 /// 2. Otherwise, hold back the longest suffix that is a strict prefix of any
 ///    control pattern (could be the start of `<|im_end|>` etc.).
-fn flush_pending_output(pending: &mut String) -> (String, bool) {
+///
+/// `patterns` is the combined list of static `CONTROL_TOKEN_PATTERNS` plus any
+/// model-native stop token strings for the current request.
+fn flush_pending_output(pending: &mut String, patterns: &[&str]) -> (String, bool) {
     // Check for complete control-token patterns.
-    for &pat in CONTROL_TOKEN_PATTERNS {
+    for &pat in patterns {
         if let Some(idx) = pending.find(pat) {
             let emit = pending[..idx].to_string();
             pending.clear();
@@ -147,7 +160,7 @@ fn flush_pending_output(pending: &mut String) -> (String, bool) {
     }
 
     // Find the earliest `<` that could be the start of a control pattern.
-    let holdback_start = find_holdback_start(pending);
+    let holdback_start = find_holdback_start(pending, patterns);
     let emit = pending[..holdback_start].to_string();
     *pending = pending[holdback_start..].to_string();
     (emit, false)
@@ -156,17 +169,29 @@ fn flush_pending_output(pending: &mut String) -> (String, bool) {
 /// Returns the byte offset of the first `<` in `text` from which a control-token
 /// pattern *could* still begin (i.e. some pattern starts with the suffix
 /// `text[offset..]`).  Returns `text.len()` when nothing needs to be held back.
-fn find_holdback_start(text: &str) -> usize {
+fn find_holdback_start(text: &str, patterns: &[&str]) -> usize {
     for (i, c) in text.char_indices() {
         if c != '<' {
             continue;
         }
         let suffix = &text[i..];
-        if CONTROL_TOKEN_PATTERNS.iter().any(|p| p.starts_with(suffix)) {
+        if patterns.iter().any(|p| p.starts_with(suffix)) {
             return i;
         }
     }
     text.len()
+}
+
+/// Build the combined pattern list for a request: static CONTROL_TOKEN_PATTERNS
+/// plus any model-native stop token strings stored in state.
+fn all_control_patterns<'a>(model_pats: &'a [String]) -> Vec<&'a str> {
+    let mut v: Vec<&str> = CONTROL_TOKEN_PATTERNS.to_vec();
+    for p in model_pats {
+        if !v.contains(&p.as_str()) {
+            v.push(p.as_str());
+        }
+    }
+    v
 }
 
 /// Check whether the rolling text buffer (extended with `new_text`) ends with
@@ -263,6 +288,8 @@ pub struct InferenceEngine {
     /// Whether the loaded model supports KV-cache sequence copying (llama_memory_seq_cp).
     /// False for recurrent/hybrid models (Mamba, Qwen3.5, etc.); prefix caching is disabled.
     supports_prefix_cache: bool,
+    /// Text forms of the model's EOS and EOT tokens, used as base stop sequences.
+    model_stop_tokens: Vec<String>,
 }
 
 impl InferenceEngine {
@@ -281,6 +308,10 @@ impl InferenceEngine {
                 "prefix caching disabled (model uses recurrent/hybrid memory — seq_cp unsupported)"
             );
         }
+        let model_stop_tokens = model.stop_tokens();
+        if !model_stop_tokens.is_empty() {
+            tracing::info!("model stop tokens: {:?}", model_stop_tokens);
+        }
         Self {
             model,
             scheduler,
@@ -290,6 +321,7 @@ impl InferenceEngine {
             model_name,
             metrics,
             supports_prefix_cache,
+            model_stop_tokens,
         }
     }
 
@@ -573,8 +605,10 @@ impl InferenceEngine {
                         continue;
                     }
                 };
+                let model_control_patterns = self.model_stop_tokens.clone();
                 let state = state_map.entry(*req_id).or_insert_with(|| PerRequestState {
                     show_thinking: req.sampling.show_thinking,
+                    model_control_patterns,
                     ..Default::default()
                 });
 
