@@ -63,7 +63,10 @@ pub fn print_banner(model_name: &str, context_len: u32) {
         None,
         false,
         true,
-        &format!("  /bye o Ctrl+D para salir · {} tokens\n\n", context_len),
+        &format!(
+            "  /bye o Ctrl+D para salir · /think para ver razonamiento · {} tokens\n\n",
+            context_len
+        ),
     );
 }
 

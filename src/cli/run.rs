@@ -194,6 +194,7 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
         })
     };
 
+    let mut show_thinking = args.show_thinking;
     let mut messages: Vec<(String, String)> = Vec::new();
     if !args.no_system_prompt && !args.system_prompt.is_empty() {
         messages.push(("system".to_string(), args.system_prompt.clone()));
@@ -237,6 +238,13 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
             break;
         }
 
+        if input == "/think" {
+            show_thinking = !show_thinking;
+            let status = if show_thinking { "activado" } else { "desactivado" };
+            theme::eprint_styled(None, false, true, &format!("  Razonamiento {status}\n\n"));
+            continue;
+        }
+
         messages.push(("user".to_string(), input));
 
         // Thinking spinner
@@ -251,7 +259,7 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
 
         let start = Instant::now();
         let (response, token_count) =
-            stream_turn_collecting(args, engine, &messages, spinner).await?;
+            stream_turn_collecting(args, engine, &messages, spinner, show_thinking).await?;
         let elapsed = start.elapsed();
 
         println!();
@@ -285,6 +293,7 @@ async fn stream_turn_collecting(
     engine: &Arc<InferenceEngine>,
     messages: &[(String, String)],
     spinner: ProgressBar,
+    show_thinking: bool,
 ) -> Result<(String, usize)> {
     let prompt = engine.apply_chat_template(messages).unwrap_or_else(|_| {
         messages
@@ -298,7 +307,8 @@ async fn stream_turn_collecting(
         .tokenize(&prompt)
         .unwrap_or_else(|_| prompt.bytes().map(|b| b as i32).take(4096).collect());
 
-    let sampling = build_sampling_params(args);
+    let mut sampling = build_sampling_params(args);
+    sampling.show_thinking = show_thinking;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let req_id = engine.next_request_id();
