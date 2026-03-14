@@ -65,7 +65,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
 
     let load_start = Instant::now();
     let gpu_memory_bytes_load = get_gpu_memory_bytes();
-    let model = LlamaCppModel::load(&model_path, 1, args.max_context_len, gpu_memory_bytes_load, 0.85)?;
+    let model = LlamaCppModel::load(&model_path, 1, args.max_context_len, gpu_memory_bytes_load, 0.85, 1)?;
     let model_config = model.model_config();
     let load_elapsed = load_start.elapsed();
 
@@ -78,6 +78,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         gpu_memory_bytes,
         0.85,
         16,
+        1,
     ));
     let scheduler = Arc::new(crate::scheduler::Scheduler::new(kv_cache.clone(), 1));
     let model = Arc::new(model);

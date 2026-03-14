@@ -397,6 +397,7 @@ impl LlamaCppModel {
         max_context_len: u32,
         gpu_memory_bytes: usize,
         gpu_memory_fraction: f32,
+        type_kv: u32,
     ) -> Result<Self> {
         // Load GPU/CPU backends compiled as dynamic libraries (GGML_BACKEND_DL).
         // Passing null searches the executable's directory and cwd — fox ships
@@ -466,6 +467,10 @@ impl LlamaCppModel {
         // n_batch must be at least as large as n_ctx to handle full prompts in one pass
         ctx_params.n_batch = max_context_len.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
+        ctx_params.flash_attn_type = 1; // LLAMA_FLASH_ATTN_TYPE_ENABLED
+        ctx_params.offload_kqv = true;
+        ctx_params.type_k = type_kv;
+        ctx_params.type_v = type_kv;
 
         let ctx = unsafe { ffi::llama_init_from_model(model.as_ptr(), ctx_params) };
         let ctx = NonNull::new(ctx).ok_or_else(|| {

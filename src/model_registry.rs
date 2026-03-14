@@ -31,6 +31,8 @@ pub struct RegistryConfig {
     pub metrics: Option<Arc<Metrics>>,
     /// Seconds since last use before a model is evicted. 0 = never evict by time.
     pub keep_alive_secs: u64,
+    /// KV cache element type: 1=F16 (default), 8=Q8_0, 2=Q4_0
+    pub type_kv: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -243,11 +245,12 @@ async fn load_model(name: &str, path: &Path, cfg: &RegistryConfig) -> Result<Eng
     let gpu_memory_fraction = cfg.gpu_memory_fraction;
     let block_size = cfg.block_size;
     let metrics = cfg.metrics.clone();
+    let type_kv = cfg.type_kv;
 
     tracing::info!("loading model '{}' from {:?}", name, path);
 
     let model = tokio::task::spawn_blocking(move || {
-        LlamaCppModel::load(&path, max_batch_size, max_context_len, gpu_memory_bytes, gpu_memory_fraction)
+        LlamaCppModel::load(&path, max_batch_size, max_context_len, gpu_memory_bytes, gpu_memory_fraction, type_kv)
     })
     .await
     .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;
@@ -259,6 +262,7 @@ async fn load_model(name: &str, path: &Path, cfg: &RegistryConfig) -> Result<Eng
         gpu_memory_bytes,
         gpu_memory_fraction,
         block_size,
+        type_kv,
     ));
     let scheduler = Arc::new(Scheduler::new(kv_cache.clone(), max_batch_size));
     let engine = Arc::new(InferenceEngine::new(model, scheduler, kv_cache, name, metrics));
@@ -291,7 +295,7 @@ impl EngineEntry {
         let model: Arc<dyn crate::engine::model::Model> = Arc::new(StubModel);
         let cfg = model.model_config();
         // Small KV cache: 4 MiB, fraction 0.9, block_size 16
-        let kv = Arc::new(KVCacheManager::new(&cfg, 4 * 1024 * 1024, 0.9, 16));
+        let kv = Arc::new(KVCacheManager::new(&cfg, 4 * 1024 * 1024, 0.9, 16, 1));
         let sched = Arc::new(Scheduler::new(kv.clone(), 4));
         let engine = Arc::new(crate::engine::InferenceEngine::new(
             model,
@@ -344,6 +348,7 @@ mod tests {
             gpu_memory_fraction: 0.9,
             metrics: None,
             keep_alive_secs,
+            type_kv: 1,
         }
     }
 

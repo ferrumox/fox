@@ -138,7 +138,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
     spinner.enable_steady_tick(Duration::from_millis(80));
 
     let gpu_memory_bytes_load = get_gpu_memory_bytes();
-    let model = LlamaCppModel::load(&model_path, 1, args.max_context_len, gpu_memory_bytes_load, args.gpu_memory_fraction)?;
+    let model = LlamaCppModel::load(&model_path, 1, args.max_context_len, gpu_memory_bytes_load, args.gpu_memory_fraction, 1)?;
     let model_config = model.model_config();
 
     spinner.finish_and_clear();
@@ -150,6 +150,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         gpu_memory_bytes,
         args.gpu_memory_fraction,
         args.block_size,
+        1,
     ));
     let scheduler = std::sync::Arc::new(crate::scheduler::Scheduler::new(kv_cache.clone(), 1));
 

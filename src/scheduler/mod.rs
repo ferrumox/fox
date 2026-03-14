@@ -567,7 +567,7 @@ mod tests {
             head_dim: 128,
             vocab_size: 32000,
         };
-        let kv = Arc::new(KVCacheManager::new(&config, 1_000_000_000, 0.5, 16));
+        let kv = Arc::new(KVCacheManager::new(&config, 1_000_000_000, 0.5, 16, 1));
         let sched = Scheduler::new(kv, 8);
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -591,7 +591,7 @@ mod tests {
             head_dim: 64,
             vocab_size: 1000,
         };
-        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16));
+        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1));
         let sched = Scheduler::new(kv, 8);
 
         // 18 tokens → 1 full block (16 tokens) + 2 leftover.
@@ -641,7 +641,7 @@ mod tests {
             head_dim: 64,
             vocab_size: 1000,
         };
-        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16));
+        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1));
         let sched = Scheduler::new(kv, 8);
 
         // Shared prefix: tokens 1-16

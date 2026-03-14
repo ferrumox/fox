@@ -67,6 +67,10 @@ struct Args {
     #[arg(long, default_value = "default")]
     model: String,
 
+    /// Model name to use for the comparison server (defaults to --model).
+    #[arg(long)]
+    compare_model: Option<String>,
+
     /// Number of concurrent workers.
     #[arg(long, default_value = "4")]
     concurrency: usize,
@@ -789,10 +793,11 @@ async fn main() -> Result<()> {
     .await?;
 
     let (comparison, improvement) = if let Some(ref cu) = args.compare_url {
+        let cmp_model = args.compare_model.as_deref().unwrap_or(&args.model);
         let cmp = run_workload(
             &args.compare_label,
             cu,
-            &args.model,
+            cmp_model,
             &args.prompt,
             args.max_tokens,
             args.concurrency,

@@ -80,6 +80,18 @@ pub struct ServeArgs {
     /// Seconds a model stays in memory after its last request (0 = never evict by time).
     #[arg(long, default_value = "300", env = "FOX_KEEP_ALIVE_SECS")]
     pub keep_alive_secs: u64,
+
+    /// KV cache quantization: f16 (default), q8_0, q4_0
+    #[arg(long, default_value = "f16", env = "FOX_TYPE_KV")]
+    pub type_kv: String,
+}
+
+fn parse_type_kv(s: &str) -> u32 {
+    match s {
+        "q8_0" => 8,
+        "q4_0" => 2,
+        _ => 1, // f16
+    }
 }
 
 pub async fn run_serve(args: ServeArgs) -> Result<()> {
@@ -133,6 +145,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         gpu_memory_fraction: args.gpu_memory_fraction,
         metrics,
         keep_alive_secs: args.keep_alive_secs,
+        type_kv: parse_type_kv(&args.type_kv),
     };
 
     let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));
