@@ -7,6 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.0] - 2026-03-10
+
+### Added
+
+- **Multi-Model support** — `ModelRegistry` loads and serves multiple models simultaneously
+  with LRU eviction.
+  - New `src/model_registry.rs`: `ModelRegistry`, `EngineEntry`, `RegistryConfig`.
+  - `GET /api/ps` now lists **all** currently-loaded models (previously only the one model).
+  - `GET /v1/models` now lists **all** `.gguf` files in `models_dir` (not just the loaded one).
+  - Each inference/embedding request is routed to the correct engine based on the `model` field;
+    unknown models return HTTP 404.
+  - `DELETE /api/delete` now also unloads the model from the registry if it was loaded.
+
+- **`--max-models` flag** (`FOX_MAX_MODELS` env var, default `1`) — maximum number of models
+  kept in memory simultaneously; excess models are evicted LRU-first.
+
+- **`--alias-file` flag** (`FOX_ALIAS_FILE` env var) — optional TOML file mapping short names
+  to model stems (e.g. `"llama3" = "Llama-3.2-3B-Instruct-f16"`).
+  Default path: `~/.config/ferrumox/aliases.toml`.
+
+### Changed
+
+- `AppState` replaces `engine: Arc<InferenceEngine>` with `registry: Arc<ModelRegistry>` +
+  `primary_model: String`. Backward-compatible: `fox serve --model-path X.gguf` works unchanged.
+- `router()` signature updated accordingly.
+- Engine run-loop is now started inside `ModelRegistry::get_or_load` and aborted automatically
+  on LRU eviction via `Drop` on `EngineEntry`.
+
+---
+
+## [0.8.0] - 2026-03-10
+
+### Added
+
+- **Embeddings API** — unlocks RAG pipelines (LangChain, LlamaIndex, Open WebUI RAG, etc.)
+  - `POST /v1/embeddings` — OpenAI-compatible endpoint; accepts `input` as a string or array
+    of strings, returns `data[].embedding` vectors.
+  - `POST /api/embed` — Ollama-compatible endpoint; returns `embeddings: [[f32]]`.
+  - `InferenceEngine::embed()` async method; `Model::get_embeddings()` + `Model::embedding_dim()`
+    trait methods with full `LlamaCppModel` implementation via `llama_set_embeddings` /
+    `llama_get_embeddings_seq` FFI and stub fallback.
+  - New types: `EmbeddingInput` (untagged enum for String/Vec<String>), `EmbeddingRequest`,
+    `EmbeddingObject`, `EmbeddingUsage`, `EmbeddingResponse`, `OllamaEmbedRequest`,
+    `OllamaEmbedResponse`.
+
+- **`POST /api/pull` with SSE streaming** — download models from HuggingFace Hub via the
+  server API, identical to Ollama's pull flow.
+  - Emits newline-delimited JSON events: `pulling manifest` → `downloading` (with `digest`,
+    `total`, `completed` bytes) → `verifying sha256 digest` → `success`.
+  - Automatically selects Q4_K_M quantization when available, otherwise picks the first GGUF.
+  - New `--hf-token` flag on `fox serve` (also `HF_TOKEN` env var) forwarded to pulls.
+  - New `AppState.hf_token` field; new file `src/api/pull_handler.rs`.
+  - New types: `PullRequest`, `PullStatus`.
+
+- **Release binaries + `install.sh`** — one-command installation.
+  - `.github/workflows/release.yml` — triggered on `v*` tags; builds for four targets:
+    `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`,
+    `aarch64-apple-darwin`. Uploads tarballs as GitHub Release assets.
+  - `install.sh` — detects OS + arch, downloads the correct tarball, installs to
+    `/usr/local/bin/fox` (configurable via `--prefix`).
+  - `fox.service` — systemd unit for running `fox serve` as a daemon.
+
+### Changed
+
+- `Cargo.toml`: version bumped to `0.8.0`.
+- `src/api/routes.rs`: `router()` now takes an extra `hf_token: Option<String>` parameter.
+- `src/cli/serve.rs`: `ServeArgs` gains `--hf-token` / `HF_TOKEN`.
+
+---
+
+## [0.7.0] - 2026-03-10
+
+### Added
+
+- **Ollama-compatible API layer** (`src/api/routes.rs`, `src/api/types.rs`)
+  - `GET /api/tags` — lists all `.gguf` models in `~/.cache/ferrumox/models/` with name,
+    size, SHA256 digest, architecture family, quantization level, and `modified_at` timestamp.
+    Open WebUI and Continue.dev use this endpoint to discover available models.
+  - `GET /api/ps` — returns the currently loaded model with real file size (bytes) and
+    SHA256 digest looked up from disk.
+  - `POST /api/show` — returns detailed metadata for a named model: architecture family,
+    quantization, human-readable size, digest, modification date, and file path.
+  - `DELETE /api/delete` — removes a `.gguf` file from the models directory by model name
+    or filename. Returns `404` if the model is not found.
+  - New response types: `OllamaModel`, `OllamaDetails`, `TagsResponse`, `PsEntry`,
+    `PsResponse`, `ShowRequest`, `ShowResponse`, `DeleteRequest`.
+  - SHA256 digest computed once per file via `sha2` + `hex` and cached in `AppState`
+    (`Arc<Mutex<HashMap<PathBuf, String>>>`). Subsequent requests for the same file return
+    instantly.
+  - New dependencies: `sha2 = "0.10"`, `hex = "0.4"`.
+
+- **`models_dir` added to `AppState`** (`src/api/routes.rs`, `src/cli/serve.rs`)
+  - `router()` now accepts a `models_dir: PathBuf` parameter (default:
+    `~/.cache/ferrumox/models`) used by the Ollama-compat handlers.
+  - `src/cli/show::parse_architecture` and `parse_quantization` promoted to `pub(crate)`
+    so they can be reused by the API layer without duplication.
+
+### Compatibility
+
+With v0.7.0, **Open WebUI** and **Continue.dev** work out of the box by pointing their
+Ollama URL to `http://localhost:8080`. No other configuration change is required.
+
+---
+
 ## [0.6.0] - 2026-03-13
 
 ### Added

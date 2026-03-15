@@ -297,6 +297,18 @@ impl InferenceEngine {
         self.model.tokenize(text)
     }
 
+    pub fn embedding_dim(&self) -> usize {
+        self.model.embedding_dim()
+    }
+
+    pub async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        let tokens = self.model.tokenize(text)?;
+        let model = self.model.clone();
+        tokio::task::spawn_blocking(move || model.get_embeddings(&tokens))
+            .await
+            .map_err(|e| anyhow::anyhow!("embed spawn_blocking: {}", e))?
+    }
+
     pub fn apply_chat_template(&self, messages: &[(String, String)]) -> anyhow::Result<String> {
         self.model.apply_chat_template(messages)
     }

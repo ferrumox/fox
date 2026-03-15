@@ -46,7 +46,7 @@ static ARCH_TAGS: &[&str] = &[
     "yi",
 ];
 
-fn parse_quantization(stem: &str) -> Option<&'static str> {
+pub(crate) fn parse_quantization(stem: &str) -> Option<&'static str> {
     let upper = stem.to_uppercase();
     // Longer tags first to avoid prefix shadowing (e.g. Q4_K_M before Q4_K_S)
     let mut tags = QUANT_TAGS.to_vec();
@@ -56,7 +56,7 @@ fn parse_quantization(stem: &str) -> Option<&'static str> {
         .map(|v| v as _)
 }
 
-fn parse_architecture(stem: &str) -> Option<&'static str> {
+pub(crate) fn parse_architecture(stem: &str) -> Option<&'static str> {
     let lower = stem.to_lowercase();
     // Longer names first to avoid prefix shadowing (e.g. "codellama" before "llama")
     ARCH_TAGS
