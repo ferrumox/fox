@@ -266,8 +266,8 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
 
         if input == "/think" {
             show_thinking = !show_thinking;
-            let status = if show_thinking { "activado" } else { "desactivado" };
-            theme::eprint_styled(None, false, true, &format!("  Razonamiento {status}\n\n"));
+            let status = if show_thinking { "enabled" } else { "disabled" };
+            theme::eprint_styled(None, false, true, &format!("  Reasoning {status}\n\n"));
             continue;
         }
 

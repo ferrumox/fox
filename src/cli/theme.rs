@@ -52,7 +52,7 @@ pub fn print_styled(color: Option<Color>, bold: bool, dim: bool, text: &str) {
 /// ```
 ///   🦊  <model_name bold white>
 ///   ─────────────────────────────── (dim)
-///   /bye o Ctrl+D para salir · N tokens  (dim)
+///   /bye or Ctrl+D to exit · /think to toggle reasoning · N tokens  (dim)
 /// ```
 pub fn print_banner(model_name: &str, context_len: u32) {
     eprint_styled(None, false, false, "  🦊  ");
@@ -64,7 +64,7 @@ pub fn print_banner(model_name: &str, context_len: u32) {
         false,
         true,
         &format!(
-            "  /bye o Ctrl+D para salir · /think para ver razonamiento · {} tokens\n\n",
+            "  /bye or Ctrl+D to exit · /think to toggle reasoning · {} tokens\n\n",
             context_len
         ),
     );
