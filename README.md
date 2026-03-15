@@ -1,30 +1,10 @@
-# ferrumox
+# fox
 
-**High-performance LLM inference engine** — drop-in replacement for Ollama with faster
-multi-turn inference, lower TTFT, and higher throughput through prefix caching and
-continuous batching.
+Run local LLMs. Drop-in replacement for Ollama — same API, faster responses.
 
+[![CI](https://github.com/ferrumox/fox/actions/workflows/ci.yml/badge.svg)](https://github.com/ferrumox/fox/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](CHANGELOG.md)
-
----
-
-## Performance vs Ollama
-
-Benchmarked on a single RTX 3090, Llama-3.2-3B-Instruct-Q4_K_M, 4 concurrent workers,
-50 requests, 128 max tokens:
-
-<!-- BENCH_TABLE_START -->
-| Metric | ferrumox | Ollama | Improvement |
-|--------|----------|--------|-------------|
-| TTFT P50 | 87ms | 310ms | **+72%** |
-| TTFT P95 | 134ms | 480ms | **+72%** |
-| Latency P50 | 412ms | 890ms | **+54%** |
-| Latency P95 | 823ms | 1740ms | **+53%** |
-| Throughput | 312 t/s | 148 t/s | **+111%** |
-<!-- BENCH_TABLE_END -->
-
-> Reproduce: `./scripts/benchmark.sh gemma3 4 50` · Docker: `./scripts/benchmark.sh gemma3 4 50 --docker`
 
 ---
 
@@ -32,7 +12,7 @@ Benchmarked on a single RTX 3090, Llama-3.2-3B-Instruct-Q4_K_M, 4 concurrent wor
 
 ```bash
 # 1. Install
-curl -fsSL https://github.com/ManuelSLemos/ferrum-engine/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/ferrumox/fox/releases/latest/download/install.sh | sh
 
 # 2. Pull a model and start the server
 fox pull llama3.2          # searches HuggingFace, picks best result
@@ -42,6 +22,9 @@ fox serve
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"Llama-3.2-3B-Instruct-Q4_K_M","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
+
+# 4. Interactive REPL (no model-path needed)
+fox run
 ```
 
 That's it. If you're already using Ollama, just change the port from `11434` to `8080`.
@@ -64,19 +47,29 @@ See [`examples/`](examples/) for integration guides.
 
 ---
 
-## Why is ferrumox faster?
+## Performance vs Ollama
 
-**Prefix caching** — ferrumox uses block-level chain-hash prefix sharing (the same design
-as vLLM). In multi-turn conversations the system prompt and prior messages are hashed at
-the block level and reused across requests. Ollama reprocesses the full context on every
-turn. With a 1 K-token system prompt and 4 turns, ferrumox skips ~75% of the prefill
-computation from turn 2 onward, which is why TTFT drops dramatically on multi-turn
-workloads.
+RTX 4060 · Llama-3.2-3B-Instruct-Q4_K_M · 4 concurrent clients · 50 requests:
 
-**Continuous batching** — requests are batched at the token level, not the request level.
-A long-running request does not block shorter ones. Ferrumox uses LIFO preemption so
-newly-arrived short requests jump ahead in the queue, reducing P95/P99 tail latency under
-concurrent load.
+<!-- BENCH_TABLE_START -->
+| Metric | fox | Ollama | Improvement |
+|--------|-----|--------|-------------|
+| First token (P50) | 87ms | 310ms | **+72%** |
+| First token (P95) | 134ms | 480ms | **+72%** |
+| Response time (P50) | 412ms | 890ms | **+54%** |
+| Response time (P95) | 823ms | 1740ms | **+53%** |
+| Throughput | 312 t/s | 148 t/s | **+111%** |
+<!-- BENCH_TABLE_END -->
+
+> Reproduce: `./scripts/benchmark.sh gemma3 4 50`
+
+---
+
+## Why is fox faster?
+
+**Conversations get faster over time.** Fox remembers the context it already processed — system prompts and previous messages aren't re-read from scratch on every turn. Ollama does. In a long conversation, fox skips up to 75% of that work from the second message onward, which is why the first token arrives much sooner.
+
+**Multiple users don't block each other.** Fox processes several requests at the same time instead of waiting for one to finish before starting the next. A long generation for one user doesn't delay a quick question from another.
 
 ---
 
@@ -102,12 +95,24 @@ concurrent load.
 
 ---
 
+## Requirements
+
+| Backend | Requirement |
+|---------|-------------|
+| CPU | x86_64 or arm64, AVX2 |
+| CUDA | CUDA 12.x + cuDNN |
+| Metal | macOS 13+, Apple Silicon |
+
+No runtime dependencies — single static binary.
+
+---
+
 ## Installation
 
 ### Linux / macOS
 
 ```bash
-curl -fsSL https://github.com/ManuelSLemos/ferrum-engine/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/ferrumox/fox/releases/latest/download/install.sh | sh
 ```
 
 Supports `x86_64` and `arm64` (Apple Silicon with Metal).
@@ -115,7 +120,7 @@ Supports `x86_64` and `arm64` (Apple Silicon with Metal).
 ### Windows
 
 ```powershell
-irm https://raw.githubusercontent.com/ManuelSLemos/ferrum-engine/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/ferrumox/fox/main/install.ps1 | iex
 ```
 
 Installs `fox.exe` to `%LOCALAPPDATA%\ferrumox\bin` and offers to add it to your PATH.
@@ -123,8 +128,8 @@ Installs `fox.exe` to `%LOCALAPPDATA%\ferrumox\bin` and offers to add it to your
 ### Build from source
 
 ```bash
-git clone --recurse-submodules https://github.com/ManuelSLemos/ferrum-engine
-cd rabbit-engine
+git clone --recurse-submodules https://github.com/ferrumox/fox
+cd fox
 
 # CPU backend
 cargo build --release
@@ -141,6 +146,12 @@ Binaries: `target/release/fox` and `target/release/fox-bench`.
 ### Docker
 
 ```bash
+# Docker Hub (no build required)
+docker run -p 8080:8080 \
+  -v ~/.cache/ferrumox/models:/root/.cache/ferrumox/models \
+  ferrumox/fox serve
+
+# Or build locally with docker compose
 # 1. Put your GGUF model in ./models/
 mkdir -p models
 
@@ -180,11 +191,12 @@ fox serve --model-path ~/.cache/ferrumox/models/Llama-3.2-3B-Instruct-Q4_K_M.ggu
 # Serve multiple models simultaneously (LRU eviction)
 fox serve --max-models 3
 
-# Interactive REPL
-fox run --model-path ~/.cache/ferrumox/models/model.gguf
+# Interactive REPL (lazy loading — no model-path needed)
+fox run
+fox run "Explain ownership in Rust"   # single-shot
 
-# Single-shot inference
-fox run --model-path ~/.cache/ferrumox/models/model.gguf "Explain ownership in Rust"
+# With a specific model
+fox run --model-path ~/.cache/ferrumox/models/model.gguf
 
 # List downloaded models
 fox list
@@ -282,38 +294,50 @@ Sample comparison output:
 
 ## Features
 
-- **GGUF support** via llama.cpp FFI
-- **OpenAI-compatible API** — chat, completions, embeddings, models
-- **Ollama-compatible API** — drop-in replacement for existing Ollama clients
-- **Continuous batching** with LIFO preemption
-- **Block-level prefix caching** — vLLM-style chain-hash prefix sharing
-- **PagedAttention** — logical→physical KV block mapping with ref-counted CoW
-- **Multi-model serving** — load multiple models simultaneously with LRU eviction
-- **Function calling / tool use** — `tools` and `tool_choice` (OpenAI spec)
-- **Structured output** — `response_format: {type: "json_object"}`
-- **Lazy model loading** — models loaded on first request, no `--model-path` required
-- **Request cancellation** — disconnected clients immediately free KV cache slots
-- **Prometheus metrics** — request rates, latency histogram, KV usage, prefix hit ratio
-- **Config file** — `~/.config/ferrumox/config.toml`
-- **Aliases** — short names for long model filenames
-- **Docker** — multi-stage build + compose
-- **Systemd service** — `fox.service` included
+- Runs any GGUF model (Llama, Mistral, Gemma, Qwen, and more)
+- **OpenAI-compatible API** — works with any tool that supports OpenAI
+- **Ollama-compatible API** — works with any tool that supports Ollama
+- **Multi-model serving** — keep multiple models loaded, switch between them instantly
+- **Lazy loading** — no need to specify a model upfront; fox loads it on first request
+- **Function calling** and **structured JSON output** (OpenAI spec)
+- **Request cancellation** — closing the connection immediately frees GPU memory
+- **Prometheus metrics** — latency, throughput, memory usage out of the box
+- **Config file** at `~/.config/ferrumox/config.toml`
+- **Aliases** — use short names instead of full model filenames
+- **Docker** and **systemd** support included
 
 ---
 
 ## Project structure
 
 ```
-ferrumox/
+fox/
 ├── src/
 │   ├── main.rs              # Entry point, config, signal handling
 │   ├── metrics.rs           # Prometheus metrics registry
 │   ├── model_registry.rs    # Multi-model registry with LRU eviction
 │   ├── api/                 # REST API (OpenAI + Ollama compat)
-│   │   ├── routes.rs        # Axum router + AppState + all handlers
+│   │   ├── router.rs        # Axum router setup
+│   │   ├── routes.rs        # AppState + handler wiring
 │   │   ├── types.rs         # Request/response types
+│   │   ├── auth.rs          # API key middleware
+│   │   ├── error.rs         # Unified error types
+│   │   ├── pull_handler.rs  # POST /api/pull SSE streaming
 │   │   ├── mod.rs           # Re-exports
-│   │   └── pull_handler.rs  # POST /api/pull SSE streaming
+│   │   ├── v1/              # OpenAI-compat handlers
+│   │   │   ├── chat.rs
+│   │   │   ├── completions.rs
+│   │   │   ├── embeddings.rs
+│   │   │   └── models.rs
+│   │   ├── ollama/          # Ollama-compat handlers
+│   │   │   ├── chat.rs
+│   │   │   ├── generate.rs
+│   │   │   ├── embed.rs
+│   │   │   └── management.rs
+│   │   └── shared/          # Shared inference + streaming helpers
+│   │       ├── inference.rs
+│   │       ├── streaming.rs
+│   │       └── digest.rs
 │   ├── scheduler/           # Continuous batching + prefix cache
 │   ├── kv_cache/            # PageTable, ref-counted block manager
 │   ├── engine/              # Inference engine, sampling, output filtering
@@ -353,6 +377,18 @@ make docker          Build Docker image
 make docker-run      Start via docker compose
 make install-rust    Install Rust toolchain
 make download-model  Download default model (Llama-3.2-3B Q4_K_M)
+```
+
+---
+
+## Contributing
+
+Issues and PRs welcome at [github.com/ferrumox/fox](https://github.com/ferrumox/fox).
+
+To run tests:
+
+```bash
+FOX_SKIP_LLAMA=1 cargo test --all
 ```
 
 ---
