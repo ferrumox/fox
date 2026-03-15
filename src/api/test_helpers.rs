@@ -29,6 +29,7 @@ pub fn make_test_registry(
         gpu_memory_fraction: 0.9,
         metrics: None,
         keep_alive_secs: 0,
+        type_kv: 1,
     };
     let registry = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
     let entry = EngineEntry::for_test(name);

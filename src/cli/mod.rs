@@ -319,3 +319,126 @@ pub(crate) fn format_age(modified: SystemTime) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    // --- format_size ---
+
+    #[test]
+    fn test_format_size_bytes() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(999), "999 B");
+        assert_eq!(format_size(999_999), "999999 B");
+    }
+
+    #[test]
+    fn test_format_size_mb() {
+        assert_eq!(format_size(1_000_000), "1.0 MB");
+        assert_eq!(format_size(5_500_000), "5.5 MB");
+        assert_eq!(format_size(999_999_999), "1000.0 MB");
+    }
+
+    #[test]
+    fn test_format_size_gb() {
+        assert_eq!(format_size(1_000_000_000), "1.0 GB");
+        assert_eq!(format_size(7_300_000_000), "7.3 GB");
+    }
+
+    // --- format_age ---
+
+    #[test]
+    fn test_format_age_seconds() {
+        let t = SystemTime::now() - Duration::from_secs(30);
+        assert_eq!(format_age(t), "30 seconds ago");
+    }
+
+    #[test]
+    fn test_format_age_one_minute() {
+        let t = SystemTime::now() - Duration::from_secs(60);
+        assert_eq!(format_age(t), "1 minute ago");
+    }
+
+    #[test]
+    fn test_format_age_minutes() {
+        let t = SystemTime::now() - Duration::from_secs(5 * 60);
+        assert_eq!(format_age(t), "5 minutes ago");
+    }
+
+    #[test]
+    fn test_format_age_one_hour() {
+        let t = SystemTime::now() - Duration::from_secs(3600);
+        assert_eq!(format_age(t), "1 hour ago");
+    }
+
+    #[test]
+    fn test_format_age_hours() {
+        let t = SystemTime::now() - Duration::from_secs(3 * 3600);
+        assert_eq!(format_age(t), "3 hours ago");
+    }
+
+    #[test]
+    fn test_format_age_one_day() {
+        let t = SystemTime::now() - Duration::from_secs(86400);
+        assert_eq!(format_age(t), "1 day ago");
+    }
+
+    #[test]
+    fn test_format_age_days() {
+        let t = SystemTime::now() - Duration::from_secs(3 * 86400);
+        assert_eq!(format_age(t), "3 days ago");
+    }
+
+    // --- models_dir ---
+
+    #[test]
+    fn test_models_dir_ends_with_ferrumox_models() {
+        let dir = models_dir();
+        let s = dir.to_string_lossy();
+        assert!(
+            s.ends_with("ferrumox/models") || s.ends_with("ferrumox\\models"),
+            "models_dir should end with ferrumox/models, got: {s}"
+        );
+    }
+
+    // --- expand_tilde ---
+
+    #[test]
+    fn test_expand_tilde_absolute_path_unchanged() {
+        let path = PathBuf::from("/absolute/path");
+        assert_eq!(expand_tilde(&path), path);
+    }
+
+    #[test]
+    fn test_expand_tilde_relative_path_unchanged() {
+        let path = PathBuf::from("relative/path");
+        assert_eq!(expand_tilde(&path), path);
+    }
+
+    #[test]
+    fn test_expand_tilde_expands_home() {
+        if let Some(home) = dirs::home_dir() {
+            let path = PathBuf::from("~/mydir");
+            let expanded = expand_tilde(&path);
+            assert!(
+                expanded.starts_with(&home),
+                "expanded path should start with home dir"
+            );
+            assert!(
+                expanded.to_string_lossy().contains("mydir"),
+                "expanded path should contain the original subdirectory"
+            );
+        }
+    }
+
+    #[test]
+    fn test_expand_tilde_only_tilde() {
+        if let Some(home) = dirs::home_dir() {
+            let path = PathBuf::from("~");
+            let expanded = expand_tilde(&path);
+            assert_eq!(expanded, home);
+        }
+    }
+}

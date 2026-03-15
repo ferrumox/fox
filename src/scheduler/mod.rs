@@ -100,7 +100,7 @@ impl Scheduler {
 
     /// Submit a request to the waiting queue.
     pub fn submit(&self, req: InferenceRequest) {
-        let mut q = self.waiting_queue.lock().expect("scheduler queue lock");
+        let mut q = self.waiting_queue.lock().unwrap_or_else(|e| e.into_inner());
         info!(request_id = req.id, "request admitted to waiting queue");
         q.push_back(req);
         drop(q);
@@ -249,9 +249,15 @@ impl Scheduler {
                 if self.kv_cache.can_allocate(needed) {
                     match self.kv_cache.allocate(needed) {
                         Ok(ids) => {
+                            let Some(seq_id) = pool.pop() else {
+                                // Defensive: pool should be non-empty (checked at loop start).
+                                self.kv_cache.free_blocks(&ids);
+                                waiting.push_front(req);
+                                break 'admit;
+                            };
                             let id = req.id;
                             req.page_table = PageTable::new(ids);
-                            req.kv_seq_id = pool.pop().expect("pool non-empty checked above");
+                            req.kv_seq_id = seq_id;
                             req.stop_reason = None;
                             req.state = batch::RequestState::Prefilling;
                             info!(

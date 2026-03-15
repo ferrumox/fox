@@ -128,7 +128,7 @@ async fn do_pull(
         .find(|f| f.contains("Q4_K_M"))
         .or_else(|| gguf_files.first())
         .cloned()
-        .unwrap();
+        .ok_or_else(|| anyhow::anyhow!("no .gguf file found in repository"))?;
 
     std::fs::create_dir_all(&models_dir).context("creating models directory")?;
 
@@ -208,4 +208,84 @@ async fn do_pull(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pull_status_serializes_without_nulls() {
+        let s = PullStatus {
+            status: "downloading".to_string(),
+            digest: Some("sha256:abc".to_string()),
+            total: Some(1000),
+            completed: Some(500),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"status\":\"downloading\""));
+        assert!(json.contains("\"digest\":\"sha256:abc\""));
+        assert!(json.contains("\"total\":1000"));
+        assert!(json.contains("\"completed\":500"));
+    }
+
+    #[test]
+    fn test_pull_status_skips_none_fields() {
+        let s = PullStatus {
+            status: "pulling manifest".to_string(),
+            digest: None,
+            total: None,
+            completed: None,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"status\":\"pulling manifest\""));
+        assert!(!json.contains("\"digest\""));
+        assert!(!json.contains("\"total\""));
+        assert!(!json.contains("\"completed\""));
+    }
+
+    #[test]
+    fn test_gguf_selection_prefers_q4_k_m() {
+        let files = vec![
+            "model-Q5_K_M.gguf".to_string(),
+            "model-Q4_K_M.gguf".to_string(),
+            "model-Q8_0.gguf".to_string(),
+        ];
+        let selected = files
+            .iter()
+            .find(|f| f.contains("Q4_K_M"))
+            .or_else(|| files.first())
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no .gguf file found"))
+            .unwrap();
+        assert_eq!(selected, "model-Q4_K_M.gguf");
+    }
+
+    #[test]
+    fn test_gguf_selection_falls_back_to_first() {
+        let files = vec![
+            "model-Q5_K_M.gguf".to_string(),
+            "model-Q8_0.gguf".to_string(),
+        ];
+        let selected = files
+            .iter()
+            .find(|f| f.contains("Q4_K_M"))
+            .or_else(|| files.first())
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no .gguf file found"))
+            .unwrap();
+        assert_eq!(selected, "model-Q5_K_M.gguf");
+    }
+
+    #[test]
+    fn test_gguf_selection_empty_returns_error() {
+        let files: Vec<String> = vec![];
+        let result = files
+            .iter()
+            .find(|f| f.contains("Q4_K_M"))
+            .or_else(|| files.first())
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no .gguf file found"));
+        assert!(result.is_err());
+    }
 }

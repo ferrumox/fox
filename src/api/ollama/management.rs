@@ -203,6 +203,7 @@ mod tests {
     use std::sync::Arc;
     use crate::api::test_helpers::*;
     use crate::api::router::router;
+    use crate::cli::show::{parse_architecture, parse_quantization};
     use crate::model_registry::{ModelRegistry, RegistryConfig};
 
     fn empty_registry(dir: &std::path::Path) -> Arc<ModelRegistry> {
@@ -216,6 +217,7 @@ mod tests {
             gpu_memory_fraction: 0.9,
             metrics: None,
             keep_alive_secs: 0,
+            type_kv: 1,
         };
         Arc::new(ModelRegistry::new(cfg, HashMap::new()))
     }
@@ -258,5 +260,92 @@ mod tests {
         let models = v["models"].as_array().unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0]["name"].as_str().unwrap(), "my-model");
+    }
+
+    // --- parse_architecture ---
+
+    #[test]
+    fn test_parse_architecture_llama() {
+        assert_eq!(parse_architecture("Llama-3.2-3B-Instruct-Q4_K_M"), Some("llama"));
+    }
+
+    #[test]
+    fn test_parse_architecture_codellama_before_llama() {
+        // "codellama" must win over "llama" (longer match first)
+        assert_eq!(parse_architecture("codellama-7b-Q4_K_M"), Some("codellama"));
+    }
+
+    #[test]
+    fn test_parse_architecture_mistral() {
+        assert_eq!(parse_architecture("Mistral-7B-Instruct-v0.3-Q4_K_M"), Some("mistral"));
+    }
+
+    #[test]
+    fn test_parse_architecture_qwen() {
+        assert_eq!(parse_architecture("Qwen3.5-7B-Q4_K_M"), Some("qwen"));
+    }
+
+    #[test]
+    fn test_parse_architecture_unknown() {
+        assert_eq!(parse_architecture("completely-unknown-model"), None);
+    }
+
+    // --- parse_quantization ---
+
+    #[test]
+    fn test_parse_quantization_q4_k_m() {
+        assert_eq!(parse_quantization("Llama-3.2-3B-Q4_K_M"), Some("Q4_K_M"));
+    }
+
+    #[test]
+    fn test_parse_quantization_q5_k_m() {
+        assert_eq!(parse_quantization("Llama-3.2-3B-Q5_K_M"), Some("Q5_K_M"));
+    }
+
+    #[test]
+    fn test_parse_quantization_q8_0() {
+        assert_eq!(parse_quantization("Mistral-7B-Q8_0"), Some("Q8_0"));
+    }
+
+    #[test]
+    fn test_parse_quantization_q4_k_m_before_q4_k_s() {
+        // Q4_K_M should be detected (longer match takes priority)
+        let stem = "model-Q4_K_M";
+        let result = parse_quantization(stem);
+        assert_eq!(result, Some("Q4_K_M"));
+    }
+
+    #[test]
+    fn test_parse_quantization_f16() {
+        assert_eq!(parse_quantization("Llama-3B-F16"), Some("F16"));
+    }
+
+    #[test]
+    fn test_parse_quantization_unknown() {
+        assert_eq!(parse_quantization("Llama-3B-no-quant-info"), None);
+    }
+
+    // --- Ollama request deserialization ---
+
+    #[test]
+    fn test_ollama_generate_request_deserializes() {
+        use crate::api::types::OllamaGenerateRequest;
+        let json = r#"{"model":"llama3","prompt":"Hello!"}"#;
+        let req: OllamaGenerateRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.model, "llama3");
+        assert_eq!(req.prompt, "Hello!");
+        assert!(req.system.is_none());
+        assert!(req.stream.is_none());
+    }
+
+    #[test]
+    fn test_ollama_chat_request_deserializes() {
+        use crate::api::types::OllamaChatRequest;
+        let json = r#"{"model":"llama3","messages":[{"role":"user","content":"Hi"}]}"#;
+        let req: OllamaChatRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.model, "llama3");
+        assert_eq!(req.messages.len(), 1);
+        assert_eq!(req.messages[0].role, "user");
+        assert_eq!(req.messages[0].content, "Hi");
     }
 }

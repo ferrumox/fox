@@ -150,7 +150,7 @@ impl ModelRegistry {
     fn evict_lru_if_needed(&self) {
         while self.engines.len() >= self.config.max_models {
             let lru_key = {
-                let mut lru = self.lru.lock().unwrap();
+                let mut lru = self.lru.lock().unwrap_or_else(|e| e.into_inner());
                 lru.pop_lru().map(|(k, _)| k)
             };
             match lru_key {

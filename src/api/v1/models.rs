@@ -102,6 +102,7 @@ mod tests {
             gpu_memory_fraction: 0.9,
             metrics: None,
             keep_alive_secs: 0,
+            type_kv: 1,
         };
         let reg = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
         let app = router(reg, "alpha".to_string(), None, 0, dir.path().to_path_buf(), None);

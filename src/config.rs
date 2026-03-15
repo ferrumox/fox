@@ -177,4 +177,37 @@ max_context_len = 8192
         std::env::remove_var(port_key);
         drop(f);
     }
+
+    #[test]
+    fn test_config_invalid_toml_is_error() {
+        let result = toml::from_str::<ConfigFile>("port = [not valid toml");
+        assert!(result.is_err(), "invalid TOML should parse as error");
+    }
+
+    #[test]
+    fn test_config_wrong_type_is_error() {
+        // port expects u16, string is wrong type
+        let result = toml::from_str::<ConfigFile>("port = \"abc\"");
+        assert!(result.is_err(), "wrong type for port should fail");
+    }
+
+    #[test]
+    fn test_config_path_uses_fox_config_env() {
+        let key = "FOX_CONFIG";
+        let expected = "/tmp/custom_fox_config.toml";
+        std::env::set_var(key, expected);
+        let path = config_path();
+        std::env::remove_var(key);
+        assert_eq!(path, std::path::PathBuf::from(expected));
+    }
+
+    #[test]
+    fn test_config_partial_fields_use_defaults() {
+        let toml = "port = 8080\n";
+        let cfg: ConfigFile = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.port, Some(8080));
+        assert!(cfg.host.is_none());
+        assert!(cfg.max_models.is_none());
+        assert!(cfg.system_prompt.is_none());
+    }
 }
