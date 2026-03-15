@@ -162,6 +162,141 @@ pub struct ModelInfo {
     pub object: String,
 }
 
+// --- Ollama Compatibility ---
+
+#[derive(Debug, Serialize)]
+pub struct OllamaDetails {
+    pub format: String,
+    pub family: String,
+    pub parameter_size: String,
+    pub quantization_level: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OllamaModel {
+    pub name: String,
+    pub size: u64,
+    pub digest: String,
+    pub details: OllamaDetails,
+    pub modified_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TagsResponse {
+    pub models: Vec<OllamaModel>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PsEntry {
+    pub name: String,
+    pub size: u64,
+    pub digest: String,
+    pub details: OllamaDetails,
+    pub expires_at: String,
+    pub size_vram: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PsResponse {
+    pub models: Vec<PsEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ShowRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ShowResponse {
+    pub modelfile: String,
+    pub parameters: String,
+    pub template: String,
+    pub details: OllamaDetails,
+    pub model_info: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteRequest {
+    pub name: String,
+}
+
+// --- Embeddings (OpenAI-compatible) ---
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum EmbeddingInput {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl EmbeddingInput {
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            EmbeddingInput::Single(s) => vec![s],
+            EmbeddingInput::Multiple(v) => v,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EmbeddingRequest {
+    pub model: String,
+    pub input: EmbeddingInput,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbeddingObject {
+    pub object: String,
+    pub embedding: Vec<f32>,
+    pub index: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbeddingUsage {
+    pub prompt_tokens: u32,
+    pub total_tokens: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbeddingResponse {
+    pub object: String,
+    pub data: Vec<EmbeddingObject>,
+    pub model: String,
+    pub usage: EmbeddingUsage,
+}
+
+// --- Embeddings (Ollama-compatible) ---
+
+#[derive(Debug, Deserialize)]
+pub struct OllamaEmbedRequest {
+    pub model: String,
+    pub input: EmbeddingInput,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OllamaEmbedResponse {
+    pub model: String,
+    pub embeddings: Vec<Vec<f32>>,
+}
+
+// --- Pull (Ollama-compatible) ---
+
+#[derive(Debug, Deserialize)]
+pub struct PullRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PullStatus {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed: Option<u64>,
+}
+
 // --- Health ---
 
 #[derive(Debug, Serialize)]

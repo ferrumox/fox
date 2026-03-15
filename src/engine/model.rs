@@ -135,6 +135,13 @@ pub trait Model: Send + Sync {
     /// recurrent / hybrid models (Mamba, Qwen3.5, etc.) return false.
     /// Prefix caching must be disabled when this returns false.
     fn supports_seq_copy(&self) -> bool;
+
+    /// Return the embedding dimension (n_embd) for the model.
+    fn embedding_dim(&self) -> usize;
+
+    /// Run a forward pass in embedding mode and return the sequence embedding vector.
+    /// Uses sequence slot 0; caller must not have an active inference request on slot 0.
+    fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>>;
 }
 
 /// Sample the highest-probability token (deterministic).
@@ -784,6 +791,62 @@ impl LlamaCppModel {
         unsafe { ffi::llama_batch_free(batch) };
         Ok(results)
     }
+
+    fn do_get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>> {
+        if tokens.is_empty() {
+            return Ok(vec![]);
+        }
+        let n_embd = self.config.num_heads * self.config.head_dim;
+        let n_tokens = tokens.len() as i32;
+
+        let mut batch = unsafe { ffi::llama_batch_init(n_tokens, 0, 1) };
+        for (i, &token) in tokens.iter().enumerate() {
+            unsafe {
+                *batch.token.add(i) = token;
+                *batch.pos.add(i) = i as i32;
+                *batch.n_seq_id.add(i) = 1;
+                let arr = *batch.seq_id.add(i);
+                *arr.add(0) = 0; // dedicated seq slot for embeddings
+                *batch.logits.add(i) = 0i8; // no logits needed for embeddings
+            }
+            batch.n_tokens += 1;
+        }
+
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+        let ctx = ctx_guard.as_ptr();
+
+        unsafe { ffi::llama_set_embeddings(ctx, true) };
+
+        let ret = unsafe { ffi::llama_decode(ctx, batch) };
+        if ret != 0 {
+            unsafe {
+                ffi::llama_set_embeddings(ctx, false);
+                ffi::llama_batch_free(batch);
+            }
+            return Err(anyhow!("llama_decode (embeddings) failed: {}", ret));
+        }
+
+        let emb_ptr = unsafe { ffi::llama_get_embeddings_seq(ctx, 0) };
+        let embeddings = if emb_ptr.is_null() {
+            vec![0.0f32; n_embd]
+        } else {
+            unsafe { std::slice::from_raw_parts(emb_ptr, n_embd) }.to_vec()
+        };
+
+        unsafe {
+            let mem = ffi::llama_get_memory(ctx as *const _);
+            if !mem.is_null() {
+                ffi::llama_memory_seq_rm(mem, 0, 0, -1);
+            }
+            ffi::llama_set_embeddings(ctx, false);
+            ffi::llama_batch_free(batch);
+        }
+
+        Ok(embeddings)
+    }
 }
 
 #[cfg(not(fox_stub))]
@@ -877,6 +940,14 @@ impl Model for LlamaCppModel {
             // (which also support seq_cp).  Recurrent/hybrid models return false.
             ffi::llama_memory_can_shift(mem)
         }
+    }
+
+    fn embedding_dim(&self) -> usize {
+        self.config.num_heads * self.config.head_dim
+    }
+
+    fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>> {
+        self.do_get_embeddings(tokens)
     }
 }
 
@@ -979,6 +1050,15 @@ impl Model for LlamaCppModel {
 
     fn supports_seq_copy(&self) -> bool {
         false
+    }
+
+    fn embedding_dim(&self) -> usize {
+        self.config.num_heads * self.config.head_dim
+    }
+
+    fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>> {
+        let _ = tokens;
+        Ok(vec![0.0f32; self.embedding_dim()])
     }
 }
 
