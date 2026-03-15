@@ -84,6 +84,11 @@ pub struct ServeArgs {
     /// KV cache quantization: f16 (default), q8_0, q4_0
     #[arg(long, default_value = "f16", env = "FOX_TYPE_KV")]
     pub type_kv: String,
+
+    /// Require `Authorization: Bearer <key>` on every API request.
+    /// Omit to run without authentication.
+    #[arg(long, env = "FOX_API_KEY")]
+    pub api_key: Option<String>,
 }
 
 fn parse_type_kv(s: &str) -> u32 {
@@ -202,6 +207,10 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         .unwrap_or_default()
         .as_secs();
 
+    if args.api_key.is_some() {
+        tracing::info!("API key authentication enabled");
+    }
+
     let app = router(
         registry,
         primary_model.clone(),
@@ -209,6 +218,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         started_at,
         models_dir,
         args.hf_token,
+        args.api_key,
     )
     .layer(tower_http::cors::CorsLayer::permissive());
 

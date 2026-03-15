@@ -1,0 +1,73 @@
+site_name: fox
+site_description: Fast local LLM inference server — OpenAI & Ollama compatible
+site_url: https://ferrumox.github.io/fox
+repo_url: https://github.com/ferrumox/rabbit-engine
+repo_name: ferrumox/rabbit-engine
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: deep orange
+      accent: orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep orange
+      accent: orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Introduction: introduction.md
+    - Installation: installation.md
+    - Quickstart: quickstart.md
+  - Guides:
+    - Configuration: configuration.md
+    - Features: features.md
+    - Deployment: deployment.md
+    - Benchmarks: benchmarks.md
+    - Integrations: integrations.md
+  - API Reference:
+    - OpenAI-compatible: api/openai.md
+    - Ollama-compatible: api/ollama.md
+  - CLI Reference:
+    - fox serve: cli/serve.md
+    - fox run: cli/run.md
+    - fox pull: cli/pull.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ferrumox/rabbit-engine

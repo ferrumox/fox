@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.0.0] - 2026-03-10
+## [1.0.0] - 2026-03-15
 
 ### Added
 
@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - When a quant prefix matches multiple files (e.g. `q4` → `Q4_K_M`, `Q4_K_S`, `Q4_0`),
     the most balanced variant is selected automatically (`Q4_K_M` > `Q4_K_S` > `Q4_0`).
 
+- **`fox bench <model>`** — local single-model benchmark subcommand. Measures cold load
+  time, TTFT, and generation throughput (tok/s). Supports `--runs N` to average across
+  multiple runs and `--compare-model <name>` to run a back-to-back comparison between
+  two local models.
+
+- **`fox alias set/list/rm`** — manage model name aliases directly from the CLI without
+  editing the TOML file. Changes are persisted to `~/.config/ferrumox/aliases.toml`.
+
+- **`fox run <model>`** — model name resolution for the CLI. `fox run` now accepts a
+  model name (alias, stem, or substring) in addition to a full file path. Resolution
+  follows the same alias → exact stem → starts-with → contains order used by the server.
+
 - **`fox-bench --compare-url <URL>`** — run the same workload against two servers in
   parallel and display a side-by-side comparison table with improvement percentages for
   TTFT P50/P95, latency P50/P95/P99, and throughput. Designed for benchmarking
@@ -40,6 +52,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`fox-bench --label` / `--compare-label`** — custom labels for the two servers in
   the comparison table (defaults: `ferrumox` / `ollama`).
+
+- **System resource metrics in `fox-bench`** — the benchmark tool now samples and
+  reports CPU usage, RAM consumption, and GPU utilisation (via `nvidia-smi`) alongside
+  inference metrics. Actual token counts are taken from the `usage` field of each
+  response rather than estimated.
+
+- **REPL multiline input** — typing `"""` in the REPL enters multiline mode; a second
+  `"""` on its own line submits the full block. Useful for pasting code or long prompts.
+
+- **REPL `/think` toggle** — `/think` in the REPL toggles display of the model's
+  `<think>…</think>` reasoning block on/off without restarting the session.
+
+- **REPL tok/s display** — the per-turn status line now shows tokens/s alongside token
+  count and elapsed time.
+
+- **`--type-kv` flag** (`FOX_TYPE_KV`, values: `f16` / `q8_0` / `q4_0`, default `f16`)
+  — sets the KV cache element type. `q8_0` and `q4_0` reduce VRAM usage at the cost of
+  a small quality difference. Wired through `RegistryConfig` and into `LlamaCppModel`.
+
+- **Dynamic GPU backend loading** — `build.rs` no longer requires CUDA or Metal at
+  compile time. The CUDA (`.so`) and Metal (`.metallib`) backends are detected and
+  loaded at runtime via `llama_backend_load`, enabling a single binary to run on CPU,
+  CUDA, or Metal hardware without recompilation.
+
+- **Model-native stop token handling** — `Model::stop_tokens()` enumerates all
+  EOG/role-separator control tokens from the vocabulary at load time and registers them
+  as `model_control_patterns` in `PerRequestState`. Output filtering now uses these
+  patterns instead of a hard-coded list, ensuring correct generation termination for
+  any model family.
 
 - **`scripts/benchmark.sh`** — reproducible benchmark script. Starts ferrumox if not
   already running, detects Ollama, runs fox-bench, and appends results to
@@ -59,10 +100,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quick start, client compatibility table, explanation of prefix caching and continuous
   batching, full API reference, and project structure.
 
+- **Test suite for config and pull handler** — unit tests covering: TOML config file
+  parsing, error handling for invalid/missing keys, env-var path resolution, pull status
+  JSON serialisation, GGUF file selection logic, and model spec matching.
+
 ### Changed
 
 - `Cargo.toml`: version bumped to `1.0.0`.
 - `src/api/routes.rs`: `GET /api/version` now returns `{"version":"1.0.0"}`.
+- GPU build no longer requires compile-time CUDA/Metal feature flags; backends are
+  loaded dynamically at runtime.
+- Prefix cache now skips insertion when the seq_id pool is exhausted, preventing
+  silent request mishandling under high concurrency.
+
+### Fixed
+
+- `fox search` result ordering and query handling bugs.
+- `fox pull` error feedback when a requested model or quant variant is not found.
 
 ---
 

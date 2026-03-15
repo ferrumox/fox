@@ -51,6 +51,7 @@ pub fn make_test_state(
         models_dir: dir.to_path_buf(),
         digest_cache: Arc::new(Mutex::new(HashMap::new())),
         hf_token: None,
+        api_key: None,
     };
     (state, entry)
 }
@@ -64,6 +65,7 @@ pub fn make_router(state: &AppState) -> Router {
         state.started_at,
         state.models_dir.clone(),
         state.hf_token.clone(),
+        state.api_key.clone(),
     )
 }
 

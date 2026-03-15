@@ -105,7 +105,7 @@ mod tests {
             type_kv: 1,
         };
         let reg = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
-        let app = router(reg, "alpha".to_string(), None, 0, dir.path().to_path_buf(), None);
+        let app = router(reg, "alpha".to_string(), None, 0, dir.path().to_path_buf(), None, None);
         let resp = get_req(app, "/v1/models").await;
         assert_eq!(resp.status(), 200);
         let bytes = body_bytes(resp).await;

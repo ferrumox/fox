@@ -1,6 +1,6 @@
 // Router assembly and AppState definition.
 
-use axum::{routing::{delete, get, post}, Router};
+use axum::{middleware, routing::{delete, get, post}, Router};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -23,6 +23,8 @@ pub struct AppState {
     pub digest_cache: Arc<Mutex<HashMap<PathBuf, String>>>,
     /// HuggingFace API token for authenticated model pulls.
     pub hf_token: Option<String>,
+    /// Optional Bearer token required on every request (`--api-key` / `FOX_API_KEY`).
+    pub api_key: Option<String>,
 }
 
 pub fn router(
@@ -32,6 +34,7 @@ pub fn router(
     started_at: u64,
     models_dir: PathBuf,
     hf_token: Option<String>,
+    api_key: Option<String>,
 ) -> Router {
     let state = AppState {
         registry,
@@ -41,6 +44,7 @@ pub fn router(
         models_dir,
         digest_cache: Arc::new(Mutex::new(HashMap::new())),
         hf_token,
+        api_key,
     };
 
     Router::new()
@@ -61,5 +65,9 @@ pub fn router(
         .route("/api/generate", post(crate::api::ollama::generate::ollama_generate))
         .route("/api/chat", post(crate::api::ollama::chat::ollama_chat))
         .route("/api/pull", post(crate::api::pull_handler::ollama_pull))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::api::auth::auth_middleware,
+        ))
         .with_state(state)
 }

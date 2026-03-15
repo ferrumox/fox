@@ -240,7 +240,7 @@ mod tests {
     async fn test_api_ps_empty_registry() {
         let dir = tempfile::tempdir().unwrap();
         let reg = empty_registry(dir.path());
-        let app = router(reg, "none".to_string(), None, 0, dir.path().to_path_buf(), None);
+        let app = router(reg, "none".to_string(), None, 0, dir.path().to_path_buf(), None, None);
         let resp = get_req(app, "/api/ps").await;
         assert_eq!(resp.status(), 200);
         let bytes = body_bytes(resp).await;
