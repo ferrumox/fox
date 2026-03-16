@@ -494,8 +494,8 @@ impl LlamaCppModel {
         ctx_params.n_seq_max = n_seq;
         ctx_params.flash_attn_type = 1; // LLAMA_FLASH_ATTN_TYPE_ENABLED
         ctx_params.offload_kqv = true;
-        ctx_params.type_k = type_kv;
-        ctx_params.type_v = type_kv;
+        ctx_params.type_k = type_kv as _;
+        ctx_params.type_v = type_kv as _;
 
         let ctx = unsafe { ffi::llama_init_from_model(model.as_ptr(), ctx_params) };
         let ctx = NonNull::new(ctx).ok_or_else(|| {
