@@ -104,7 +104,13 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", ggml_src.display());
     println!("cargo:rustc-link-search=native={}", bin_out.display());
 
-    println!("cargo:rustc-link-lib=static=llama");
+    // With BUILD_SHARED_LIBS=ON, cmake produces libllama.dylib on macOS
+    // but libllama.a on Linux (llama.cpp CMakeLists forces STATIC on non-Apple).
+    if target_os == "macos" {
+        println!("cargo:rustc-link-lib=dylib=llama");
+    } else {
+        println!("cargo:rustc-link-lib=static=llama");
+    }
     println!("cargo:rustc-link-lib=dylib=ggml-base"); // shared: backend registry
     println!("cargo:rustc-link-lib=dylib=ggml"); // shared: ggml core
     println!("cargo:rustc-link-lib=dylib=ggml-cpu"); // shared: CPU backend (always needed)
