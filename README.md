@@ -100,10 +100,11 @@ RTX 4060 · Llama-3.2-3B-Instruct-Q4_K_M · 4 concurrent clients · 50 requests:
 | Backend | Requirement |
 |---------|-------------|
 | CPU | x86_64 or arm64, AVX2 |
-| CUDA | CUDA 12.x + cuDNN |
-| Metal | macOS 13+, Apple Silicon |
+| CUDA | CUDA 12.x (detected at runtime — no recompilation needed) |
+| Metal | macOS 13+, Apple Silicon (detected at runtime) |
+| Vulkan | Windows x86_64, Vulkan SDK 1.3+ |
 
-No runtime dependencies — single static binary.
+No runtime dependencies beyond GPU drivers — single static binary.
 
 ---
 
@@ -131,15 +132,11 @@ Installs `fox.exe` to `%LOCALAPPDATA%\ferrumox\bin` and offers to add it to your
 git clone --recurse-submodules https://github.com/ferrumox/fox
 cd fox
 
-# CPU backend
+# Works on any platform — GPU backend is detected at runtime
 cargo build --release
-
-# CUDA (requires CUDA toolkit)
-cargo build --release --features cuda
-
-# Apple Silicon (Metal)
-cargo build --release --features metal
 ```
+
+fox detects CUDA, Metal, and Vulkan at runtime, so a single binary runs on CPU, NVIDIA, or Apple Silicon hardware without recompilation.
 
 Binaries: `target/release/fox` and `target/release/fox-bench`.
 
@@ -191,12 +188,26 @@ fox serve --model-path ~/.cache/ferrumox/models/Llama-3.2-3B-Instruct-Q4_K_M.ggu
 # Serve multiple models simultaneously (LRU eviction)
 fox serve --max-models 3
 
+# Enable API key authentication
+fox serve --api-key "$FOX_API_KEY"
+
+# Reduce KV cache VRAM with quantized cache
+fox serve --type-kv q8_0
+
 # Interactive REPL (lazy loading — no model-path needed)
 fox run
 fox run "Explain ownership in Rust"   # single-shot
 
 # With a specific model
 fox run --model-path ~/.cache/ferrumox/models/model.gguf
+
+# Benchmark a model locally
+fox bench llama3.2
+fox bench llama3.2 --runs 5
+
+# Manage aliases
+fox alias set llama3 Llama-3.2-3B-Instruct-Q4_K_M
+fox alias list
 
 # List downloaded models
 fox list
@@ -220,8 +231,10 @@ All flags can also be set via environment variable or `~/.config/ferrumox/config
 | `--keep-alive-secs` | `FOX_KEEP_ALIVE_SECS` | 300 | Evict idle models after N seconds |
 | `--max-context-len` | `FOX_MAX_CONTEXT_LEN` | 4096 | Context window size |
 | `--gpu-memory-fraction` | `FOX_GPU_MEMORY_FRACTION` | 0.85 | Fraction of GPU RAM for KV cache |
+| `--type-kv` | `FOX_TYPE_KV` | `f16` | KV cache precision: `f16`, `q8_0`, or `q4_0` |
 | `--max-batch-size` | `FOX_MAX_BATCH_SIZE` | 32 | Continuous batch size |
 | `--system-prompt` | `FOX_SYSTEM_PROMPT` | — | System prompt injected in every request |
+| `--api-key` | `FOX_API_KEY` | — | Require `Authorization: Bearer <key>` on all requests |
 | `--hf-token` | `HF_TOKEN` | — | HuggingFace token for private repos |
 | `--alias-file` | `FOX_ALIAS_FILE` | `~/.config/ferrumox/aliases.toml` | Short name → model stem mapping |
 | `--json-logs` | `FOX_JSON_LOGS` | false | Structured JSON logs |
@@ -301,6 +314,9 @@ Sample comparison output:
 - **Lazy loading** — no need to specify a model upfront; fox loads it on first request
 - **Function calling** and **structured JSON output** (OpenAI spec)
 - **Request cancellation** — closing the connection immediately frees GPU memory
+- **API key authentication** — optional `FOX_API_KEY` for access control
+- **KV cache quantization** — `--type-kv q8_0` or `q4_0` cuts VRAM usage with minimal quality loss
+- **Dynamic GPU backends** — CUDA, Metal, and Vulkan detected at runtime; one binary, any hardware
 - **Prometheus metrics** — latency, throughput, memory usage out of the box
 - **Config file** at `~/.config/ferrumox/config.toml`
 - **Aliases** — use short names instead of full model filenames

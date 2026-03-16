@@ -4,7 +4,7 @@ fox implements the OpenAI REST API. Any application built with the OpenAI Python
 
 **Base URL:** `http://localhost:8080/v1`
 
-No API key is required, but if your client requires a non-empty key, pass any non-empty string (e.g., `"none"` or `"fox"`).
+**Authentication:** By default, fox requires no API key. If `FOX_API_KEY` is set when the server starts, every request must include `Authorization: Bearer <key>`. When using an OpenAI SDK, pass the key as `api_key`; when authentication is disabled, any non-empty string (e.g., `"none"`) satisfies SDK validation.
 
 ---
 
@@ -553,6 +553,7 @@ for await (const chunk of stream) {
 |-------------|---------|
 | `200 OK` | Success. |
 | `400 Bad Request` | Malformed JSON or invalid field values. |
+| `401 Unauthorized` | Missing or invalid `Authorization: Bearer` header (only when `FOX_API_KEY` is set). |
 | `404 Not Found` | Model not found. Check `fox list` and your model name. |
 | `500 Internal Server Error` | Engine error. Check server logs for details. |
 | `503 Service Unavailable` | KV cache exhausted (all blocks occupied). Retry after in-flight requests complete. |

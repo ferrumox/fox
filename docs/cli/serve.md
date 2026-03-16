@@ -54,6 +54,7 @@ fox serve --json-logs --port 8080 --max-models 2 --keep-alive-secs 600
 | `--max-context-len <N>` | `FOX_MAX_CONTEXT_LEN` | `4096` | Maximum context length in tokens. Larger values require more KV cache memory. |
 | `--max-batch-size <N>` | `FOX_MAX_BATCH_SIZE` | `32` | Maximum number of sequences processed in a single forward pass. |
 | `--gpu-memory-fraction <F>` | `FOX_GPU_MEMORY_FRACTION` | `0.85` | Fraction of GPU VRAM reserved for the KV cache. Must be between 0.0 and 1.0. The remaining memory is left for model weights and other allocations. |
+| `--type-kv <TYPE>` | `FOX_TYPE_KV` | `f16` | KV cache element type. `f16` (default), `q8_0` (saves ~50% VRAM), or `q4_0` (saves ~75% VRAM with a small quality trade-off). |
 | `--block-size <N>` | `FOX_BLOCK_SIZE` | `16` | Number of tokens per KV cache block. Smaller blocks improve prefix cache granularity but add overhead. |
 | `--swap-fraction <F>` | `FOX_SWAP_FRACTION` | `0.0` | Fraction of GPU memory reserved for CPU↔GPU KV swap. Currently a placeholder for an upcoming feature. |
 
@@ -67,6 +68,7 @@ fox serve --json-logs --port 8080 --max-models 2 --keep-alive-secs 600
 
 | Flag | Env variable | Default | Description |
 |------|---|---|---|
+| `--api-key <KEY>` | `FOX_API_KEY` | — | When set, every API request must include an `Authorization: Bearer <KEY>` header. Requests without a valid key receive HTTP 401. Omit to leave the server open (default). |
 | `--hf-token <TOKEN>` | `HF_TOKEN` | — | HuggingFace API token. Required for downloading private or gated models via `POST /api/pull`. |
 
 ### Observability
@@ -200,9 +202,11 @@ fox serve \
   --json-logs \
   --host 0.0.0.0 \
   --port 8080 \
+  --api-key "$FOX_API_KEY" \
   --max-models 2 \
   --keep-alive-secs 600 \
   --gpu-memory-fraction 0.85 \
+  --type-kv q8_0 \
   --max-context-len 4096 \
   --hf-token "$HF_TOKEN"
 ```

@@ -137,6 +137,37 @@ This approach works with any GGUF model that has been instruction-tuned to produ
 
 ---
 
+## API key authentication
+
+By default, fox accepts requests from any client without authentication. To restrict access, set `FOX_API_KEY` (or `--api-key` on `fox serve`). When set, every incoming request must include:
+
+```
+Authorization: Bearer <your-key>
+```
+
+Requests with a missing or incorrect key receive `HTTP 401 Unauthorized`. The health endpoint (`GET /health`) is exempt and always reachable without authentication.
+
+```bash
+# Start with authentication enabled
+FOX_API_KEY=my-secret fox serve
+
+# Query with the key
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer my-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"llama3.2","messages":[{"role":"user","content":"Hi"}]}'
+```
+
+OpenAI SDK clients pass the key via `api_key`:
+
+```python
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="my-secret")
+```
+
+Authentication is implemented as an Axum middleware layer — it runs before any route handler, so all endpoints are protected uniformly.
+
+---
+
 ## Structured output (JSON mode)
 
 When `response_format: {"type": "json_object"}` is set, fox injects a system instruction telling the model to respond exclusively with a valid JSON object. This increases the probability that the output is parseable JSON but does not guarantee it for all models — instruction-tuned models produce better results than base models.

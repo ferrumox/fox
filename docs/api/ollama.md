@@ -4,6 +4,8 @@ fox implements the Ollama REST API, allowing any tool built for Ollama to work w
 
 **Base URL:** `http://localhost:8080`
 
+**Authentication:** If `FOX_API_KEY` is configured, include `Authorization: Bearer <key>` in every request. Ollama-based tools that support custom headers (e.g., Open WebUI) can be configured to send this header. Tools that do not support auth headers should connect to a fox instance without `FOX_API_KEY`, or use a reverse proxy to inject the header.
+
 ---
 
 ## Switching from Ollama to fox

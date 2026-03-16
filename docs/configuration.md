@@ -27,6 +27,9 @@ FOX_CONFIG=/etc/ferrumox/config.toml fox serve
 host = "0.0.0.0"
 port = 8080
 
+# Authentication (optional — omit to leave the server open)
+# api_key = "your-secret-key"
+
 # Model loading
 max_models = 1
 keep_alive_secs = 300
@@ -37,6 +40,7 @@ max_batch_size = 32
 gpu_memory_fraction = 0.85
 block_size = 16
 swap_fraction = 0.0
+type_kv = "f16"   # f16 | q8_0 | q4_0
 
 # System prompt
 system_prompt = "You are a helpful assistant."
@@ -64,9 +68,11 @@ json_logs = false
 ```toml
 host = "0.0.0.0"
 port = 8080
+api_key = "your-secret-key"
 max_models = 2
 keep_alive_secs = 600
 gpu_memory_fraction = 0.85
+type_kv = "q8_0"
 max_context_len = 4096
 json_logs = true
 system_prompt = ""
@@ -93,12 +99,14 @@ Every `fox serve` option can be set via an environment variable. Environment var
 | `FOX_CONFIG` | — | `~/.config/ferrumox/config.toml` |
 | `FOX_HOST` | `--host` | `0.0.0.0` |
 | `FOX_PORT` | `--port` | `8080` |
+| `FOX_API_KEY` | `--api-key` | — |
 | `FOX_MODEL_PATH` | `--model-path` | — |
 | `FOX_MAX_MODELS` | `--max-models` | `1` |
 | `FOX_KEEP_ALIVE_SECS` | `--keep-alive-secs` | `300` |
 | `FOX_MAX_CONTEXT_LEN` | `--max-context-len` | `4096` |
 | `FOX_MAX_BATCH_SIZE` | `--max-batch-size` | `32` |
 | `FOX_GPU_MEMORY_FRACTION` | `--gpu-memory-fraction` | `0.85` |
+| `FOX_TYPE_KV` | `--type-kv` | `f16` |
 | `FOX_BLOCK_SIZE` | `--block-size` | `16` |
 | `FOX_SWAP_FRACTION` | `--swap-fraction` | `0.0` |
 | `FOX_SYSTEM_PROMPT` | `--system-prompt` | `"You are a helpful assistant."` |

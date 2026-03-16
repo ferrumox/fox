@@ -1,11 +1,11 @@
-# Connecting Open WebUI to ferrumox
+# Connecting Open WebUI to fox
 
-ferrumox is fully compatible with Open WebUI's Ollama backend. No plugins or
-extensions needed — just point Open WebUI at your ferrumox server.
+fox is fully compatible with Open WebUI's Ollama backend. No plugins or
+extensions needed — just point Open WebUI at your fox server.
 
 ## Quick start
 
-### 1. Start ferrumox
+### 1. Start fox
 
 ```bash
 # Pull a model (if you don't have one)
@@ -32,7 +32,7 @@ discover models via `GET /api/tags`.
 
 ### 3. (Optional) systemd service
 
-To keep ferrumox running in the background:
+To keep fox running in the background:
 
 ```bash
 sudo cp fox.service /etc/systemd/system/
@@ -41,7 +41,7 @@ sudo systemctl enable --now fox
 
 ## Multiple models
 
-ferrumox supports serving multiple models simultaneously:
+fox supports serving multiple models simultaneously:
 
 ```bash
 fox serve --max-models 3

@@ -170,4 +170,4 @@ Change the port: `fox serve --port 9090`
 
 **CUDA not detected**
 
-Make sure you built with `--features cuda` and that `nvidia-smi` works in your terminal. The GPU memory fraction defaults to 0.85 — if your VRAM is tight, try `--gpu-memory-fraction 0.7`.
+Make sure `nvidia-smi` works in your terminal — no special build flags are required since fox detects the GPU at runtime. If your VRAM is tight, try `--gpu-memory-fraction 0.7` or reduce the KV cache size with `--type-kv q8_0`.

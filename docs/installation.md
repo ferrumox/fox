@@ -39,6 +39,8 @@ fox --version
 
 Download `fox-windows-x86_64.zip` from the [releases page](https://github.com/ferrumox/fox/releases/latest), extract it, and place `fox.exe` somewhere on your `PATH`.
 
+The Windows release includes Vulkan backend support (`ggml-vulkan.dll`). If you have a Vulkan-capable GPU (NVIDIA, AMD, Intel), fox will use it automatically — no CUDA installation required. For NVIDIA GPU with CUDA, `ggml-cuda.dll` is also included.
+
 ---
 
 ## Docker
@@ -101,24 +103,28 @@ target/release/fox          # main server binary
 target/release/fox-bench    # standalone benchmark tool
 ```
 
-### Build with CUDA support (NVIDIA GPU)
+### GPU backend detection
+
+fox detects GPU backends **at runtime** — no compile-time feature flags are required. A single `cargo build --release` produces a binary that automatically uses CUDA on Linux/Windows, Metal on macOS, or Vulkan on Windows if the respective SDK is installed:
 
 ```bash
-cargo build --release --features cuda
+cargo build --release   # runs on CPU, CUDA, Metal, or Vulkan — same binary
 ```
 
-CMake will detect your CUDA installation and compile llama.cpp with CUDA acceleration. Make sure `nvcc` is on your `PATH` before building.
+The backend is loaded via `llama_backend_load` when the first model is initialised. fox prints the detected backend at startup:
 
-### Build with Metal support (Apple Silicon)
-
-```bash
-cargo build --release --features metal
+```
+INFO fox::engine: GPU backend: CUDA 12.5 (device 0: RTX 4060, 8192 MB)
 ```
 
-### Build for CPU only (no GPU)
+If no GPU is found, fox falls back to CPU automatically.
+
+### Build for CPU only (skip GPU detection)
+
+If you are building in a CI environment without GPU drivers and want to skip GPU detection:
 
 ```bash
-cargo build --release --features cpu-only
+FOX_SKIP_LLAMA=1 cargo build --release   # stub build, CPU only
 ```
 
 ### Install to PATH
@@ -131,7 +137,7 @@ sudo cp target/release/fox-bench /usr/local/bin/
 Or use `cargo install` to install directly into `~/.cargo/bin`:
 
 ```bash
-cargo install --path . --features cuda
+cargo install --path .
 ```
 
 ---

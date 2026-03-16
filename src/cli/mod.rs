@@ -210,6 +210,7 @@ pub(crate) fn get_ram_info() -> RamInfo {
             };
         }
     }
+    #[cfg(not(target_os = "linux"))]
     RamInfo { used_bytes: 0, total_bytes: 0 }
 }
 

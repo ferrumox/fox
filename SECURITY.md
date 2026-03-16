@@ -16,7 +16,7 @@ Only the latest release receives security fixes. We do not backport patches to o
 Report security issues through one of the following channels:
 
 1. **GitHub private security advisory** (preferred) — go to
-   [Security → Advisories → New draft advisory](https://github.com/ManuelSLemos/ferrum-engine/security/advisories/new)
+   [Security → Advisories → New draft advisory](https://github.com/ferrumox/fox/security/advisories/new)
    in the repository and submit a draft advisory. Only you and maintainers can see it.
 
 2. **Email** — send details to the maintainer. Check the repository's GitHub profile for

@@ -70,7 +70,7 @@ The current stable release is **v1.0.0**.
 | v0.8.0 | Embeddings API, `POST /api/pull`, release binaries |
 | v0.9.0 | Multi-model registry, LRU eviction, `GET /api/ps` |
 | v0.10.0 | Tool use, structured output, config file, request cancellation |
-| **v1.0.0** | HuggingFace search, benchmark comparison mode, full docs |
+| **v1.0.0** | HuggingFace search, benchmark comparison, API key auth, Vulkan, dynamic GPU backends |
 
 ---
 

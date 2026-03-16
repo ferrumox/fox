@@ -39,6 +39,7 @@ docker run -d \
   --gpus all \
   -p 8080:8080 \
   -v ~/.cache/ferrumox:/root/.cache/ferrumox \
+  -e FOX_API_KEY=your-secret-key \
   -e FOX_MAX_MODELS=2 \
   -e FOX_KEEP_ALIVE_SECS=600 \
   -e FOX_MAX_CONTEXT_LEN=8192 \
@@ -259,11 +260,12 @@ PrivateTmp=true
 WantedBy=multi-user.target
 ```
 
-Put sensitive values (like `HF_TOKEN`) in `/etc/ferrumox/env`:
+Put sensitive values in `/etc/ferrumox/env`:
 
 ```bash
 # /etc/ferrumox/env
 HF_TOKEN=hf_xxxxxxxxxxxx
+FOX_API_KEY=your-secret-key
 ```
 
 ### Managing the service

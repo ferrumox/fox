@@ -53,19 +53,24 @@ nav:
     - Introduction: introduction.md
     - Installation: installation.md
     - Quickstart: quickstart.md
+    - Migrate from Ollama: migration-from-ollama.md
   - Guides:
     - Configuration: configuration.md
     - Features: features.md
     - Deployment: deployment.md
     - Benchmarks: benchmarks.md
     - Integrations: integrations.md
+    - Troubleshooting: troubleshooting.md
+    - FAQ: faq.md
   - API Reference:
     - OpenAI-compatible: api/openai.md
     - Ollama-compatible: api/ollama.md
   - CLI Reference:
     - fox serve: cli/serve.md
     - fox run: cli/run.md
-    - fox pull: cli/pull.md
+    - fox pull / list / show / rm: cli/pull.md
+    - fox alias: cli/alias.md
+    - fox bench: cli/bench.md
 
 extra:
   social:

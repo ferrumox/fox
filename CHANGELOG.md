@@ -100,9 +100,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quick start, client compatibility table, explanation of prefix caching and continuous
   batching, full API reference, and project structure.
 
+- **API key authentication** — optional Bearer token auth for all API endpoints.
+  Set `FOX_API_KEY` (or `--api-key` on `fox serve`) to require an `Authorization: Bearer <key>`
+  header on every request. Requests without a valid key receive HTTP 401. When the flag is
+  unset the server remains open (previous behaviour). New file `src/api/auth.rs`; implemented
+  as an Axum middleware layer so it covers all routes uniformly.
+
+- **Vulkan backend on Windows** — `build.rs` now detects the Vulkan SDK on Windows and
+  compiles `libggml-vulkan`. The release workflow installs the Vulkan SDK in CI and packages
+  the resulting DLL in the Windows tarball, producing a self-contained GPU-accelerated binary
+  with no extra runtime dependencies.
+
+- **`scripts/build-release-local.sh`** — script to build and package release tarballs locally,
+  mirroring the CI release process for testing before tagging.
+
 - **Test suite for config and pull handler** — unit tests covering: TOML config file
   parsing, error handling for invalid/missing keys, env-var path resolution, pull status
   JSON serialisation, GGUF file selection logic, and model spec matching.
+
+- **GPU/RAM display in `fox run` REPL** — on startup and in the per-turn status line the
+  REPL now shows live GPU memory usage and process RSS alongside token count and speed.
+  Uses the same `get_gpu_info` / `get_ram_info` helpers exposed in `src/cli/mod.rs`.
+
+- **`initial_in_thinking` sampling parameter** — allows starting generation already inside a
+  `<think>` block (needed for reasoning models that open the tag before the first token).
 
 ### Changed
 
@@ -117,6 +138,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `fox search` result ordering and query handling bugs.
 - `fox pull` error feedback when a requested model or quant variant is not found.
+- Incomplete UTF-8 sequences no longer produce artifacts in streamed output; the output
+  filter now buffers partial multi-byte sequences and flushes them once complete.
+- Raw byte accumulation in the model layer ensures multi-token byte-level sequences
+  (e.g. non-ASCII characters split across BPE tokens) are decoded correctly.
 
 ---
 

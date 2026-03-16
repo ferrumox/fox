@@ -38,6 +38,8 @@ curl http://localhost:8080/v1/chat/completions \
 - [fox serve](./cli/serve.md) — start the inference server
 - [fox run](./cli/run.md) — one-shot inference and interactive REPL
 - [fox pull / list / show / rm / search / models](./cli/pull.md) — model management
+- [fox alias](./cli/alias.md) — manage model name aliases
+- [fox bench](./cli/bench.md) — measure load time and throughput
 
 ### Configuration
 - [Configuration](./configuration.md) — config file, environment variables, model aliases
@@ -51,6 +53,9 @@ curl http://localhost:8080/v1/chat/completions \
 - [Integrations](./integrations.md) — OpenAI SDK, LangChain, Open WebUI, Continue.dev, curl
 - [Benchmarks](./benchmarks.md) — performance results, fox-bench, tuning guide
 - [Deployment](./deployment.md) — Docker, Docker Compose, systemd, nginx, Kubernetes
+- [Migrate from Ollama](./migration-from-ollama.md) — switching from Ollama to fox
+- [Troubleshooting](./troubleshooting.md) — common problems and solutions
+- [FAQ](./faq.md) — frequently asked questions
 
 ---
 

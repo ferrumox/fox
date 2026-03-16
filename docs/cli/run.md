@@ -5,7 +5,7 @@ Run inference directly from the command line. No HTTP server is started — the 
 This command is useful for scripting, one-off queries, and exploring a model before serving it.
 
 ```
-fox run --model-path <PATH> [OPTIONS] [PROMPT]
+fox run [--model-path <PATH>] [OPTIONS] [PROMPT]
 ```
 
 ---
@@ -28,33 +28,56 @@ Output is streamed token by token to stdout.
 Omit the prompt to start a multi-turn conversation in your terminal. Type a message, press Enter, and read the response. Your conversation history is maintained across turns.
 
 ```bash
+# With a model already downloaded — lazy loading, no --model-path needed
+fox run
+
+# Or specify a model explicitly
 fox run --model-path ~/.cache/ferrumox/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 ```
 
 ```
-Fox 1.0.0  •  Llama-3.2-3B-Instruct-Q4_K_M
-Type /bye or Ctrl+D to exit.
+Fox 1.0.0  •  Llama-3.2-3B-Instruct-Q4_K_M  •  GPU 1.4 GB / 8.0 GB  •  RAM 512 MB
+Type /bye or Ctrl+D to exit · /think to toggle reasoning display
 
 ▸ Tell me about prefix caching
 Fox: Prefix caching is a technique used in transformer inference to avoid
 recomputing attention keys and values for repeated prompt prefixes...
+  87 tokens · 1.2s · 72 tok/s
 
 ▸ How does it work with multiple users?
 Fox: When multiple users share the same system prompt or context, prefix
 caching allows the KV cache blocks for that shared prefix to be reused...
+  134 tokens · 1.8s · 74 tok/s
 ```
 
-To exit the REPL, type `/bye`, `/exit`, `exit`, `quit`, or press `Ctrl+D`.
+**REPL commands:**
+
+| Command | Description |
+|---------|-------------|
+| `/think` | Toggle display of `<think>…</think>` reasoning blocks (reasoning models only) |
+| `/bye`, `/exit`, `exit`, `quit`, `Ctrl+D` | Exit the session |
+
+**Multiline input:** type `"""` to enter multiline mode. A second `"""` on its own line submits the block. Useful for pasting code or long prompts.
+
+```
+▸ """
+def fibonacci(n):
+    if n <= 1:
+        return n
+    return fibonacci(n-1) + fibonacci(n-2)
+"""
+Fox: This is a recursive implementation of Fibonacci...
+```
 
 ---
 
 ## Options
 
-### Required
+### Model
 
 | Flag | Env variable | Description |
 |------|---|---|
-| `--model-path <PATH>` | `FOX_MODEL_PATH` | Path to the GGUF model file to load. This is the only required argument. |
+| `--model-path <PATH>` | `FOX_MODEL_PATH` | Path to the GGUF model file to load. Optional — if omitted, fox picks the first `.gguf` in the models directory (same lazy resolution as `fox serve`). |
 
 ### Prompt and output
 
