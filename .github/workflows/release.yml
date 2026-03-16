@@ -127,7 +127,7 @@ jobs:
           # Include binaries + all backend shared libraries so the tarball is self-contained.
           # The fox binary has RPATH=$ORIGIN, so it finds .so files in the same directory.
           FILES=(fox fox-bench)
-          for so in "$RELEASE_DIR"/libggml*.so; do
+          for so in "$RELEASE_DIR"/libggml*.so "$RELEASE_DIR"/libllama*.so "$RELEASE_DIR"/libggml*.dylib "$RELEASE_DIR"/libllama*.dylib; do
             [[ -f "$so" ]] && FILES+=("$so")
           done
           tar czf "$TARBALL" -C "$RELEASE_DIR" "${FILES[@]##*/}"
@@ -147,7 +147,7 @@ jobs:
           $files = @(
             "$releaseDir\fox.exe",
             "$releaseDir\fox-bench.exe"
-          ) + (Get-ChildItem "$releaseDir\ggml-*.dll" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+          ) + (Get-ChildItem "$releaseDir\ggml-*.dll","$releaseDir\llama.dll" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
           Compress-Archive -Path $files -DestinationPath $zip
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
           "$hash  $zip" | Out-File -FilePath "${zip}.sha256" -Encoding utf8

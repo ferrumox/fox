@@ -104,13 +104,9 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", ggml_src.display());
     println!("cargo:rustc-link-search=native={}", bin_out.display());
 
-    // With BUILD_SHARED_LIBS=ON, cmake produces libllama.dylib on macOS
-    // but libllama.a on Linux (llama.cpp CMakeLists forces STATIC on non-Apple).
-    if target_os == "macos" {
-        println!("cargo:rustc-link-lib=dylib=llama");
-    } else {
-        println!("cargo:rustc-link-lib=static=llama");
-    }
+    // llama.cpp's add_library(llama) has no explicit STATIC/SHARED, so with
+    // BUILD_SHARED_LIBS=ON it becomes a shared library on all platforms.
+    println!("cargo:rustc-link-lib=dylib=llama");
     println!("cargo:rustc-link-lib=dylib=ggml-base"); // shared: backend registry
     println!("cargo:rustc-link-lib=dylib=ggml"); // shared: ggml core
     println!("cargo:rustc-link-lib=dylib=ggml-cpu"); // shared: CPU backend (always needed)
@@ -133,11 +129,14 @@ fn main() {
             if let Ok(entries) = std::fs::read_dir(search_dir) {
                 for entry in entries.filter_map(|e| e.ok()) {
                     let p = entry.path();
+                    let fname = p
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
                     let is_backend = p.extension().and_then(|e| e.to_str()) == Some(so_ext)
-                        && p.file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|n| n.starts_with("libggml-"))
-                            .unwrap_or(false);
+                        && (fname.starts_with("libggml-")
+                            || fname.starts_with("libllama.")
+                            || fname == format!("llama.{so_ext}"));
                     if is_backend {
                         let dst = dest.join(p.file_name().unwrap());
                         let _ = std::fs::copy(&p, &dst);
