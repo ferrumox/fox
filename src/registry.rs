@@ -32,7 +32,9 @@ impl Registry {
     pub fn load() -> Self {
         let file: RegistryFile =
             serde_json::from_str(REGISTRY_JSON).expect("embedded registry.json is invalid JSON");
-        Self { models: file.models }
+        Self {
+            models: file.models,
+        }
     }
 
     /// All models sorted by name.

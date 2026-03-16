@@ -151,7 +151,7 @@ Or, if fox is in a Docker container visible to Open WebUI:
 http://fox:8080
 ```
 
-See [Connecting Open WebUI to fox](../examples/openwebui.md) for a complete setup guide.
+See the [Open WebUI integration guide](./integrations.md) for a complete setup guide.
 
 ---
 

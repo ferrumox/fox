@@ -227,9 +227,17 @@ fn read_mem_mb() -> f64 {
     let mut available_kb = 0u64;
     for line in content.lines() {
         if line.starts_with("MemTotal:") {
-            total_kb = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+            total_kb = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
         } else if line.starts_with("MemAvailable:") {
-            available_kb = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+            available_kb = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
         }
     }
     (total_kb.saturating_sub(available_kb)) as f64 / 1024.0
@@ -238,7 +246,10 @@ fn read_mem_mb() -> f64 {
 /// Query nvidia-smi for GPU utilization and memory used.
 async fn query_nvidia_smi() -> Option<(f64, f64)> {
     let output = tokio::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=utilization.gpu,memory.used",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
         .await
         .ok()?;
@@ -288,7 +299,12 @@ async fn sample_system() -> SystemSample {
         None => (None, None),
     };
 
-    SystemSample { cpu_pct, mem_mb, gpu_util_pct, gpu_mem_mb }
+    SystemSample {
+        cpu_pct,
+        mem_mb,
+        gpu_util_pct,
+        gpu_mem_mb,
+    }
 }
 
 fn aggregate_samples(samples: Vec<SystemSample>) -> Option<SysStats> {
@@ -314,7 +330,13 @@ fn aggregate_samples(samples: Vec<SystemSample>) -> Option<SysStats> {
         Some(gpu_mem_peak.iter().cloned().fold(0.0_f64, f64::max))
     };
 
-    Some(SysStats { cpu_avg, cpu_peak, mem_mb_peak, gpu_util_avg, gpu_mem_mb_peak })
+    Some(SysStats {
+        cpu_avg,
+        cpu_peak,
+        mem_mb_peak,
+        gpu_util_avg,
+        gpu_mem_mb_peak,
+    })
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -425,6 +447,7 @@ fn percentile(sorted: &[Duration], pct: f64) -> Duration {
 // Run a full workload against one server URL
 // ──────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn run_workload(
     label: &str,
     url: &str,
@@ -552,16 +575,8 @@ fn improvement_pct(primary: f64, compare: f64, lower_is_better: bool) -> f64 {
 
 fn compute_improvement(primary: &RunStats, compare: &RunStats) -> ImprovementStats {
     ImprovementStats {
-        ttft_p50_pct: improvement_pct(
-            primary.ttft_p50_ms as f64,
-            compare.ttft_p50_ms as f64,
-            true,
-        ),
-        ttft_p95_pct: improvement_pct(
-            primary.ttft_p95_ms as f64,
-            compare.ttft_p95_ms as f64,
-            true,
-        ),
+        ttft_p50_pct: improvement_pct(primary.ttft_p50_ms as f64, compare.ttft_p50_ms as f64, true),
+        ttft_p95_pct: improvement_pct(primary.ttft_p95_ms as f64, compare.ttft_p95_ms as f64, true),
         latency_p50_pct: improvement_pct(
             primary.latency_p50_ms as f64,
             compare.latency_p50_ms as f64,

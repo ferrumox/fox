@@ -70,9 +70,7 @@ pub async fn run() -> anyhow::Result<()> {
     // so that `fox llama "Hello"` works as `fox run llama "Hello"`.
     let raw: Vec<String> = std::env::args().collect();
     let effective: Vec<String> = match raw.get(1).map(String::as_str) {
-        Some(first)
-            if !first.starts_with('-') && !SUBCOMMANDS.contains(&first) =>
-        {
+        Some(first) if !first.starts_with('-') && !SUBCOMMANDS.contains(&first) => {
             let mut v = vec![raw[0].clone(), "run".to_string()];
             v.extend(raw[1..].iter().cloned());
             v
@@ -118,9 +116,16 @@ const GPU_ACTIVE_THRESHOLD_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
 /// Returns `None` if no NVIDIA GPU is found, nvidia-smi is not available,
 /// or used VRAM is below the active threshold (model is on CPU/Vulkan).
 pub(crate) fn get_gpu_info() -> Option<GpuInfo> {
-    let nvidia_smi = if cfg!(target_os = "windows") { "nvidia-smi.exe" } else { "nvidia-smi" };
+    let nvidia_smi = if cfg!(target_os = "windows") {
+        "nvidia-smi.exe"
+    } else {
+        "nvidia-smi"
+    };
     let out = std::process::Command::new(nvidia_smi)
-        .args(["--query-gpu=name,memory.used,memory.total", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=name,memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -181,7 +186,10 @@ pub(crate) fn get_ram_info() -> RamInfo {
             })
             .unwrap_or(0);
 
-        return RamInfo { used_bytes: rss_bytes, total_bytes };
+        RamInfo {
+            used_bytes: rss_bytes,
+            total_bytes,
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -211,12 +219,19 @@ pub(crate) fn get_ram_info() -> RamInfo {
         }
     }
     #[cfg(not(target_os = "linux"))]
-    RamInfo { used_bytes: 0, total_bytes: 0 }
+    RamInfo {
+        used_bytes: 0,
+        total_bytes: 0,
+    }
 }
 
 /// Query total GPU memory via nvidia-smi. Falls back to 8 GiB if no GPU is found.
 pub(crate) fn get_gpu_memory_bytes() -> usize {
-    let nvidia_smi = if cfg!(target_os = "windows") { "nvidia-smi.exe" } else { "nvidia-smi" };
+    let nvidia_smi = if cfg!(target_os = "windows") {
+        "nvidia-smi.exe"
+    } else {
+        "nvidia-smi"
+    };
     if let Ok(out) = std::process::Command::new(nvidia_smi)
         .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
         .output()
@@ -347,10 +362,7 @@ pub(crate) fn resolve_model_path(
 
     // 2. Alias lookup
     let aliases = load_aliases(alias_file.map(|p| p.to_path_buf()));
-    let resolved = aliases
-        .get(name)
-        .map(String::as_str)
-        .unwrap_or(name);
+    let resolved = aliases.get(name).map(String::as_str).unwrap_or(name);
 
     let dir = models_dir();
     let entries = list_models(&dir).unwrap_or_default();

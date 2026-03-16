@@ -71,7 +71,11 @@ fn parse_model_spec(input: &str) -> ModelSpec {
             Some((r, q)) => (r.to_string(), Some(q.to_uppercase())),
             None => (input.to_string(), None),
         };
-        return ModelSpec { raw_repo: Some(repo.clone()), search_query: repo, quant };
+        return ModelSpec {
+            raw_repo: Some(repo.clone()),
+            search_query: repo,
+            quant,
+        };
     }
 
     // Friendly name: split on ':' to get name and optional size-quant tag
@@ -133,9 +137,8 @@ struct HfSearchResult {
 /// Search HF for the most downloaded GGUF repo matching `query`.
 async fn search_top_repo(query: &str, client: &reqwest::Client) -> Result<String> {
     let encoded = query.replace(' ', "+");
-    let url = format!(
-        "{HF_API_BASE}?search={encoded}&filter=gguf&sort=downloads&direction=-1&limit=1"
-    );
+    let url =
+        format!("{HF_API_BASE}?search={encoded}&filter=gguf&sort=downloads&direction=-1&limit=1");
     let results: Vec<HfSearchResult> = client
         .get(&url)
         .send()
@@ -218,7 +221,11 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
                 "File `{}` not found in `{}`.\nAvailable files:\n{}",
                 f,
                 hf_repo,
-                gguf_files.iter().map(|s| format!("  - {}", s)).collect::<Vec<_>>().join("\n")
+                gguf_files
+                    .iter()
+                    .map(|s| format!("  - {}", s))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
         }
         f
@@ -232,7 +239,11 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
                 "No GGUF file with quantization `{}` found in `{}`.\nAvailable files:\n{}",
                 q,
                 hf_repo,
-                gguf_files.iter().map(|s| format!("  - {}", s)).collect::<Vec<_>>().join("\n")
+                gguf_files
+                    .iter()
+                    .map(|s| format!("  - {}", s))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
         }
         pick_balanced(&matches).to_string()
@@ -260,7 +271,11 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         .with_context(|| format!("downloading {}", download_url))?;
 
     if !resp.status().is_success() {
-        anyhow::bail!("download failed with status {} for {}", resp.status(), download_url);
+        anyhow::bail!(
+            "download failed with status {} for {}",
+            resp.status(),
+            download_url
+        );
     }
 
     let total_bytes = resp.content_length();
@@ -292,7 +307,11 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         std::fs::File::create(&tmp_dest).with_context(|| format!("creating {:?}", tmp_dest))?;
 
     let mut stream = resp;
-    while let Some(chunk) = stream.chunk().await.context("error reading download stream")? {
+    while let Some(chunk) = stream
+        .chunk()
+        .await
+        .context("error reading download stream")?
+    {
         file.write_all(&chunk).context("error writing to file")?;
         pb.inc(chunk.len() as u64);
     }
@@ -314,12 +333,7 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         true,
         &format!("     Run:   fox run {}\n", stem),
     );
-    theme::eprint_styled(
-        None,
-        false,
-        true,
-        &format!("     Serve: fox serve\n"),
-    );
+    theme::eprint_styled(None, false, true, "     Serve: fox serve\n");
 
     Ok(())
 }

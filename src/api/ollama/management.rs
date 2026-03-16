@@ -1,11 +1,6 @@
 // GET /api/version, /api/tags, /api/ps, POST /api/show, DELETE /api/delete handlers.
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
 use crate::api::router::AppState;
 use crate::api::shared::digest::{get_digest, modified_at_rfc3339};
@@ -13,8 +8,8 @@ use crate::api::types::{
     DeleteRequest, OllamaDetails, OllamaModel, PsEntry, PsResponse, ShowRequest, ShowResponse,
     TagsResponse, VersionResponse,
 };
-use crate::cli::{format_size, list_models};
 use crate::cli::show::{parse_architecture, parse_quantization};
+use crate::cli::{format_size, list_models};
 
 pub async fn ollama_version() -> Json<VersionResponse> {
     Json(VersionResponse {
@@ -36,7 +31,10 @@ pub async fn ollama_tags(State(state): State<AppState>) -> impl IntoResponse {
 
     let mut models = Vec::with_capacity(entries.len());
     for (path, meta) in &entries {
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
         let digest = get_digest(path, &state.digest_cache).await;
         models.push(OllamaModel {
             name: stem.to_string(),
@@ -60,16 +58,14 @@ pub async fn ollama_ps(State(state): State<AppState>) -> Json<PsResponse> {
     let mut ps_entries = Vec::with_capacity(loaded.len());
 
     for (name, entry) in &loaded {
-        let file_info = list_models(&state.models_dir)
-            .ok()
-            .and_then(|entries| {
-                entries.into_iter().find(|(path, _)| {
-                    path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(|stem| stem == name.as_str())
-                        .unwrap_or(false)
-                })
-            });
+        let file_info = list_models(&state.models_dir).ok().and_then(|entries| {
+            entries.into_iter().find(|(path, _)| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|stem| stem == name.as_str())
+                    .unwrap_or(false)
+            })
+        });
 
         let (size, digest) = if let Some((path, meta)) = file_info {
             let d = get_digest(&path, &state.digest_cache).await;
@@ -85,7 +81,9 @@ pub async fn ollama_ps(State(state): State<AppState>) -> Json<PsResponse> {
             digest,
             details: OllamaDetails {
                 format: "gguf".to_string(),
-                family: parse_architecture(&model_name).unwrap_or("unknown").to_string(),
+                family: parse_architecture(&model_name)
+                    .unwrap_or("unknown")
+                    .to_string(),
                 parameter_size: "unknown".to_string(),
                 quantization_level: parse_quantization(&model_name)
                     .unwrap_or("unknown")
@@ -127,7 +125,10 @@ pub async fn ollama_show(
         )
             .into_response(),
         Some((path, meta)) => {
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown");
             let arch = parse_architecture(stem).unwrap_or("unknown");
             let quant = parse_quantization(stem).unwrap_or("unknown");
             let size_str = format_size(meta.len());
@@ -199,12 +200,12 @@ pub async fn ollama_delete(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use crate::api::test_helpers::*;
     use crate::api::router::router;
+    use crate::api::test_helpers::*;
     use crate::cli::show::{parse_architecture, parse_quantization};
     use crate::model_registry::{ModelRegistry, RegistryConfig};
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     fn empty_registry(dir: &std::path::Path) -> Arc<ModelRegistry> {
         let cfg = RegistryConfig {
@@ -240,7 +241,15 @@ mod tests {
     async fn test_api_ps_empty_registry() {
         let dir = tempfile::tempdir().unwrap();
         let reg = empty_registry(dir.path());
-        let app = router(reg, "none".to_string(), None, 0, dir.path().to_path_buf(), None, None);
+        let app = router(
+            reg,
+            "none".to_string(),
+            None,
+            0,
+            dir.path().to_path_buf(),
+            None,
+            None,
+        );
         let resp = get_req(app, "/api/ps").await;
         assert_eq!(resp.status(), 200);
         let bytes = body_bytes(resp).await;
@@ -266,7 +275,10 @@ mod tests {
 
     #[test]
     fn test_parse_architecture_llama() {
-        assert_eq!(parse_architecture("Llama-3.2-3B-Instruct-Q4_K_M"), Some("llama"));
+        assert_eq!(
+            parse_architecture("Llama-3.2-3B-Instruct-Q4_K_M"),
+            Some("llama")
+        );
     }
 
     #[test]
@@ -277,7 +289,10 @@ mod tests {
 
     #[test]
     fn test_parse_architecture_mistral() {
-        assert_eq!(parse_architecture("Mistral-7B-Instruct-v0.3-Q4_K_M"), Some("mistral"));
+        assert_eq!(
+            parse_architecture("Mistral-7B-Instruct-v0.3-Q4_K_M"),
+            Some("mistral")
+        );
     }
 
     #[test]

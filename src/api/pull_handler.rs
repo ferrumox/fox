@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_gguf_selection_prefers_q4_k_m() {
-        let files = vec![
+        let files = [
             "model-Q5_K_M.gguf".to_string(),
             "model-Q4_K_M.gguf".to_string(),
             "model-Q8_0.gguf".to_string(),
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn test_gguf_selection_falls_back_to_first() {
-        let files = vec![
+        let files = [
             "model-Q5_K_M.gguf".to_string(),
             "model-Q8_0.gguf".to_string(),
         ];

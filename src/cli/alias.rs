@@ -57,7 +57,9 @@ fn write_aliases(path: &PathBuf, aliases: &HashMap<String, String>) -> Result<()
     let mut sorted: Vec<(&String, &String)> = aliases.iter().collect();
     sorted.sort_by_key(|(k, _)| k.as_str());
     for (k, v) in sorted {
-        let needs_quotes = !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        let needs_quotes = !k
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
         if needs_quotes {
             content.push_str(&format!("{:?} = {:?}\n", k, v));
         } else {
@@ -83,9 +85,7 @@ pub async fn run_alias(args: AliasArgs) -> Result<()> {
 
         AliasCommand::List => {
             if aliases.is_empty() {
-                eprintln!(
-                    "No aliases defined. Use `fox alias set <name> <model>` to add one."
-                );
+                eprintln!("No aliases defined. Use `fox alias set <name> <model>` to add one.");
                 return Ok(());
             }
             let max_name = aliases.keys().map(|k| k.len()).max().unwrap_or(4).max(4);

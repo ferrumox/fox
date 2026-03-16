@@ -34,7 +34,7 @@ pub fn sampling_from_ollama(opts: Option<&OllamaOptions>) -> (SamplingParams, us
             seed,
             stop,
             show_thinking: false,
-        initial_in_thinking: false,
+            initial_in_thinking: false,
         },
         max_tokens,
     )
@@ -90,7 +90,10 @@ pub fn try_parse_tool_call(response: &str) -> (String, Option<Vec<ToolCall>>) {
                 Some(ToolCall {
                     id: format!("call_{}", &Uuid::new_v4().to_string()[..8]),
                     call_type: "function".to_string(),
-                    function: ToolCallFunction { name, arguments: args },
+                    function: ToolCallFunction {
+                        name,
+                        arguments: args,
+                    },
                 })
             })
             .collect();
@@ -145,13 +148,16 @@ pub fn prepare_prompt(
         }
     }
 
-    let prompt = entry.engine.apply_chat_template(&messages).unwrap_or_else(|_| {
-        messages
-            .iter()
-            .map(|(r, c)| format!("{r}: {c}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    });
+    let prompt = entry
+        .engine
+        .apply_chat_template(&messages)
+        .unwrap_or_else(|_| {
+            messages
+                .iter()
+                .map(|(r, c)| format!("{r}: {c}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
 
     let tokens: Vec<i32> = entry.engine.tokenize(&prompt).unwrap_or_else(|_| {
         if prompt.is_empty() {

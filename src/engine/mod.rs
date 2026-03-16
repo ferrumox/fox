@@ -344,13 +344,17 @@ impl InferenceEngine {
                     Err(_) => {
                         // Lock poisoned — skip processing, emit lossy text with no stop check.
                         let raw_text = String::from_utf8_lossy(&token_bytes).into_owned();
-                        if req.response_tx.send(Token {
-                            id: *req_id,
-                            token_id,
-                            text: raw_text,
-                            is_eos,
-                            stop_reason: None,
-                        }).is_err() {
+                        if req
+                            .response_tx
+                            .send(Token {
+                                id: *req_id,
+                                token_id,
+                                text: raw_text,
+                                is_eos,
+                                stop_reason: None,
+                            })
+                            .is_err()
+                        {
                             // Client disconnected while lock was poisoned — cancel.
                             if req.kv_seq_id >= 0 {
                                 self.model.clear_sequence(req.kv_seq_id);
@@ -372,8 +376,7 @@ impl InferenceEngine {
                 // This prevents "??" artifacts when multi-byte characters (e.g. emoji)
                 // are split across BPE tokens and passed through from_utf8_lossy.
                 state.utf8_buf.extend_from_slice(&token_bytes);
-                let raw_text = drain_valid_utf8(&mut state.utf8_buf)
-                    .replace(SPM_SPACE, " ");
+                let raw_text = drain_valid_utf8(&mut state.utf8_buf).replace(SPM_SPACE, " ");
 
                 // Stage 1: thinking-block suppression + control-token holdback.
                 // Returns (filtered_text, control_stop) where control_stop is true when a
@@ -399,13 +402,16 @@ impl InferenceEngine {
                 None
             };
 
-            let send_ok = req.response_tx.send(Token {
-                id: *req_id,
-                token_id,
-                text,
-                is_eos,
-                stop_reason: stop_reason.clone(),
-            }).is_ok();
+            let send_ok = req
+                .response_tx
+                .send(Token {
+                    id: *req_id,
+                    token_id,
+                    text,
+                    is_eos,
+                    stop_reason: stop_reason.clone(),
+                })
+                .is_ok();
 
             debug!(
                 request_id = req_id,
@@ -497,4 +503,3 @@ impl InferenceEngine {
         self.scheduler.prefix_misses.load(Ordering::Relaxed)
     }
 }
-

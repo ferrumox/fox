@@ -16,8 +16,8 @@ pub async fn run_models(_args: ModelsArgs) -> anyhow::Result<()> {
     let tags_w = 26usize;
 
     println!(
-        "{:<name_w$}  {:>size_w$}  {:<tags_w$}  {}",
-        "NAME", "SIZE", "TAGS", "DESCRIPTION"
+        "{:<name_w$}  {:>size_w$}  {:<tags_w$}  DESCRIPTION",
+        "NAME", "SIZE", "TAGS"
     );
     println!("{}", "-".repeat(name_w + size_w + tags_w + 4 + 40));
 

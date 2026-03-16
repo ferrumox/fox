@@ -78,6 +78,6 @@ curl http://localhost:8080/v1/chat/completions \
 
 ## Changelog
 
-See [CHANGELOG.md](../CHANGELOG.md) for the full release history.
+See [CHANGELOG.md](https://github.com/ferrumox/fox/blob/main/CHANGELOG.md) for the full release history.
 
 Current version: **v1.0.0**

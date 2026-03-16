@@ -27,25 +27,33 @@ pub async fn ollama_chat(
         .map(|m| (m.role.clone(), m.content.clone()))
         .collect();
 
-    let prompt = entry.engine.apply_chat_template(&messages).unwrap_or_else(|_| {
-        messages
-            .iter()
-            .map(|(r, c)| format!("{r}: {c}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    });
+    let prompt = entry
+        .engine
+        .apply_chat_template(&messages)
+        .unwrap_or_else(|_| {
+            messages
+                .iter()
+                .map(|(r, c)| format!("{r}: {c}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
 
-    let prompt_tokens: Vec<i32> = entry.engine.tokenize(&prompt).unwrap_or_else(|_| {
-        prompt.bytes().map(|b| b as i32).take(4096).collect()
-    });
+    let prompt_tokens: Vec<i32> = entry
+        .engine
+        .tokenize(&prompt)
+        .unwrap_or_else(|_| prompt.bytes().map(|b| b as i32).take(4096).collect());
     let prompt_tokens_len = prompt_tokens.len();
 
     let (sampling, max_tokens) = sampling_from_ollama(req.options.as_ref());
     let req_id = entry.engine.next_request_id();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
-    entry
-        .engine
-        .submit_request(InferenceRequest::new(req_id, prompt_tokens, max_tokens, sampling, tx));
+    entry.engine.submit_request(InferenceRequest::new(
+        req_id,
+        prompt_tokens,
+        max_tokens,
+        sampling,
+        tx,
+    ));
 
     let model_name = req.model.clone();
     let stream_mode = req.stream.unwrap_or(true);
@@ -68,7 +76,11 @@ pub async fn ollama_chat(
                 },
                 total_duration: if is_done { Some(elapsed_ns) } else { None },
                 load_duration: if is_done { Some(0) } else { None },
-                prompt_eval_count: if is_done { Some(prompt_tokens_len as u32) } else { None },
+                prompt_eval_count: if is_done {
+                    Some(prompt_tokens_len as u32)
+                } else {
+                    None
+                },
                 eval_count: if is_done { Some(eval_count) } else { None },
             }
         });

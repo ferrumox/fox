@@ -5,7 +5,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use axum::{body::Body, http::{Method, Request}, Router};
+use axum::{
+    body::Body,
+    http::{Method, Request},
+    Router,
+};
 use tower::ServiceExt;
 
 use crate::api::router::{router, AppState};
@@ -38,10 +42,7 @@ pub fn make_test_registry(
 }
 
 /// Build a test `AppState` with one preloaded stub model.
-pub fn make_test_state(
-    name: &str,
-    dir: &std::path::Path,
-) -> (AppState, Arc<EngineEntry>) {
+pub fn make_test_state(name: &str, dir: &std::path::Path) -> (AppState, Arc<EngineEntry>) {
     let (registry, entry) = make_test_registry(name, dir);
     let state = AppState {
         registry,
@@ -70,7 +71,11 @@ pub fn make_router(state: &AppState) -> Router {
 }
 
 /// POST a JSON body and return the full response.
-pub async fn post_json(app: Router, path: &str, body: serde_json::Value) -> axum::response::Response {
+pub async fn post_json(
+    app: Router,
+    path: &str,
+    body: serde_json::Value,
+) -> axum::response::Response {
     let req = Request::builder()
         .method(Method::POST)
         .uri(path)

@@ -19,9 +19,9 @@ use crate::engine::InferenceEngine;
 use crate::kv_cache::KVCacheManager;
 use crate::scheduler::{InferenceRequest, SamplingParams};
 
-use super::{get_gpu_info, get_gpu_memory_bytes, get_ram_info};
 use super::resolve_model_path;
 use super::theme;
+use super::{get_gpu_info, get_gpu_memory_bytes, get_ram_info};
 
 #[derive(Parser, Debug)]
 pub struct RunArgs {
@@ -109,24 +109,24 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
     }
 
     // Resolve model — auto-pull from HuggingFace if not found locally.
-    let (model_name, model_path) =
-        match resolve_model_path(&args.model, args.alias_file.as_deref()) {
-            Ok(r) => r,
-            Err(_) => {
-                eprintln!(
-                    "Model '{}' not found locally. Pulling from HuggingFace…",
-                    args.model
-                );
-                super::pull::run_pull(super::pull::PullArgs {
-                    model_id: args.model.clone(),
-                    filename: None,
-                    output_dir: None,
-                    hf_token: std::env::var("HF_TOKEN").ok(),
-                })
-                .await?;
-                resolve_model_path(&args.model, args.alias_file.as_deref())?
-            }
-        };
+    let (model_name, model_path) = match resolve_model_path(&args.model, args.alias_file.as_deref())
+    {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!(
+                "Model '{}' not found locally. Pulling from HuggingFace…",
+                args.model
+            );
+            super::pull::run_pull(super::pull::PullArgs {
+                model_id: args.model.clone(),
+                filename: None,
+                output_dir: None,
+                hf_token: std::env::var("HF_TOKEN").ok(),
+            })
+            .await?;
+            resolve_model_path(&args.model, args.alias_file.as_deref())?
+        }
+    };
 
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
@@ -138,7 +138,14 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
     spinner.enable_steady_tick(Duration::from_millis(80));
 
     let gpu_memory_bytes_load = get_gpu_memory_bytes();
-    let model = LlamaCppModel::load(&model_path, 1, args.max_context_len, gpu_memory_bytes_load, args.gpu_memory_fraction, 1)?;
+    let model = LlamaCppModel::load(
+        &model_path,
+        1,
+        args.max_context_len,
+        gpu_memory_bytes_load,
+        args.gpu_memory_fraction,
+        1,
+    )?;
     let model_config = model.model_config();
 
     spinner.finish_and_clear();
@@ -293,7 +300,11 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
 
         println!();
         let secs = elapsed.as_secs_f64();
-        let toks_per_sec = if secs > 0.0 { token_count as f64 / secs } else { 0.0 };
+        let toks_per_sec = if secs > 0.0 {
+            token_count as f64 / secs
+        } else {
+            0.0
+        };
 
         if response.is_empty() {
             eprintln!("(Context window full — clearing conversation history.)");
@@ -309,7 +320,13 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
             .unwrap_or(0);
         let gpu_info = get_gpu_info();
         let ram_info = get_ram_info();
-        theme::print_status_line(ctx_tokens, args.max_context_len, gpu_info.as_ref(), &ram_info, toks_per_sec);
+        theme::print_status_line(
+            ctx_tokens,
+            args.max_context_len,
+            gpu_info.as_ref(),
+            &ram_info,
+            toks_per_sec,
+        );
     }
 
     engine_loop.abort();
@@ -371,7 +388,7 @@ async fn stream_turn_collecting(
                 // The <think> tag was injected into the prompt; emit it
                 // synthetically with dim styling so the user sees it.
                 if show_thinking {
-                    print!("\x1b[2m<think>\n");
+                    println!("\x1b[2m<think>");
                     let _ = stdout.lock().flush();
                 }
                 first_token = false;
@@ -446,7 +463,7 @@ async fn stream_turn(
 
     let stdout = std::io::stdout();
     if args.show_thinking {
-        print!("<think>\n");
+        println!("<think>");
         let _ = stdout.lock().flush();
     }
     while let Some(token) = rx.recv().await {

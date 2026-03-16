@@ -395,7 +395,9 @@ fn query_gpu_free_bytes() -> Option<usize> {
         .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
         .output()
         .ok()?;
-    if !out.status.success() { return None; }
+    if !out.status.success() {
+        return None;
+    }
     let mib: usize = std::str::from_utf8(&out.stdout).ok()?.trim().parse().ok()?;
     Some(mib * 1024 * 1024)
 }
@@ -417,7 +419,8 @@ impl LlamaCppModel {
             _level: ffi::ggml_log_level,
             _text: *const std::os::raw::c_char,
             _user_data: *mut std::os::raw::c_void,
-        ) {}
+        ) {
+        }
         unsafe { ffi::llama_log_set(Some(noop_log), std::ptr::null_mut()) };
 
         // Load GPU/CPU backends compiled as dynamic libraries (GGML_BACKEND_DL).
@@ -471,9 +474,8 @@ impl LlamaCppModel {
         // Cap total KV context to fit in available GPU (or RAM) memory.
         // Query FREE memory now (after model weights are loaded) so we don't OOM.
         // Falls back to gpu_memory_bytes * fraction if nvidia-smi is unavailable.
-        let free_bytes = query_gpu_free_bytes().unwrap_or(
-            (gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize
-        );
+        let free_bytes = query_gpu_free_bytes()
+            .unwrap_or((gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize);
         let budget_bytes = (free_bytes as f64 * gpu_memory_fraction as f64) as usize;
         // bytes_per_token = 2 (K+V) * n_head_kv * head_dim * 2 (fp16) * n_layer
         let bytes_per_token = 2 * n_head_kv * head_dim * 2 * n_layer;
@@ -483,7 +485,9 @@ impl LlamaCppModel {
             max_context_len * n_seq
         };
         // Honour the user's max_context_len per sequence, but don't exceed memory budget.
-        let n_ctx = (max_context_len * n_seq).min(max_tokens_by_mem).max(max_context_len);
+        let n_ctx = (max_context_len * n_seq)
+            .min(max_tokens_by_mem)
+            .max(max_context_len);
         ctx_params.n_ctx = n_ctx;
         // n_batch must be at least as large as n_ctx to handle full prompts in one pass
         ctx_params.n_batch = max_context_len.max(max_batch_size as u32);
@@ -1208,8 +1212,18 @@ impl LlamaCppModel {
         model_path: &std::path::Path,
         max_batch_size: usize,
         max_context_len: u32,
+        gpu_memory_bytes: usize,
+        gpu_memory_fraction: f32,
+        type_kv: u32,
     ) -> Result<Self> {
-        let _ = (model_path, max_batch_size, max_context_len);
+        let _ = (
+            model_path,
+            max_batch_size,
+            max_context_len,
+            gpu_memory_bytes,
+            gpu_memory_fraction,
+            type_kv,
+        );
         let config = ModelConfig {
             num_layers: 32,
             num_heads: 32,

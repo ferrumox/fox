@@ -50,8 +50,7 @@ pub struct BenchArgs {
 }
 
 pub async fn run_bench(args: BenchArgs) -> Result<()> {
-    let (model_name, model_path) =
-        resolve_model_path(&args.model, args.alias_file.as_deref())?;
+    let (model_name, model_path) = resolve_model_path(&args.model, args.alias_file.as_deref())?;
 
     // ── Load model (timed) ───────────────────────────────────────────────────
     let spinner = ProgressBar::new_spinner();
@@ -65,7 +64,14 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
 
     let load_start = Instant::now();
     let gpu_memory_bytes_load = get_gpu_memory_bytes();
-    let model = LlamaCppModel::load(&model_path, 1, args.max_context_len, gpu_memory_bytes_load, 0.85, 1)?;
+    let model = LlamaCppModel::load(
+        &model_path,
+        1,
+        args.max_context_len,
+        gpu_memory_bytes_load,
+        0.85,
+        1,
+    )?;
     let model_config = model.model_config();
     let load_elapsed = load_start.elapsed();
 
@@ -92,12 +98,15 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
 
     // ── Tokenize prompt ──────────────────────────────────────────────────────
     let messages: Vec<(String, String)> = vec![
-        ("system".to_string(), "You are a helpful assistant.".to_string()),
+        (
+            "system".to_string(),
+            "You are a helpful assistant.".to_string(),
+        ),
         ("user".to_string(), args.prompt.clone()),
     ];
-    let prompt_text = engine.apply_chat_template(&messages).unwrap_or_else(|_| {
-        format!("user: {}", args.prompt)
-    });
+    let prompt_text = engine
+        .apply_chat_template(&messages)
+        .unwrap_or_else(|_| format!("user: {}", args.prompt));
     let prompt_tokens = engine
         .tokenize(&prompt_text)
         .unwrap_or_else(|_| prompt_text.bytes().map(|b| b as i32).take(4096).collect());
@@ -131,7 +140,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
             seed: Some(42),
             stop: None,
             show_thinking: false,
-        initial_in_thinking: false,
+            initial_in_thinking: false,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

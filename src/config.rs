@@ -54,12 +54,24 @@ pub fn load_config_into_env() {
     set_if_unset("FOX_MODEL_PATH", cfg.model_path);
     set_if_unset("FOX_HOST", cfg.host);
     set_if_unset("FOX_PORT", cfg.port.map(|v| v.to_string()));
-    set_if_unset("FOX_MAX_CONTEXT_LEN", cfg.max_context_len.map(|v| v.to_string()));
+    set_if_unset(
+        "FOX_MAX_CONTEXT_LEN",
+        cfg.max_context_len.map(|v| v.to_string()),
+    );
     set_if_unset("FOX_MAX_MODELS", cfg.max_models.map(|v| v.to_string()));
-    set_if_unset("FOX_KEEP_ALIVE_SECS", cfg.keep_alive_secs.map(|v| v.to_string()));
+    set_if_unset(
+        "FOX_KEEP_ALIVE_SECS",
+        cfg.keep_alive_secs.map(|v| v.to_string()),
+    );
     set_if_unset("FOX_SYSTEM_PROMPT", cfg.system_prompt);
-    set_if_unset("FOX_GPU_MEMORY_FRACTION", cfg.gpu_memory_fraction.map(|v| v.to_string()));
-    set_if_unset("FOX_MAX_BATCH_SIZE", cfg.max_batch_size.map(|v| v.to_string()));
+    set_if_unset(
+        "FOX_GPU_MEMORY_FRACTION",
+        cfg.gpu_memory_fraction.map(|v| v.to_string()),
+    );
+    set_if_unset(
+        "FOX_MAX_BATCH_SIZE",
+        cfg.max_batch_size.map(|v| v.to_string()),
+    );
     set_if_unset("FOX_BLOCK_SIZE", cfg.block_size.map(|v| v.to_string()));
     set_if_unset("HF_TOKEN", cfg.hf_token);
     set_if_unset("FOX_ALIAS_FILE", cfg.alias_file);

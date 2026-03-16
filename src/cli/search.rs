@@ -49,7 +49,10 @@ pub async fn run_search(args: SearchArgs) -> Result<()> {
         anyhow::bail!("provide a search query, e.g. `fox search gemma`");
     }
 
-    eprintln!("Searching HuggingFace for GGUF models matching \"{}\"…", query);
+    eprintln!(
+        "Searching HuggingFace for GGUF models matching \"{}\"…",
+        query
+    );
 
     let mut headers = reqwest::header::HeaderMap::new();
     if let Some(ref tok) = args.hf_token {
@@ -84,7 +87,10 @@ pub async fn run_search(args: SearchArgs) -> Result<()> {
         anyhow::bail!("HuggingFace API returned {}", resp.status());
     }
 
-    let models: Vec<HfModel> = resp.json().await.context("parsing HuggingFace API response")?;
+    let models: Vec<HfModel> = resp
+        .json()
+        .await
+        .context("parsing HuggingFace API response")?;
 
     if models.is_empty() {
         eprintln!("No GGUF models found for \"{}\".", query);
@@ -104,23 +110,23 @@ pub async fn run_search(args: SearchArgs) -> Result<()> {
     let likes_w = 6usize;
 
     // Header
-    theme::print_table_header(&[
-        ("REPO", repo_w),
-        ("DOWNLOADS", dl_w),
-        ("LIKES", likes_w),
-    ]);
+    theme::print_table_header(&[("REPO", repo_w), ("DOWNLOADS", dl_w), ("LIKES", likes_w)]);
     theme::print_separator(repo_w + dl_w + likes_w + 6);
 
     for m in &models {
         let repo_name = &m.model_id;
 
         // Mark as downloaded if any local file contains the repo's model name fragment.
-        let repo_stem = repo_name.split('/').last().unwrap_or(repo_name);
+        let repo_stem = repo_name.split('/').next_back().unwrap_or(repo_name);
         let downloaded = local_files.iter().any(|f| {
             let f_lower = f.to_lowercase();
             let stem_lower = repo_stem.to_lowercase();
             // Match on a meaningful prefix (first two dash-segments) to reduce false positives.
-            let key: String = stem_lower.splitn(3, '-').take(2).collect::<Vec<_>>().join("-");
+            let key: String = stem_lower
+                .splitn(3, '-')
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("-");
             !key.is_empty() && f_lower.contains(&key)
         });
 
@@ -139,8 +145,10 @@ pub async fn run_search(args: SearchArgs) -> Result<()> {
                 Some(crossterm::style::Color::Green),
                 false,
                 false,
-                &format!("{}{:<repo_w$} {:>dl_w$} {:>likes_w$}\n",
-                    mark, display_repo, dl_str, m.likes),
+                &format!(
+                    "{}{:<repo_w$} {:>dl_w$} {:>likes_w$}\n",
+                    mark, display_repo, dl_str, m.likes
+                ),
             );
         } else {
             println!(
@@ -152,7 +160,13 @@ pub async fn run_search(args: SearchArgs) -> Result<()> {
 
     println!();
     println!("Pull a model:   fox pull <REPO>");
-    println!("Example:        fox pull {}", models.first().map(|m| m.model_id.as_str()).unwrap_or("bartowski/gemma-3-4b-it-GGUF"));
+    println!(
+        "Example:        fox pull {}",
+        models
+            .first()
+            .map(|m| m.model_id.as_str())
+            .unwrap_or("bartowski/gemma-3-4b-it-GGUF")
+    );
 
     Ok(())
 }

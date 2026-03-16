@@ -70,9 +70,13 @@ pub async fn chat_completions(
 
     let req_id = entry.engine.next_request_id();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
-    entry
-        .engine
-        .submit_request(InferenceRequest::new(req_id, prompt_tokens, max_tokens, sampling, tx));
+    entry.engine.submit_request(InferenceRequest::new(
+        req_id,
+        prompt_tokens,
+        max_tokens,
+        sampling,
+        tx,
+    ));
 
     // Tools force a single non-streaming response so we can parse the full output.
     let effective_stream = req.stream && req.tools.is_none();
@@ -119,7 +123,9 @@ pub async fn chat_completions(
                 }
             }
         };
-        Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+        Sse::new(stream)
+            .keep_alive(KeepAlive::default())
+            .into_response()
     } else {
         let mut full_content = String::new();
         let mut completion_tokens = 0u32;
@@ -189,7 +195,10 @@ mod tests {
         let bytes = body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["object"].as_str().unwrap(), "chat.completion");
-        assert!(!v["choices"][0]["message"]["content"].as_str().unwrap().is_empty());
+        assert!(!v["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .is_empty());
         assert_eq!(v["choices"][0]["finish_reason"].as_str().unwrap(), "stop");
     }
 

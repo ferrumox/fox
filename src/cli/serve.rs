@@ -175,7 +175,10 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
                 .next()
                 .and_then(|(p, _)| p.file_stem().and_then(|s| s.to_str()).map(str::to_string));
             if let Some(ref name) = first {
-                tracing::info!("lazy mode: primary model set to '{}' (not pre-loaded)", name);
+                tracing::info!(
+                    "lazy mode: primary model set to '{}' (not pre-loaded)",
+                    name
+                );
             } else {
                 tracing::warn!(
                     "no model specified and no .gguf files found in {}; \
@@ -190,11 +193,12 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     // Start background keep-alive eviction task.
     std::sync::Arc::clone(&registry).start_eviction_task();
 
-    let addr: std::net::SocketAddr = format!("{}:{}", args.host, args.port)
-        .parse()
-        .map_err(|e| {
-            anyhow::anyhow!("invalid bind address '{}:{}': {}", args.host, args.port, e)
-        })?;
+    let addr: std::net::SocketAddr =
+        format!("{}:{}", args.host, args.port)
+            .parse()
+            .map_err(|e| {
+                anyhow::anyhow!("invalid bind address '{}:{}': {}", args.host, args.port, e)
+            })?;
 
     let system_prompt = if args.system_prompt.is_empty() {
         None
@@ -263,4 +267,3 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     ctrl_c.await;
 }
-

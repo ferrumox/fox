@@ -97,8 +97,8 @@ fn main() {
     // With GGML_BACKEND_DL + BUILD_SHARED_LIBS=ON, the backend-registry symbols
     // (ggml_backend_load_all_from_path etc.) live in libggml-base.so only.
     let llama_lib = build_dir.join("src");
-    let ggml_src  = build_dir.join("ggml").join("src");
-    let bin_out   = build_dir.join("bin");
+    let ggml_src = build_dir.join("ggml").join("src");
+    let bin_out = build_dir.join("bin");
 
     println!("cargo:rustc-link-search=native={}", llama_lib.display());
     println!("cargo:rustc-link-search=native={}", ggml_src.display());
@@ -106,8 +106,8 @@ fn main() {
 
     println!("cargo:rustc-link-lib=static=llama");
     println!("cargo:rustc-link-lib=dylib=ggml-base"); // shared: backend registry
-    println!("cargo:rustc-link-lib=dylib=ggml");      // shared: ggml core
-    println!("cargo:rustc-link-lib=dylib=ggml-cpu");  // shared: CPU backend (always needed)
+    println!("cargo:rustc-link-lib=dylib=ggml"); // shared: ggml core
+    println!("cargo:rustc-link-lib=dylib=ggml-cpu"); // shared: CPU backend (always needed)
 
     // ── Copy backend .so/.dylib files next to the fox binary ─────────────────
     // OUT_DIR is target/{profile}/build/ferrumox-<hash>/out — three levels up
@@ -170,8 +170,8 @@ fn main() {
     }
 
     // ── bindgen ───────────────────────────────────────────────────────────────
-    let llama_include     = llama_root.join("include");
-    let ggml_include      = llama_root.join("ggml").join("include");
+    let llama_include = llama_root.join("include");
+    let ggml_include = llama_root.join("ggml").join("include");
     let ggml_build_include = build_dir.join("ggml").join("include");
 
     let mut include_paths = vec![llama_include.clone(), ggml_include];

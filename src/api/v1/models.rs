@@ -60,7 +60,10 @@ pub async fn metrics_handler() -> impl IntoResponse {
     }
     (
         axum::http::StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         body,
     )
 }
@@ -84,10 +87,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_v1_models_lists_disk_files() {
-        use std::collections::HashMap;
-        use std::sync::Arc;
         use crate::api::router::router;
         use crate::model_registry::{ModelRegistry, RegistryConfig};
+        use std::collections::HashMap;
+        use std::sync::Arc;
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("alpha.gguf"), b"").unwrap();
@@ -105,7 +108,15 @@ mod tests {
             type_kv: 1,
         };
         let reg = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
-        let app = router(reg, "alpha".to_string(), None, 0, dir.path().to_path_buf(), None, None);
+        let app = router(
+            reg,
+            "alpha".to_string(),
+            None,
+            0,
+            dir.path().to_path_buf(),
+            None,
+            None,
+        );
         let resp = get_req(app, "/v1/models").await;
         assert_eq!(resp.status(), 200);
         let bytes = body_bytes(resp).await;

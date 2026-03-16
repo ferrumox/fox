@@ -187,7 +187,12 @@ pub fn print_system_info(gpu: Option<&super::GpuInfo>, ram: &super::RamInfo, max
             &format!("  RAM  · {:.1} / {:.1} GB\n", used_gb, total_gb),
         );
     }
-    eprint_styled(None, false, true, &format!("  ctx  · {} tokens máx\n\n", max_ctx));
+    eprint_styled(
+        None,
+        false,
+        true,
+        &format!("  ctx  · {} tokens máx\n\n", max_ctx),
+    );
 }
 
 /// Print the compact post-response status line to stderr:
@@ -202,7 +207,11 @@ pub fn print_status_line(
     ram: &super::RamInfo,
     tok_per_sec: f64,
 ) {
-    let ratio = if ctx_max > 0 { ctx_used as f64 / ctx_max as f64 } else { 0.0 };
+    let ratio = if ctx_max > 0 {
+        ctx_used as f64 / ctx_max as f64
+    } else {
+        0.0
+    };
     let ctx_color = if ratio < 0.7 {
         Color::Green
     } else if ratio < 0.9 {
@@ -212,7 +221,12 @@ pub fn print_status_line(
     };
 
     eprint_styled(None, false, true, "  ");
-    eprint_styled(Some(ctx_color), false, true, &format!("ctx: {}/{}", ctx_used, ctx_max));
+    eprint_styled(
+        Some(ctx_color),
+        false,
+        true,
+        &format!("ctx: {}/{}", ctx_used, ctx_max),
+    );
 
     if let Some(g) = gpu {
         let used_gb = g.used_bytes as f64 / 1_073_741_824.0;
@@ -222,5 +236,10 @@ pub fn print_status_line(
         let used_gb = ram.used_bytes as f64 / 1_073_741_824.0;
         eprint_styled(None, false, true, &format!(" · RAM: {:.1} GB", used_gb));
     }
-    eprint_styled(None, false, true, &format!(" · {:.1} tok/s\n\n", tok_per_sec));
+    eprint_styled(
+        None,
+        false,
+        true,
+        &format!(" · {:.1} tok/s\n\n", tok_per_sec),
+    );
 }

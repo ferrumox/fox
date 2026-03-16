@@ -188,11 +188,7 @@ impl ModelRegistry {
     /// 3. Stem starts with the name
     /// 4. Stem contains the name
     fn resolve_model_name(&self, name: &str) -> Result<(String, PathBuf)> {
-        let resolved = self
-            .aliases
-            .get(name)
-            .map(String::as_str)
-            .unwrap_or(name);
+        let resolved = self.aliases.get(name).map(String::as_str).unwrap_or(name);
 
         let entries = list_models(&self.config.models_dir)?;
         let lower = resolved.to_lowercase();
@@ -250,7 +246,14 @@ async fn load_model(name: &str, path: &Path, cfg: &RegistryConfig) -> Result<Eng
     tracing::info!("loading model '{}' from {:?}", name, path);
 
     let model = tokio::task::spawn_blocking(move || {
-        LlamaCppModel::load(&path, max_batch_size, max_context_len, gpu_memory_bytes, gpu_memory_fraction, type_kv)
+        LlamaCppModel::load(
+            &path,
+            max_batch_size,
+            max_context_len,
+            gpu_memory_bytes,
+            gpu_memory_fraction,
+            type_kv,
+        )
     })
     .await
     .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;
@@ -265,7 +268,9 @@ async fn load_model(name: &str, path: &Path, cfg: &RegistryConfig) -> Result<Eng
         type_kv,
     ));
     let scheduler = Arc::new(Scheduler::new(kv_cache.clone(), max_batch_size));
-    let engine = Arc::new(InferenceEngine::new(model, scheduler, kv_cache, name, metrics));
+    let engine = Arc::new(InferenceEngine::new(
+        model, scheduler, kv_cache, name, metrics,
+    ));
 
     let loop_handle = {
         let e = engine.clone();
@@ -276,7 +281,10 @@ async fn load_model(name: &str, path: &Path, cfg: &RegistryConfig) -> Result<Eng
         })
     };
 
-    Ok(EngineEntry { engine, loop_handle })
+    Ok(EngineEntry {
+        engine,
+        loop_handle,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -310,7 +318,10 @@ impl EngineEntry {
                 let _ = e.run_loop().await;
             })
         };
-        Arc::new(Self { engine, loop_handle })
+        Arc::new(Self {
+            engine,
+            loop_handle,
+        })
     }
 }
 
@@ -337,7 +348,11 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn minimal_cfg(dir: &std::path::Path, max_models: usize, keep_alive_secs: u64) -> RegistryConfig {
+    fn minimal_cfg(
+        dir: &std::path::Path,
+        max_models: usize,
+        keep_alive_secs: u64,
+    ) -> RegistryConfig {
         RegistryConfig {
             models_dir: dir.to_path_buf(),
             max_models,
@@ -357,7 +372,10 @@ mod tests {
     #[tokio::test]
     async fn test_unload_removes_loaded_model() {
         let dir = tempfile::tempdir().unwrap();
-        let registry = Arc::new(ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), HashMap::new()));
+        let registry = Arc::new(ModelRegistry::new(
+            minimal_cfg(dir.path(), 4, 0),
+            HashMap::new(),
+        ));
         let entry = EngineEntry::for_test("model-a");
         registry.preload_for_test("model-a", entry);
 
@@ -369,7 +387,10 @@ mod tests {
     #[tokio::test]
     async fn test_unload_nonexistent_returns_false() {
         let dir = tempfile::tempdir().unwrap();
-        let registry = Arc::new(ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), HashMap::new()));
+        let registry = Arc::new(ModelRegistry::new(
+            minimal_cfg(dir.path(), 4, 0),
+            HashMap::new(),
+        ));
         assert!(!registry.unload("does-not-exist"));
     }
 
@@ -379,7 +400,10 @@ mod tests {
     async fn test_lru_eviction_when_at_capacity() {
         let dir = tempfile::tempdir().unwrap();
         // max_models = 1 → loading a second model evicts the first
-        let registry = Arc::new(ModelRegistry::new(minimal_cfg(dir.path(), 1, 0), HashMap::new()));
+        let registry = Arc::new(ModelRegistry::new(
+            minimal_cfg(dir.path(), 1, 0),
+            HashMap::new(),
+        ));
 
         let entry_a = EngineEntry::for_test("model-a");
         let entry_b = EngineEntry::for_test("model-b");
@@ -404,15 +428,19 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let dir = tempfile::tempdir().unwrap();
-        let registry = Arc::new(ModelRegistry::new(minimal_cfg(dir.path(), 4, 60), HashMap::new()));
+        let registry = Arc::new(ModelRegistry::new(
+            minimal_cfg(dir.path(), 4, 60),
+            HashMap::new(),
+        ));
 
         let entry = EngineEntry::for_test("old-model");
         registry.preload_for_test("old-model", entry);
 
         // Back-date last_used by more than keep_alive_secs
-        registry
-            .last_used
-            .insert("old-model".to_string(), Instant::now() - Duration::from_secs(120));
+        registry.last_used.insert(
+            "old-model".to_string(),
+            Instant::now() - Duration::from_secs(120),
+        );
 
         registry.evict_expired();
 
@@ -422,7 +450,10 @@ mod tests {
     #[tokio::test]
     async fn test_evict_expired_keeps_fresh_model() {
         let dir = tempfile::tempdir().unwrap();
-        let registry = Arc::new(ModelRegistry::new(minimal_cfg(dir.path(), 4, 60), HashMap::new()));
+        let registry = Arc::new(ModelRegistry::new(
+            minimal_cfg(dir.path(), 4, 60),
+            HashMap::new(),
+        ));
 
         let entry = EngineEntry::for_test("fresh");
         registry.preload_for_test("fresh", entry);
@@ -439,13 +470,17 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         // keep_alive_secs = 0 → never evict by time
-        let registry = Arc::new(ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), HashMap::new()));
+        let registry = Arc::new(ModelRegistry::new(
+            minimal_cfg(dir.path(), 4, 0),
+            HashMap::new(),
+        ));
 
         let entry = EngineEntry::for_test("forever");
         registry.preload_for_test("forever", entry);
-        registry
-            .last_used
-            .insert("forever".to_string(), Instant::now() - Duration::from_secs(9999));
+        registry.last_used.insert(
+            "forever".to_string(),
+            Instant::now() - Duration::from_secs(9999),
+        );
 
         registry.evict_expired();
 
