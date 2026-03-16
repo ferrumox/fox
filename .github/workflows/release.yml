@@ -82,6 +82,10 @@ jobs:
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
             -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
           git config --system core.longpaths true
+          # Use Ninja instead of MSBuild: FileTracker (used by MSBuild) has a
+          # hardcoded MAX_PATH limit that cannot be overridden by the registry key.
+          # Ninja has no such restriction. Ninja is pre-installed on windows-latest.
+          "CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Install Vulkan SDK (Windows)
         if: runner.os == 'Windows'
