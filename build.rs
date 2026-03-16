@@ -112,9 +112,11 @@ fn main() {
     // llama.cpp's add_library(llama) has no explicit STATIC/SHARED, so with
     // BUILD_SHARED_LIBS=ON it becomes a shared library on all platforms.
     println!("cargo:rustc-link-lib=dylib=llama");
-    println!("cargo:rustc-link-lib=dylib=ggml-base"); // shared: backend registry
-    println!("cargo:rustc-link-lib=dylib=ggml"); // shared: ggml core
-    println!("cargo:rustc-link-lib=dylib=ggml-cpu"); // shared: CPU backend (always needed)
+    println!("cargo:rustc-link-lib=dylib=ggml-base"); // shared: core ggml types
+    println!("cargo:rustc-link-lib=dylib=ggml"); // shared: backend dlopen registry
+    // NOTE: do NOT link ggml-cpu / ggml-metal / ggml-cuda explicitly.
+    // With GGML_BACKEND_DL=ON they are MODULE libraries loaded at runtime via
+    // dlopen. On macOS, cmake MODULEs use .so which the macOS linker rejects.
 
     // ── Copy backend .so/.dylib files next to the fox binary ─────────────────
     // OUT_DIR is target/{profile}/build/ferrumox-<hash>/out — three levels up
