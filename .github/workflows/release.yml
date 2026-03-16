@@ -132,6 +132,7 @@ jobs:
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ contains(github.ref_name, '-beta') }}
           files: |
             ${{ env.ASSET }}
             ${{ env.ASSET_SHA256 }}
