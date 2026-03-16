@@ -7,6 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
@@ -31,7 +32,7 @@ jobs:
           - target: aarch64-apple-darwin
             runner: macos-latest
             use_cross: false
-            features: "metal"
+            features: ""
             ext: ""
             archive: tar
             libclang_path: /opt/homebrew/opt/llvm/lib
@@ -43,7 +44,7 @@ jobs:
             archive: zip
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -53,7 +54,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -73,6 +74,14 @@ jobs:
         run: |
           brew install cmake llvm ninja
           echo "LIBCLANG_PATH=${{ matrix.libclang_path }}" >> "$GITHUB_ENV"
+
+      - name: Enable long paths (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          git config --system core.longpaths true
 
       - name: Install Vulkan SDK (Windows)
         if: runner.os == 'Windows'
