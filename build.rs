@@ -79,13 +79,18 @@ fn main() {
         // Metal is always available on macOS — no tool detection needed.
         cmake_config.define("GGML_METAL", "ON");
     } else if target_os == "windows" {
+        // MSBuild's FileTracker has a hardcoded MAX_PATH limit that cannot be
+        // overridden by the LongPathsEnabled registry key. Ninja does not use
+        // FileTracker. Force Ninja here in addition to the CMAKE_GENERATOR env
+        // var set in the workflow, so this works even without the env var.
+        cmake_config.generator("Ninja");
+
         // Vulkan works on any modern GPU (NVIDIA, AMD, Intel) via DirectX 12 drivers.
         // The Vulkan SDK installer sets VULKAN_SDK; no extra drivers needed beyond
         // the standard GPU driver already present on Windows 10/11.
         if let Ok(vulkan_sdk) = env::var("VULKAN_SDK") {
             println!("cargo:warning=Vulkan SDK found at {vulkan_sdk} — building ggml-vulkan.dll");
             cmake_config.define("GGML_VULKAN", "ON");
-            cmake_config.define("VULKAN_SDK", &vulkan_sdk);
         }
     }
 
