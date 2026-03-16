@@ -131,7 +131,15 @@ fn main() {
         .map(|p| p.to_path_buf());
 
     if let Some(ref dest) = bin_dest {
-        let so_ext = if target_os == "macos" { "dylib" } else { "so" };
+        // On macOS, SHARED libs (.dylib) and MODULE libs (.so) coexist:
+        //   .dylib → llama, ggml-base, ggml (linked at compile time)
+        //   .so    → ggml-cpu, ggml-metal, ... (MODULE, dlopen-ed at runtime)
+        // Both must be copied next to the binary.
+        let exts: &[&str] = if target_os == "macos" {
+            &["dylib", "so"]
+        } else {
+            &["so"]
+        };
         for search_dir in &[&llama_lib, &ggml_src, &bin_out] {
             if let Ok(entries) = std::fs::read_dir(search_dir) {
                 for entry in entries.filter_map(|e| e.ok()) {
@@ -140,10 +148,11 @@ fn main() {
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("");
-                    let is_backend = p.extension().and_then(|e| e.to_str()) == Some(so_ext)
+                    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    let is_backend = exts.contains(&ext)
                         && (fname.starts_with("libggml-")
                             || fname.starts_with("libllama.")
-                            || fname == format!("llama.{so_ext}"));
+                            || fname == format!("llama.{ext}"));
                     if is_backend {
                         let dst = dest.join(p.file_name().unwrap());
                         let _ = std::fs::copy(&p, &dst);
