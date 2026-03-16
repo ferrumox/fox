@@ -1,0 +1,35 @@
+services:
+  ferrumox:
+    build:
+      context: .
+      args:
+        - FEATURES=   # cpu by default; change to "cuda" for GPU
+    ports:
+      - "8080:8080"
+    volumes:
+      - ferrumox-models:/root/.cache/ferrumox/models
+    environment:
+      FOX_HOST: 0.0.0.0
+      FOX_PORT: "8080"
+      FOX_MAX_MODELS: "1"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  ferrumox-models:
+  ollama-models:

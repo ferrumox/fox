@@ -115,6 +115,18 @@ pub trait Model: Send + Sync {
 
     fn token_to_piece(&self, token: i32) -> Result<String>;
 
+    /// Returns the raw bytes produced by `llama_token_to_piece` without UTF-8
+    /// validation or lossy replacement.  Used by the engine to accumulate
+    /// per-request byte buffers so that multi-token UTF-8 sequences (e.g. emoji
+    /// split across BPE tokens) are decoded correctly.
+    ///
+    /// The default implementation encodes the `token_to_piece` String back to
+    /// bytes, which is safe for stub/mock models that already return valid UTF-8.
+    /// `LlamaCppModel` overrides this to return the actual raw C bytes.
+    fn token_to_piece_bytes(&self, token: i32) -> Vec<u8> {
+        self.token_to_piece(token).unwrap_or_default().into_bytes()
+    }
+
     /// Apply chat template to messages. Returns formatted prompt for tokenization.
     /// Fallback: simple "role: content\n" concatenation if template unavailable.
     fn apply_chat_template(&self, messages: &[(String, String)]) -> Result<String>;
@@ -142,6 +154,106 @@ pub trait Model: Send + Sync {
     /// Run a forward pass in embedding mode and return the sequence embedding vector.
     /// Uses sequence slot 0; caller must not have an active inference request on slot 0.
     fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>>;
+
+    /// Return the text forms of the model's EOS and EOT tokens.
+    /// Used as base stop sequences so generation halts on model-native terminators
+    /// even when the token ID is not caught by `is_eog_token`.
+    fn stop_tokens(&self) -> Vec<String>;
+}
+
+// ---------------------------------------------------------------------------
+// StubModel — test-only Model implementation (no FFI)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+pub struct StubModel;
+
+#[cfg(test)]
+impl Model for StubModel {
+    fn prefill_sync(
+        &self,
+        req_ids: &[u64],
+        requests: &[InferenceRequestForModel],
+    ) -> Result<Vec<(u64, Logits, usize)>> {
+        Ok(req_ids
+            .iter()
+            .zip(requests.iter())
+            .map(|(&id, r)| {
+                // Return a non-EOS token so the engine emits one text token.
+                (id, Logits::new(vec![], 65), r.prompt_tokens.len())
+            })
+            .collect())
+    }
+
+    fn decode_sync(
+        &self,
+        req_ids: &[u64],
+        _requests: &[InferenceRequestForModel],
+    ) -> Result<Vec<(u64, Logits)>> {
+        // Return EOS immediately — generation ends after one text token.
+        Ok(req_ids
+            .iter()
+            .map(|&id| (id, Logits::new(vec![], 2)))
+            .collect())
+    }
+
+    fn model_config(&self) -> ModelConfig {
+        ModelConfig {
+            num_layers: 2,
+            num_heads: 2,
+            num_heads_kv: 2,
+            head_dim: 64,
+            vocab_size: 256,
+        }
+    }
+
+    fn eos_token_id(&self) -> i32 {
+        2
+    }
+
+    fn is_eog_token(&self, token_id: i32) -> bool {
+        token_id == 2
+    }
+
+    fn tokenize(&self, text: &str) -> Result<Vec<i32>> {
+        Ok(text.bytes().map(|b| b as i32).collect())
+    }
+
+    fn token_to_piece(&self, token: i32) -> Result<String> {
+        if token == 2 {
+            Ok(String::new())
+        } else {
+            Ok("hi ".to_string())
+        }
+    }
+
+    fn apply_chat_template(&self, messages: &[(String, String)]) -> Result<String> {
+        Ok(messages
+            .iter()
+            .map(|(r, c)| format!("{}: {}", r, c))
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+
+    fn clear_sequence(&self, _seq_id: i32) {}
+
+    fn copy_sequence_range(&self, _src: i32, _dst: i32, _count: i32) {}
+
+    fn supports_seq_copy(&self) -> bool {
+        true
+    }
+
+    fn embedding_dim(&self) -> usize {
+        4
+    }
+
+    fn get_embeddings(&self, _tokens: &[i32]) -> Result<Vec<f32>> {
+        Ok(vec![0.1, 0.2, 0.3, 0.4])
+    }
+
+    fn stop_tokens(&self) -> Vec<String> {
+        vec![]
+    }
 }
 
 /// Sample the highest-probability token (deterministic).
@@ -275,6 +387,19 @@ pub struct LlamaCppModel {
     eos_token: i32,
 }
 
+/// Query current free GPU memory in bytes via nvidia-smi.
+/// Returns None on CPU-only systems or when nvidia-smi is unavailable.
+#[cfg(not(fox_stub))]
+fn query_gpu_free_bytes() -> Option<usize> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !out.status.success() { return None; }
+    let mib: usize = std::str::from_utf8(&out.stdout).ok()?.trim().parse().ok()?;
+    Some(mib * 1024 * 1024)
+}
+
 #[cfg(not(fox_stub))]
 impl LlamaCppModel {
     /// Load a GGUF model from path.
@@ -282,7 +407,25 @@ impl LlamaCppModel {
         model_path: &std::path::Path,
         max_batch_size: usize,
         max_context_len: u32,
+        gpu_memory_bytes: usize,
+        gpu_memory_fraction: f32,
+        type_kv: u32,
     ) -> Result<Self> {
+        // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
+        // Fox shows its own clean progress spinner instead.
+        unsafe extern "C" fn noop_log(
+            _level: ffi::ggml_log_level,
+            _text: *const std::os::raw::c_char,
+            _user_data: *mut std::os::raw::c_void,
+        ) {}
+        unsafe { ffi::llama_log_set(Some(noop_log), std::ptr::null_mut()) };
+
+        // Load GPU/CPU backends compiled as dynamic libraries (GGML_BACKEND_DL).
+        // Passing null searches the executable's directory and cwd — fox ships
+        // libggml-cuda.so and libggml-cpu.so next to the binary.
+        // On non-DL builds this is a no-op (backends are statically linked).
+        unsafe { ffi::ggml_backend_load_all_from_path(std::ptr::null()) };
+
         unsafe {
             ffi::llama_backend_init();
         }
@@ -292,7 +435,9 @@ impl LlamaCppModel {
             .ok_or_else(|| anyhow!("model path not valid UTF-8"))?;
         let path_c = CString::new(path_cstr)?;
 
-        let model_params = unsafe { ffi::llama_model_default_params() };
+        let mut model_params = unsafe { ffi::llama_model_default_params() };
+        // Offload all layers to GPU (-1 = all). On CPU-only builds llama.cpp ignores this.
+        model_params.n_gpu_layers = -1;
         let model = unsafe { ffi::llama_model_load_from_file(path_c.as_ptr(), model_params) };
         let model =
             NonNull::new(model).ok_or_else(|| anyhow!("llama_model_load_from_file failed"))?;
@@ -321,14 +466,32 @@ impl LlamaCppModel {
 
         let mut ctx_params = unsafe { ffi::llama_context_default_params() };
         // n_seq_max controls how many concurrent sequences the KV cache tracks.
-        // Must be >= max_batch_size for serving, and large enough for prefix-cache
-        // seq_cp operations (needs at least 2 slots). Using max(max_batch_size, 4)
-        // ensures n_ctx_seq = n_ctx / n_seq_max gives reasonable per-seq context.
         let n_seq = (max_batch_size as u32).max(4);
-        ctx_params.n_ctx = max_context_len * n_seq;
+
+        // Cap total KV context to fit in available GPU (or RAM) memory.
+        // Query FREE memory now (after model weights are loaded) so we don't OOM.
+        // Falls back to gpu_memory_bytes * fraction if nvidia-smi is unavailable.
+        let free_bytes = query_gpu_free_bytes().unwrap_or(
+            (gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize
+        );
+        let budget_bytes = (free_bytes as f64 * gpu_memory_fraction as f64) as usize;
+        // bytes_per_token = 2 (K+V) * n_head_kv * head_dim * 2 (fp16) * n_layer
+        let bytes_per_token = 2 * n_head_kv * head_dim * 2 * n_layer;
+        let max_tokens_by_mem = if bytes_per_token > 0 && budget_bytes > 0 {
+            (budget_bytes / bytes_per_token) as u32
+        } else {
+            max_context_len * n_seq
+        };
+        // Honour the user's max_context_len per sequence, but don't exceed memory budget.
+        let n_ctx = (max_context_len * n_seq).min(max_tokens_by_mem).max(max_context_len);
+        ctx_params.n_ctx = n_ctx;
         // n_batch must be at least as large as n_ctx to handle full prompts in one pass
         ctx_params.n_batch = max_context_len.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
+        ctx_params.flash_attn_type = 1; // LLAMA_FLASH_ATTN_TYPE_ENABLED
+        ctx_params.offload_kqv = true;
+        ctx_params.type_k = type_kv;
+        ctx_params.type_v = type_kv;
 
         let ctx = unsafe { ffi::llama_init_from_model(model.as_ptr(), ctx_params) };
         let ctx = NonNull::new(ctx).ok_or_else(|| {
@@ -433,6 +596,51 @@ impl LlamaCppModel {
             if n as usize <= buf.len() {
                 let s = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
                 return Ok(s);
+            }
+            buf.resize(n as usize, 0);
+        }
+    }
+
+    /// Raw-bytes variant: same as `token_to_piece_impl` but returns `Vec<u8>`
+    /// without any UTF-8 validation so the engine can accumulate partial
+    /// multi-byte sequences (e.g. emoji split across BPE tokens) before decoding.
+    fn token_to_piece_bytes_impl(&self, token: i32) -> Vec<u8> {
+        let vocab = self.vocab;
+        if vocab.is_null() {
+            return vec![];
+        }
+        let mut buf = vec![0u8; 64];
+        loop {
+            let n = unsafe {
+                ffi::llama_token_to_piece(
+                    vocab,
+                    token,
+                    buf.as_mut_ptr() as *mut std::ffi::c_char,
+                    buf.len() as i32,
+                    0,
+                    true,
+                )
+            };
+            if n < 0 {
+                let need = (-n) as usize;
+                buf.resize(need, 0);
+                let n2 = unsafe {
+                    ffi::llama_token_to_piece(
+                        vocab,
+                        token,
+                        buf.as_mut_ptr() as *mut std::ffi::c_char,
+                        buf.len() as i32,
+                        0,
+                        true,
+                    )
+                };
+                if n2 < 0 {
+                    return vec![];
+                }
+                return buf[..n2 as usize].to_vec();
+            }
+            if (n as usize) <= buf.len() {
+                return buf[..n as usize].to_vec();
             }
             buf.resize(n as usize, 0);
         }
@@ -892,6 +1100,10 @@ impl Model for LlamaCppModel {
         self.token_to_piece_impl(token)
     }
 
+    fn token_to_piece_bytes(&self, token: i32) -> Vec<u8> {
+        self.token_to_piece_bytes_impl(token)
+    }
+
     fn apply_chat_template(&self, messages: &[(String, String)]) -> Result<String> {
         self.apply_chat_template_impl(messages)
     }
@@ -948,6 +1160,37 @@ impl Model for LlamaCppModel {
 
     fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>> {
         self.do_get_embeddings(tokens)
+    }
+
+    fn stop_tokens(&self) -> Vec<String> {
+        let mut result: Vec<String> = Vec::new();
+        // Collect the text form of every control OR EOG token in the vocabulary.
+        //
+        // This covers:
+        //   - Control tokens: role separators (`<|user|>`, `<|system|>`, …)
+        //   - EOG tokens: EOS/EOT variants (`<|endoftext|>`, `<|im_end|>`, model-specific
+        //     stop markers like `,<!__EOF teleport>`, etc.)
+        //
+        // `is_eog_token()` suppresses these by token ID when llama.cpp recognises them
+        // correctly.  Adding their text forms here ensures the text-based filter also
+        // catches them when the model spells out the stop sequence as regular tokens
+        // (which happens on some quants where the EOG flag is missing from metadata).
+        let n_tokens = unsafe { ffi::llama_vocab_n_tokens(self.vocab) };
+        for token_id in 0..n_tokens {
+            let is_control = unsafe { ffi::llama_vocab_is_control(self.vocab, token_id) };
+            let is_eog = unsafe { ffi::llama_vocab_is_eog(self.vocab, token_id) };
+            if !is_control && !is_eog {
+                continue;
+            }
+            if let Ok(s) = self.token_to_piece_impl(token_id) {
+                let s = s.replace(super::SPM_SPACE, " ");
+                let s = s.trim().to_string();
+                if !s.is_empty() && !result.contains(&s) {
+                    result.push(s);
+                }
+            }
+        }
+        result
     }
 }
 
@@ -1059,6 +1302,10 @@ impl Model for LlamaCppModel {
     fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>> {
         let _ = tokens;
         Ok(vec![0.0f32; self.embedding_dim()])
+    }
+
+    fn stop_tokens(&self) -> Vec<String> {
+        vec![]
     }
 }
 

@@ -1,8 +1,9 @@
 // `fox run` — single-shot inference or interactive REPL, streaming output to stdout.
 // Reuses the full engine stack (Scheduler + InferenceEngine) without an HTTP server.
 //
-// fox run --model-path model.gguf "Hello"   → one-shot
-// fox run --model-path model.gguf           → opens interactive REPL
+// fox run llama "Hello"   → one-shot (resolved from models_dir)
+// fox run llama           → opens interactive REPL
+// fox run /abs/path/to/model.gguf "Hello"  → direct path
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -18,18 +19,24 @@ use crate::engine::InferenceEngine;
 use crate::kv_cache::KVCacheManager;
 use crate::scheduler::{InferenceRequest, SamplingParams};
 
-use super::get_gpu_memory_bytes;
+use super::{get_gpu_info, get_gpu_memory_bytes, get_ram_info};
+use super::resolve_model_path;
 use super::theme;
 
 #[derive(Parser, Debug)]
 pub struct RunArgs {
-    /// Path to the GGUF model file
-    #[arg(long, env = "FOX_MODEL_PATH")]
-    pub model_path: PathBuf,
+    /// Model name, alias, or path to a GGUF file.
+    /// Resolved against ~/.cache/ferrumox/models with alias → exact → prefix → contains fallback.
+    #[arg(env = "FOX_MODEL_PATH")]
+    pub model: String,
 
     /// The prompt to send to the model.
     /// If omitted, an interactive chat session is started.
     pub prompt: Option<String>,
+
+    /// Path to aliases TOML file (default: ~/.config/ferrumox/aliases.toml)
+    #[arg(long, env = "FOX_ALIAS_FILE")]
+    pub alias_file: Option<PathBuf>,
 
     /// Maximum number of tokens to generate per turn
     #[arg(long, default_value = "512")]
@@ -101,6 +108,26 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
             .init();
     }
 
+    // Resolve model — auto-pull from HuggingFace if not found locally.
+    let (model_name, model_path) =
+        match resolve_model_path(&args.model, args.alias_file.as_deref()) {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!(
+                    "Model '{}' not found locally. Pulling from HuggingFace…",
+                    args.model
+                );
+                super::pull::run_pull(super::pull::PullArgs {
+                    model_id: args.model.clone(),
+                    filename: None,
+                    output_dir: None,
+                    hf_token: std::env::var("HF_TOKEN").ok(),
+                })
+                .await?;
+                resolve_model_path(&args.model, args.alias_file.as_deref())?
+            }
+        };
+
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
         ProgressStyle::with_template("  {spinner:.cyan} {msg}")
@@ -110,7 +137,8 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
     spinner.set_message("Loading model…");
     spinner.enable_steady_tick(Duration::from_millis(80));
 
-    let model = LlamaCppModel::load(&args.model_path, 1, args.max_context_len)?;
+    let gpu_memory_bytes_load = get_gpu_memory_bytes();
+    let model = LlamaCppModel::load(&model_path, 1, args.max_context_len, gpu_memory_bytes_load, args.gpu_memory_fraction, 1)?;
     let model_config = model.model_config();
 
     spinner.finish_and_clear();
@@ -122,15 +150,9 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         gpu_memory_bytes,
         args.gpu_memory_fraction,
         args.block_size,
+        1,
     ));
     let scheduler = std::sync::Arc::new(crate::scheduler::Scheduler::new(kv_cache.clone(), 1));
-
-    let model_name = args
-        .model_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("default")
-        .to_string();
 
     let model = std::sync::Arc::new(model);
     let engine = std::sync::Arc::new(InferenceEngine::new(
@@ -165,6 +187,9 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
     let model_name = engine.model_name();
 
     theme::print_banner(model_name, args.max_context_len);
+    let startup_gpu = get_gpu_info();
+    let startup_ram = get_ram_info();
+    theme::print_system_info(startup_gpu.as_ref(), &startup_ram, args.max_context_len);
 
     // Keep the engine loop running for the lifetime of the session.
     let engine_loop = {
@@ -174,6 +199,7 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
         })
     };
 
+    let mut show_thinking = args.show_thinking;
     let mut messages: Vec<(String, String)> = Vec::new();
     if !args.no_system_prompt && !args.system_prompt.is_empty() {
         messages.push(("system".to_string(), args.system_prompt.clone()));
@@ -182,12 +208,36 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
     loop {
         theme::print_prompt_glyph();
 
-        // Read line via spawn_blocking to avoid blocking the tokio runtime thread,
+        // Read input via spawn_blocking to avoid blocking the tokio runtime thread,
         // which would starve the engine loop task running concurrently.
+        // Typing `"""` on its own line enters multiline mode; a second `"""` submits.
         let result = tokio::task::spawn_blocking(|| {
-            let mut line = String::new();
-            let n = std::io::stdin().read_line(&mut line)?;
-            Ok::<(String, usize), std::io::Error>((line, n))
+            let mut first_line = String::new();
+            let n = std::io::stdin().read_line(&mut first_line)?;
+            if n == 0 {
+                return Ok::<(String, usize), std::io::Error>((first_line, 0));
+            }
+            if first_line.trim() == "\"\"\"" {
+                let mut buf = String::new();
+                let mut total = n;
+                loop {
+                    eprint!("  · ");
+                    let _ = std::io::stderr().flush();
+                    let mut line = String::new();
+                    let m = std::io::stdin().read_line(&mut line)?;
+                    if m == 0 {
+                        break;
+                    }
+                    total += m;
+                    if line.trim() == "\"\"\"" {
+                        break;
+                    }
+                    buf.push_str(&line);
+                }
+                Ok((buf, total))
+            } else {
+                Ok((first_line, n))
+            }
         })
         .await
         .expect("spawn_blocking panicked");
@@ -217,6 +267,13 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
             break;
         }
 
+        if input == "/think" {
+            show_thinking = !show_thinking;
+            let status = if show_thinking { "enabled" } else { "disabled" };
+            theme::eprint_styled(None, false, true, &format!("  Reasoning {status}\n\n"));
+            continue;
+        }
+
         messages.push(("user".to_string(), input));
 
         // Thinking spinner
@@ -231,20 +288,12 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
 
         let start = Instant::now();
         let (response, token_count) =
-            stream_turn_collecting(args, engine, &messages, spinner).await?;
+            stream_turn_collecting(args, engine, &messages, spinner, show_thinking).await?;
         let elapsed = start.elapsed();
 
         println!();
-        theme::eprint_styled(
-            None,
-            false,
-            true,
-            &format!(
-                "  {} tokens · {:.1}s\n\n",
-                token_count,
-                elapsed.as_secs_f64()
-            ),
-        );
+        let secs = elapsed.as_secs_f64();
+        let toks_per_sec = if secs > 0.0 { token_count as f64 / secs } else { 0.0 };
 
         if response.is_empty() {
             eprintln!("(Context window full — clearing conversation history.)");
@@ -253,6 +302,14 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
         } else {
             messages.push(("assistant".to_string(), response));
         }
+
+        let ctx_tokens = engine
+            .apply_chat_template(&messages)
+            .and_then(|p| engine.tokenize(&p).map(|t| t.len()))
+            .unwrap_or(0);
+        let gpu_info = get_gpu_info();
+        let ram_info = get_ram_info();
+        theme::print_status_line(ctx_tokens, args.max_context_len, gpu_info.as_ref(), &ram_info, toks_per_sec);
     }
 
     engine_loop.abort();
@@ -265,8 +322,9 @@ async fn stream_turn_collecting(
     engine: &Arc<InferenceEngine>,
     messages: &[(String, String)],
     spinner: ProgressBar,
+    show_thinking: bool,
 ) -> Result<(String, usize)> {
-    let prompt = engine.apply_chat_template(messages).unwrap_or_else(|_| {
+    let mut prompt = engine.apply_chat_template(messages).unwrap_or_else(|_| {
         messages
             .iter()
             .map(|(r, c)| format!("{}: {}", r, c))
@@ -274,11 +332,21 @@ async fn stream_turn_collecting(
             .join("\n")
     });
 
+    // For models that require an explicit thinking activation (e.g. Qwen3-Instruct),
+    // append the opening <think> tag to the prompt so the model starts in reasoning
+    // mode.  The engine state is also initialised with in_thinking=true so the output
+    // filter knows the first generated tokens are reasoning content, not regular output.
+    if show_thinking {
+        prompt.push_str("<think>\n");
+    }
+
     let prompt_tokens = engine
         .tokenize(&prompt)
         .unwrap_or_else(|_| prompt.bytes().map(|b| b as i32).take(4096).collect());
 
-    let sampling = build_sampling_params(args);
+    let mut sampling = build_sampling_params(args);
+    sampling.show_thinking = show_thinking;
+    sampling.initial_in_thinking = show_thinking;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let req_id = engine.next_request_id();
@@ -289,6 +357,9 @@ async fn stream_turn_collecting(
     let mut response = String::new();
     let mut token_count: usize = 0;
     let mut first_token = true;
+    // Track whether we are currently inside a <think>…</think> block so we
+    // can apply ANSI dim styling to the reasoning section.
+    let mut in_thinking_display = show_thinking;
 
     while let Some(token) = rx.recv().await {
         if !token.text.is_empty() {
@@ -297,9 +368,29 @@ async fn stream_turn_collecting(
                 eprintln!();
                 theme::print_fox_label();
                 let _ = std::io::stderr().flush();
+                // The <think> tag was injected into the prompt; emit it
+                // synthetically with dim styling so the user sees it.
+                if show_thinking {
+                    print!("\x1b[2m<think>\n");
+                    let _ = stdout.lock().flush();
+                }
                 first_token = false;
             }
-            print!("{}", token.text);
+
+            if in_thinking_display {
+                if let Some(idx) = token.text.find("</think>") {
+                    // Print everything up to and including </think> in dim,
+                    // then reset and print any text that follows normally.
+                    let end = idx + "</think>".len();
+                    print!("{}\x1b[0m{}", &token.text[..end], &token.text[end..]);
+                    in_thinking_display = false;
+                } else {
+                    // Still inside thinking block — dim mode stays active.
+                    print!("{}", token.text);
+                }
+            } else {
+                print!("{}", token.text);
+            }
             let _ = stdout.lock().flush();
             response.push_str(&token.text);
             token_count += 1;
@@ -321,7 +412,7 @@ async fn stream_turn(
     engine: &Arc<InferenceEngine>,
     messages: &[(String, String)],
 ) -> Result<()> {
-    let prompt = engine.apply_chat_template(messages).unwrap_or_else(|_| {
+    let mut prompt = engine.apply_chat_template(messages).unwrap_or_else(|_| {
         messages
             .iter()
             .map(|(r, c)| format!("{}: {}", r, c))
@@ -329,11 +420,16 @@ async fn stream_turn(
             .join("\n")
     });
 
+    if args.show_thinking {
+        prompt.push_str("<think>\n");
+    }
+
     let prompt_tokens = engine
         .tokenize(&prompt)
         .unwrap_or_else(|_| prompt.bytes().map(|b| b as i32).take(4096).collect());
 
-    let sampling = build_sampling_params(args);
+    let mut sampling = build_sampling_params(args);
+    sampling.initial_in_thinking = args.show_thinking;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let req_id = engine.next_request_id();
@@ -349,6 +445,10 @@ async fn stream_turn(
     };
 
     let stdout = std::io::stdout();
+    if args.show_thinking {
+        print!("<think>\n");
+        let _ = stdout.lock().flush();
+    }
     while let Some(token) = rx.recv().await {
         if !token.text.is_empty() {
             print!("{}", token.text);
@@ -372,5 +472,6 @@ fn build_sampling_params(args: &RunArgs) -> SamplingParams {
         seed: args.seed,
         stop: None,
         show_thinking: args.show_thinking,
+        initial_in_thinking: false, // set by callers that force thinking mode
     }
 }

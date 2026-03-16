@@ -1,9 +1,11 @@
 // `fox pull` — download a GGUF model from HuggingFace Hub.
 //
 // Usage:
-//   fox pull bartowski/Llama-3.2-1B-Instruct-GGUF
-//   fox pull bartowski/Llama-3.2-1B-Instruct-GGUF --filename Llama-3.2-1B-Instruct-Q4_K_M.gguf
-//   fox pull bartowski/Llama-3.2-1B-Instruct-GGUF --output-dir ./models
+//   fox pull gemma3                                      (top HF result)
+//   fox pull gemma3:12b                                  (specific size)
+//   fox pull gemma3:12b-q4                               (size + quant prefix)
+//   fox pull bartowski/gemma-3-12b-it-GGUF               (raw HF repo)
+//   fox pull bartowski/gemma-3-12b-it-GGUF:q4            (raw HF repo + quant)
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -11,6 +13,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
+use serde::Deserialize;
 
 use super::theme;
 
@@ -19,52 +22,176 @@ const HF_CDN_BASE: &str = "https://huggingface.co";
 
 #[derive(Parser, Debug)]
 pub struct PullArgs {
-    /// HuggingFace model ID in the form `owner/repo`
-    /// (e.g. `bartowski/Llama-3.2-1B-Instruct-GGUF`)
+    /// Model to download. Formats:
+    ///   name              — e.g. `gemma3`
+    ///   name:size         — e.g. `gemma3:12b`
+    ///   name:size-quant   — e.g. `gemma3:12b-q4`
+    ///   owner/repo        — raw HuggingFace repo
+    ///   owner/repo:quant  — raw HuggingFace repo + quant prefix
     pub model_id: String,
 
-    /// Specific GGUF filename to download.
-    /// If omitted and multiple files are found, an interactive list is shown.
+    /// Specific GGUF filename to download (overrides auto-selection).
     #[arg(long, short)]
     pub filename: Option<String>,
 
     /// Directory where the model file will be saved.
-    /// Defaults to `~/.cache/ferrumox/models/`
-    #[arg(long, default_value = "~/.cache/ferrumox/models")]
-    pub output_dir: PathBuf,
+    /// Defaults to the platform cache directory (e.g. ~/.cache/ferrumox/models).
+    #[arg(long)]
+    pub output_dir: Option<PathBuf>,
 
     /// HuggingFace API token for private or gated models
     #[arg(long, env = "HF_TOKEN")]
     pub hf_token: Option<String>,
 }
 
+/// Parsed model spec from user input.
+struct ModelSpec {
+    /// HF repo if input was `owner/repo`, otherwise None (will be searched).
+    raw_repo: Option<String>,
+    /// Search query to find the repo (e.g. "gemma3 12b").
+    search_query: String,
+    /// Quantization prefix to filter files (e.g. "Q4").
+    quant: Option<String>,
+}
+
+/// Parse user input into a ModelSpec.
+///
+/// Raw HF repo (contains `/`):
+///   `bartowski/gemma-3-12b-it-GGUF`      → raw_repo=Some(...), quant=None
+///   `bartowski/gemma-3-12b-it-GGUF:q4`   → raw_repo=Some(...), quant=Some("Q4")
+///
+/// Friendly name:
+///   `gemma3`           → search="gemma3",      quant=None
+///   `gemma3:12b`       → search="gemma3 12b",  quant=None
+///   `gemma3:12b-q4`    → search="gemma3 12b",  quant=Some("Q4")
+fn parse_model_spec(input: &str) -> ModelSpec {
+    if input.contains('/') {
+        // Raw HF repo — optionally with :quant suffix
+        let (repo, quant) = match input.split_once(':') {
+            Some((r, q)) => (r.to_string(), Some(q.to_uppercase())),
+            None => (input.to_string(), None),
+        };
+        return ModelSpec { raw_repo: Some(repo.clone()), search_query: repo, quant };
+    }
+
+    // Friendly name: split on ':' to get name and optional size-quant tag
+    let (name, tag) = match input.split_once(':') {
+        Some((n, t)) => (n, Some(t)),
+        None => (input, None),
+    };
+
+    match tag {
+        None => ModelSpec {
+            raw_repo: None,
+            search_query: name.to_string(),
+            quant: None,
+        },
+        Some(tag) => {
+            // Tag may be "12b", "12b-q4", or just "q4"
+            // Split on '-' from the right: last segment is quant if it starts with q/iq/f
+            let parts: Vec<&str> = tag.splitn(2, '-').collect();
+            match parts.as_slice() {
+                [size, quant] => ModelSpec {
+                    raw_repo: None,
+                    search_query: format!("{} {}", name, size),
+                    quant: Some(quant.to_uppercase()),
+                },
+                [only] => {
+                    let up = only.to_uppercase();
+                    if up.starts_with('Q') || up.starts_with("IQ") || up.starts_with('F') {
+                        // It's a quant with no size: "gemma3:q4"
+                        ModelSpec {
+                            raw_repo: None,
+                            search_query: name.to_string(),
+                            quant: Some(up),
+                        }
+                    } else {
+                        // It's a size with no quant: "gemma3:12b"
+                        ModelSpec {
+                            raw_repo: None,
+                            search_query: format!("{} {}", name, only),
+                            quant: None,
+                        }
+                    }
+                }
+                _ => ModelSpec {
+                    raw_repo: None,
+                    search_query: name.to_string(),
+                    quant: None,
+                },
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct HfSearchResult {
+    #[serde(rename = "modelId")]
+    model_id: String,
+}
+
+/// Search HF for the most downloaded GGUF repo matching `query`.
+async fn search_top_repo(query: &str, client: &reqwest::Client) -> Result<String> {
+    let encoded = query.replace(' ', "+");
+    let url = format!(
+        "{HF_API_BASE}?search={encoded}&filter=gguf&sort=downloads&direction=-1&limit=1"
+    );
+    let results: Vec<HfSearchResult> = client
+        .get(&url)
+        .send()
+        .await
+        .context("searching HuggingFace")?
+        .json()
+        .await
+        .context("parsing HuggingFace search response")?;
+
+    results
+        .into_iter()
+        .next()
+        .map(|r| r.model_id)
+        .ok_or_else(|| anyhow::anyhow!("No GGUF model found for \"{}\" on HuggingFace", query))
+}
+
 pub async fn run_pull(args: PullArgs) -> Result<()> {
-    let output_dir = super::expand_tilde(&args.output_dir);
+    let output_dir = match args.output_dir {
+        Some(ref d) => super::expand_tilde(d),
+        None => super::models_dir(),
+    };
     std::fs::create_dir_all(&output_dir)
         .with_context(|| format!("creating output dir {:?}", output_dir))?;
 
-    // 1. Fetch model metadata from HF Hub API.
-    eprintln!("Fetching model info for {}…", args.model_id);
-    let url = format!("{}/{}", HF_API_BASE, args.model_id);
     let client = build_client(args.hf_token.as_deref())?;
+    let spec = parse_model_spec(&args.model_id);
+
+    // Resolve HF repo: raw input or search.
+    let hf_repo = match spec.raw_repo {
+        Some(repo) => repo,
+        None => {
+            eprintln!("Searching HuggingFace for \"{}\"…", spec.search_query);
+            let repo = search_top_repo(&spec.search_query, &client).await?;
+            eprintln!("Found: {}", repo);
+            repo
+        }
+    };
+
+    // Fetch file list from HF Hub API.
+    let url = format!("{HF_API_BASE}/{hf_repo}");
     let resp = client
         .get(&url)
         .send()
         .await
-        .with_context(|| format!("fetching {}", url))?;
+        .with_context(|| format!("fetching metadata for {}", hf_repo))?;
 
     if !resp.status().is_success() {
         anyhow::bail!(
-            "HuggingFace API returned {} for model `{}`. \
-             Check the model ID and ensure HF_TOKEN is set for private models.",
+            "HuggingFace API returned {} for `{}`. \
+             Check the repo name and ensure HF_TOKEN is set for private models.",
             resp.status(),
-            args.model_id
+            hf_repo
         );
     }
 
     let meta: serde_json::Value = resp.json().await.context("parsing HF API response")?;
-
-    // 2. Extract .gguf file list from `siblings`.
     let siblings = meta["siblings"]
         .as_array()
         .context("unexpected HF API response: missing `siblings`")?;
@@ -80,47 +207,50 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         anyhow::bail!(
             "No .gguf files found in `{}`. \
              This repository may not contain GGUF quantizations.",
-            args.model_id
+            hf_repo
         );
     }
 
-    // 3. Resolve which file to download.
-    let filename = match args.filename {
-        Some(f) => {
-            if !gguf_files.contains(&f) {
-                anyhow::bail!(
-                    "File `{}` not found in `{}`. Available GGUF files:\n{}",
-                    f,
-                    args.model_id,
-                    gguf_files
-                        .iter()
-                        .map(|s| format!("  - {}", s))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                );
-            }
-            f
+    // Select file: --filename > quant prefix > pick balanced from all files.
+    let filename = if let Some(f) = args.filename {
+        if !gguf_files.contains(&f) {
+            anyhow::bail!(
+                "File `{}` not found in `{}`.\nAvailable files:\n{}",
+                f,
+                hf_repo,
+                gguf_files.iter().map(|s| format!("  - {}", s)).collect::<Vec<_>>().join("\n")
+            );
         }
-        None if gguf_files.len() == 1 => {
-            eprintln!("Found 1 GGUF file: {}", gguf_files[0]);
-            gguf_files[0].clone()
+        f
+    } else if let Some(ref q) = spec.quant {
+        let matches: Vec<&String> = gguf_files
+            .iter()
+            .filter(|name| name.to_uppercase().contains(q.as_str()))
+            .collect();
+        if matches.is_empty() {
+            anyhow::bail!(
+                "No GGUF file with quantization `{}` found in `{}`.\nAvailable files:\n{}",
+                q,
+                hf_repo,
+                gguf_files.iter().map(|s| format!("  - {}", s)).collect::<Vec<_>>().join("\n")
+            );
         }
-        None => select_file_interactive(&gguf_files)?,
+        pick_balanced(&matches).to_string()
+    } else {
+        let all: Vec<&String> = gguf_files.iter().collect();
+        pick_balanced(&all).to_string()
     };
 
-    // 4. Download with progress bar.
-    let dest = output_dir.join(&filename);
+    eprintln!("Selected: {}", filename);
 
+    // Download with progress bar.
+    let dest = output_dir.join(&filename);
     if dest.exists() {
         eprintln!("{} already exists, skipping download.", dest.display());
-        eprintln!("Path: {}", dest.display());
         return Ok(());
     }
 
-    let download_url = format!(
-        "{}/{}/resolve/main/{}",
-        HF_CDN_BASE, args.model_id, filename
-    );
+    let download_url = format!("{HF_CDN_BASE}/{hf_repo}/resolve/main/{filename}");
     eprintln!("Downloading {} …", filename);
 
     let resp = client
@@ -130,11 +260,7 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         .with_context(|| format!("downloading {}", download_url))?;
 
     if !resp.status().is_success() {
-        anyhow::bail!(
-            "download failed with status {} for {}",
-            resp.status(),
-            download_url
-        );
+        anyhow::bail!("download failed with status {} for {}", resp.status(), download_url);
     }
 
     let total_bytes = resp.content_length();
@@ -161,17 +287,12 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         }
     };
 
-    // Write to a temp file first, rename on success.
     let tmp_dest = dest.with_extension("gguf.part");
     let mut file =
         std::fs::File::create(&tmp_dest).with_context(|| format!("creating {:?}", tmp_dest))?;
 
     let mut stream = resp;
-    while let Some(chunk) = stream
-        .chunk()
-        .await
-        .context("error reading download stream")?
-    {
+    while let Some(chunk) = stream.chunk().await.context("error reading download stream")? {
         file.write_all(&chunk).context("error writing to file")?;
         pb.inc(chunk.len() as u64);
     }
@@ -180,22 +301,24 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
     std::fs::rename(&tmp_dest, &dest)
         .with_context(|| format!("renaming {:?} to {:?}", tmp_dest, dest))?;
 
+    let stem = dest
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&filename);
+
     eprintln!();
     theme::print_success(&format!("Saved to {}", dest.display()));
     theme::eprint_styled(
         None,
         false,
         true,
-        &format!("     Run:   fox run --model-path \"{}\"\n", dest.display()),
+        &format!("     Run:   fox run {}\n", stem),
     );
     theme::eprint_styled(
         None,
         false,
         true,
-        &format!(
-            "     Serve: fox serve --model-path \"{}\"\n",
-            dest.display()
-        ),
+        &format!("     Serve: fox serve\n"),
     );
 
     Ok(())
@@ -212,18 +335,19 @@ fn build_client(token: Option<&str>) -> Result<reqwest::Client> {
     }
     reqwest::Client::builder()
         .default_headers(headers)
-        .user_agent("ferrumox/0.6.0")
+        .user_agent("ferrumox/1.0.0")
         .build()
         .context("building HTTP client")
 }
 
-/// Ask the user to choose a file from a numbered list.
-fn select_file_interactive(files: &[String]) -> Result<String> {
-    let selection = dialoguer::Select::new()
-        .with_prompt("Multiple GGUF files found — which one do you want to download?")
-        .items(files)
-        .default(0)
-        .interact()
-        .context("interactive selection")?;
-    Ok(files[selection].clone())
+/// From a list of GGUF files, pick the most balanced quantization.
+/// Priority: Q4_K_M > Q4_K_S > Q5_K_M > Q4_0 > Q8_0 > first available.
+fn pick_balanced<'a>(files: &[&'a String]) -> &'a String {
+    let priority = ["Q4_K_M", "Q4_K_S", "Q5_K_M", "Q4_0", "Q8_0"];
+    for variant in &priority {
+        if let Some(f) = files.iter().find(|f| f.to_uppercase().contains(variant)) {
+            return f;
+        }
+    }
+    files[0]
 }

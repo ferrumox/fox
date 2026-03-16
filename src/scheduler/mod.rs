@@ -100,7 +100,7 @@ impl Scheduler {
 
     /// Submit a request to the waiting queue.
     pub fn submit(&self, req: InferenceRequest) {
-        let mut q = self.waiting_queue.lock().expect("scheduler queue lock");
+        let mut q = self.waiting_queue.lock().unwrap_or_else(|e| e.into_inner());
         info!(request_id = req.id, "request admitted to waiting queue");
         q.push_back(req);
         drop(q);
@@ -220,9 +220,9 @@ impl Scheduler {
                     let id = req.id;
                     req.page_table = PageTable::new(hit.block_ids);
                     req.page_table.extend(new_ids);
-                    req.kv_seq_id = pool.pop().expect("pool non-empty checked above");
+                    req.kv_seq_id = hit.seq_id;
                     req.skip_prefix_tokens = cached_tokens;
-                    req.prefix_seq_id = Some(hit.seq_id);
+                    req.prefix_seq_id = None;
                     req.stop_reason = None;
                     req.state = batch::RequestState::Prefilling;
                     self.prefix_hits.fetch_add(1, Ordering::Relaxed);
@@ -249,9 +249,15 @@ impl Scheduler {
                 if self.kv_cache.can_allocate(needed) {
                     match self.kv_cache.allocate(needed) {
                         Ok(ids) => {
+                            let Some(seq_id) = pool.pop() else {
+                                // Defensive: pool should be non-empty (checked at loop start).
+                                self.kv_cache.free_blocks(&ids);
+                                waiting.push_front(req);
+                                break 'admit;
+                            };
                             let id = req.id;
                             req.page_table = PageTable::new(ids);
-                            req.kv_seq_id = pool.pop().expect("pool non-empty checked above");
+                            req.kv_seq_id = seq_id;
                             req.stop_reason = None;
                             req.state = batch::RequestState::Prefilling;
                             info!(
@@ -398,6 +404,20 @@ impl Scheduler {
 
         if pcache.len() >= self.prefix_cache_max {
             return false;
+        }
+
+        // Do not cache if the inference seq_id pool is currently empty.
+        // The finished request's seq_id has not yet been returned to the pool;
+        // if we donate it to the prefix cache, the pool remains empty and the
+        // next request will be unable to start (pool.is_empty() → not admitted).
+        {
+            let pool = match self.seq_id_pool.lock() {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            if pool.is_empty() {
+                return false;
+            }
         }
 
         for req in running.iter_mut() {
@@ -553,7 +573,7 @@ mod tests {
             head_dim: 128,
             vocab_size: 32000,
         };
-        let kv = Arc::new(KVCacheManager::new(&config, 1_000_000_000, 0.5, 16));
+        let kv = Arc::new(KVCacheManager::new(&config, 1_000_000_000, 0.5, 16, 1));
         let sched = Scheduler::new(kv, 8);
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -577,7 +597,7 @@ mod tests {
             head_dim: 64,
             vocab_size: 1000,
         };
-        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16));
+        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1));
         let sched = Scheduler::new(kv, 8);
 
         // 18 tokens → 1 full block (16 tokens) + 2 leftover.
@@ -627,7 +647,7 @@ mod tests {
             head_dim: 64,
             vocab_size: 1000,
         };
-        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16));
+        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1));
         let sched = Scheduler::new(kv, 8);
 
         // Shared prefix: tokens 1-16

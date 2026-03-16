@@ -7,6 +7,195 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.0] - 2026-03-15
+
+### Added
+
+- **`fox search <query>`** — search HuggingFace Hub for GGUF models in real time.
+  Results are sorted by downloads (default) or likes (`--sort likes`), show repo name,
+  download count, and like count, and mark already-downloaded models with `✓`.
+  Supports multi-word queries (`fox search qwen coder`) and `--limit N`.
+
+- **`fox pull` friendly name resolution** — `fox pull` now searches HuggingFace
+  automatically when given a friendly name instead of a raw `owner/repo` path.
+  The top result by downloads is selected.
+
+- **`fox pull` model spec syntax** — extended pull syntax for specifying size and
+  quantization without knowing the exact filename:
+  - `fox pull gemma3` — top HF result, balanced quant auto-selected
+  - `fox pull gemma3:12b` — top result for "gemma3 12b"
+  - `fox pull gemma3:12b-q4` — top result for "gemma3 12b", Q4 variant (picks `Q4_K_M`)
+  - `fox pull owner/repo:q5` — exact repo + quant prefix
+  - When a quant prefix matches multiple files (e.g. `q4` → `Q4_K_M`, `Q4_K_S`, `Q4_0`),
+    the most balanced variant is selected automatically (`Q4_K_M` > `Q4_K_S` > `Q4_0`).
+
+- **`fox bench <model>`** — local single-model benchmark subcommand. Measures cold load
+  time, TTFT, and generation throughput (tok/s). Supports `--runs N` to average across
+  multiple runs and `--compare-model <name>` to run a back-to-back comparison between
+  two local models.
+
+- **`fox alias set/list/rm`** — manage model name aliases directly from the CLI without
+  editing the TOML file. Changes are persisted to `~/.config/ferrumox/aliases.toml`.
+
+- **`fox run <model>`** — model name resolution for the CLI. `fox run` now accepts a
+  model name (alias, stem, or substring) in addition to a full file path. Resolution
+  follows the same alias → exact stem → starts-with → contains order used by the server.
+
+- **`fox-bench --compare-url <URL>`** — run the same workload against two servers in
+  parallel and display a side-by-side comparison table with improvement percentages for
+  TTFT P50/P95, latency P50/P95/P99, and throughput. Designed for benchmarking
+  ferrumox vs Ollama.
+
+- **`fox-bench --output json`** — emit the full benchmark report as structured JSON
+  (including `primary`, `comparison`, and `improvement` keys). Suitable for embedding
+  in CI pipelines or README generation.
+
+- **`fox-bench --label` / `--compare-label`** — custom labels for the two servers in
+  the comparison table (defaults: `ferrumox` / `ollama`).
+
+- **System resource metrics in `fox-bench`** — the benchmark tool now samples and
+  reports CPU usage, RAM consumption, and GPU utilisation (via `nvidia-smi`) alongside
+  inference metrics. Actual token counts are taken from the `usage` field of each
+  response rather than estimated.
+
+- **REPL multiline input** — typing `"""` in the REPL enters multiline mode; a second
+  `"""` on its own line submits the full block. Useful for pasting code or long prompts.
+
+- **REPL `/think` toggle** — `/think` in the REPL toggles display of the model's
+  `<think>…</think>` reasoning block on/off without restarting the session.
+
+- **REPL tok/s display** — the per-turn status line now shows tokens/s alongside token
+  count and elapsed time.
+
+- **`--type-kv` flag** (`FOX_TYPE_KV`, values: `f16` / `q8_0` / `q4_0`, default `f16`)
+  — sets the KV cache element type. `q8_0` and `q4_0` reduce VRAM usage at the cost of
+  a small quality difference. Wired through `RegistryConfig` and into `LlamaCppModel`.
+
+- **Dynamic GPU backend loading** — `build.rs` no longer requires CUDA or Metal at
+  compile time. The CUDA (`.so`) and Metal (`.metallib`) backends are detected and
+  loaded at runtime via `llama_backend_load`, enabling a single binary to run on CPU,
+  CUDA, or Metal hardware without recompilation.
+
+- **Model-native stop token handling** — `Model::stop_tokens()` enumerates all
+  EOG/role-separator control tokens from the vocabulary at load time and registers them
+  as `model_control_patterns` in `PerRequestState`. Output filtering now uses these
+  patterns instead of a hard-coded list, ensuring correct generation termination for
+  any model family.
+
+- **`scripts/benchmark.sh`** — reproducible benchmark script. Starts ferrumox if not
+  already running, detects Ollama, runs fox-bench, and appends results to
+  `benches/results.md` with timestamp, hardware, model, and all metrics.
+
+- **`examples/curl.sh`** — curl examples for all API routes (health, models, chat,
+  completions, embeddings, Ollama endpoints, JSON mode, stop sequences, metrics).
+
+- **`examples/openwebui.md`** — step-by-step guide to connect Open WebUI to ferrumox,
+  including Docker setup, multi-model config, and aliases.
+
+- **`examples/langchain.py`** — five LangChain integration examples: basic chat,
+  streaming, prompt templates + LLMChain, embeddings with cosine similarity, and
+  structured JSON output.
+
+- **README rewrite** — new developer-facing README with benchmark table, 3-command
+  quick start, client compatibility table, explanation of prefix caching and continuous
+  batching, full API reference, and project structure.
+
+- **API key authentication** — optional Bearer token auth for all API endpoints.
+  Set `FOX_API_KEY` (or `--api-key` on `fox serve`) to require an `Authorization: Bearer <key>`
+  header on every request. Requests without a valid key receive HTTP 401. When the flag is
+  unset the server remains open (previous behaviour). New file `src/api/auth.rs`; implemented
+  as an Axum middleware layer so it covers all routes uniformly.
+
+- **Vulkan backend on Windows** — `build.rs` now detects the Vulkan SDK on Windows and
+  compiles `libggml-vulkan`. The release workflow installs the Vulkan SDK in CI and packages
+  the resulting DLL in the Windows tarball, producing a self-contained GPU-accelerated binary
+  with no extra runtime dependencies.
+
+- **`scripts/build-release-local.sh`** — script to build and package release tarballs locally,
+  mirroring the CI release process for testing before tagging.
+
+- **Test suite for config and pull handler** — unit tests covering: TOML config file
+  parsing, error handling for invalid/missing keys, env-var path resolution, pull status
+  JSON serialisation, GGUF file selection logic, and model spec matching.
+
+- **GPU/RAM display in `fox run` REPL** — on startup and in the per-turn status line the
+  REPL now shows live GPU memory usage and process RSS alongside token count and speed.
+  Uses the same `get_gpu_info` / `get_ram_info` helpers exposed in `src/cli/mod.rs`.
+
+- **`initial_in_thinking` sampling parameter** — allows starting generation already inside a
+  `<think>` block (needed for reasoning models that open the tag before the first token).
+
+### Changed
+
+- `Cargo.toml`: version bumped to `1.0.0`.
+- `src/api/routes.rs`: `GET /api/version` now returns `{"version":"1.0.0"}`.
+- GPU build no longer requires compile-time CUDA/Metal feature flags; backends are
+  loaded dynamically at runtime.
+- Prefix cache now skips insertion when the seq_id pool is exhausted, preventing
+  silent request mishandling under high concurrency.
+
+### Fixed
+
+- `fox search` result ordering and query handling bugs.
+- `fox pull` error feedback when a requested model or quant variant is not found.
+- Incomplete UTF-8 sequences no longer produce artifacts in streamed output; the output
+  filter now buffers partial multi-byte sequences and flushes them once complete.
+- Raw byte accumulation in the model layer ensures multi-token byte-level sequences
+  (e.g. non-ASCII characters split across BPE tokens) are decoded correctly.
+
+---
+
+## [0.10.0] - 2026-03-10
+
+### Added
+
+- **`GET /api/version`** — returns `{"version":"0.10.0"}`. Ollama clients (Open WebUI,
+  Continue.dev, etc.) call this endpoint on startup to detect the server.
+
+- **`POST /api/generate`** (native Ollama) — generation with NDJSON streaming. Accepts `model`,
+  `prompt`, `system`, `stream`, and `options` (`temperature`, `top_p`, `top_k`, `repeat_penalty`,
+  `seed`, `num_predict`, `stop`). Compatible with `ollama run` and native Ollama clients.
+
+- **`POST /api/chat`** (native Ollama) — chat with NDJSON streaming. Format `{"message":{"role","content"}}`.
+  Compatible with Open WebUI using the Ollama backend.
+
+- **Keep-alive / time-based eviction** — `--keep-alive-secs` (`FOX_KEEP_ALIVE_SECS`, default 300).
+  Models idle for longer than this duration are automatically unloaded from memory.
+  Background task uses `Arc::downgrade` for clean lifecycle management. Set to 0 to never evict by time.
+
+- **`fox serve` without mandatory `--model-path`** — the flag is now optional. Without it, the
+  server starts in lazy mode: models are loaded on the first request that needs them. The primary
+  model for `/health` is automatically detected from the first `.gguf` in `models_dir`.
+
+- **Request cancellation** — when a client disconnects mid-stream, the engine detects the closed
+  channel (`send()` returns `Err`) and cancels the request immediately, freeing the KV cache block
+  and the scheduler slot.
+
+- **Function calling / tool use** — `tools: [{type:"function", function:{name, description, parameters}}]`
+  and `tool_choice` in `POST /v1/chat/completions`. Tools are injected as a system message in JSON
+  format; the response is parsed to detect `{"name":..., "arguments":{...}}` and returned as
+  `tool_calls` in the response. Streaming is automatically disabled when tools are present
+  (required to parse the full response).
+
+- **Structured output** — `response_format: {"type": "json_object"}` injects the instruction
+  "Respond ONLY with valid JSON" into the system prompt for compatible models.
+
+- **Config file** — `~/.config/ferrumox/config.toml` (or `$FOX_CONFIG`). Values are applied
+  before clap parses CLI arguments (via env vars), so explicit flags always take precedence.
+  Supported fields: `model_path`, `host`, `port`, `max_models`, `keep_alive_secs`,
+  `system_prompt`, `gpu_memory_fraction`, `max_batch_size`, `max_context_len`,
+  `block_size`, `hf_token`, `alias_file`, `json_logs`.
+
+### Changed
+
+- `model_path` in `fox serve` is now optional (previously required).
+- `--keep-alive-secs` added to `ServeArgs` (default 300 s).
+- `OllamaOptions` new shared type used by both `/api/generate` and `/api/chat`.
+- `ChatCompletionRequest` extended with `tools`, `tool_choice`, `response_format`.
+- `ChatMessageResponse` extended with `tool_calls: Option<Vec<ToolCall>>`.
+
+---
+
 ## [0.9.0] - 2026-03-15
 
 ### Added

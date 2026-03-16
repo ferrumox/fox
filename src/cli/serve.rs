@@ -1,6 +1,5 @@
 // `fox serve` — start the OpenAI-compatible HTTP inference server.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,14 +12,16 @@ use crate::metrics::Metrics;
 use crate::model_registry::{ModelRegistry, RegistryConfig};
 
 use super::get_gpu_memory_bytes;
+use super::list_models;
+use super::load_aliases;
 use super::models_dir as default_models_dir;
 use super::theme;
 
 #[derive(Parser, Debug, Clone)]
 pub struct ServeArgs {
-    /// Path to the GGUF model file
+    /// Path to the GGUF model file (optional; if omitted models are loaded on demand)
     #[arg(long, env = "FOX_MODEL_PATH")]
-    pub model_path: PathBuf,
+    pub model_path: Option<PathBuf>,
 
     /// Fraction of GPU memory to use for KV cache (0.0-1.0)
     #[arg(long, default_value = "0.85", env = "FOX_GPU_MEMORY_FRACTION")]
@@ -56,13 +57,6 @@ pub struct ServeArgs {
     pub system_prompt: String,
 
     /// Fraction of GPU memory reserved for CPU↔GPU KV-cache swap space (0.0-1.0).
-    ///
-    /// When GPU memory is exhausted, preempted requests will have their KV blocks
-    /// swapped to CPU RAM instead of being discarded (re-prefill not required on
-    /// resume).  Set to 0 to disable swapping (default).
-    ///
-    /// Note: swap transfer is currently a placeholder pending llama.cpp tensor-access
-    /// API availability.  The flag is accepted to avoid breaking future config files.
     #[arg(long, default_value = "0.0", env = "FOX_SWAP_FRACTION")]
     pub swap_fraction: f32,
 
@@ -82,6 +76,27 @@ pub struct ServeArgs {
     /// Path to aliases TOML file. Default: ~/.config/ferrumox/aliases.toml
     #[arg(long, env = "FOX_ALIAS_FILE")]
     pub alias_file: Option<PathBuf>,
+
+    /// Seconds a model stays in memory after its last request (0 = never evict by time).
+    #[arg(long, default_value = "300", env = "FOX_KEEP_ALIVE_SECS")]
+    pub keep_alive_secs: u64,
+
+    /// KV cache quantization: f16 (default), q8_0, q4_0
+    #[arg(long, default_value = "f16", env = "FOX_TYPE_KV")]
+    pub type_kv: String,
+
+    /// Require `Authorization: Bearer <key>` on every API request.
+    /// Omit to run without authentication.
+    #[arg(long, env = "FOX_API_KEY")]
+    pub api_key: Option<String>,
+}
+
+fn parse_type_kv(s: &str) -> u32 {
+    match s {
+        "q8_0" => 8,
+        "q4_0" => 2,
+        _ => 1, // f16
+    }
 }
 
 pub async fn run_serve(args: ServeArgs) -> Result<()> {
@@ -106,13 +121,6 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             .with(tracing_subscriber::fmt::layer().pretty())
             .init();
     }
-
-    let model_name = args
-        .model_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("default")
-        .to_string();
 
     let gpu_memory_bytes = get_gpu_memory_bytes();
 
@@ -141,17 +149,52 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         gpu_memory_bytes,
         gpu_memory_fraction: args.gpu_memory_fraction,
         metrics,
+        keep_alive_secs: args.keep_alive_secs,
+        type_kv: parse_type_kv(&args.type_kv),
     };
 
     let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));
 
-    // Pre-load the initial model so the first request is instant.
-    tracing::info!("loading model from {:?}", args.model_path);
-    registry.get_or_load(&model_name).await?;
+    // Pre-load the initial model if specified; otherwise use lazy loading.
+    let primary_model = match &args.model_path {
+        Some(path) => {
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("default")
+                .to_string();
+            tracing::info!("pre-loading model from {:?}", path);
+            registry.get_or_load(&name).await?;
+            name
+        }
+        None => {
+            // Lazy mode: discover the first model in models_dir as the primary.
+            let first = list_models(&models_dir)
+                .unwrap_or_default()
+                .into_iter()
+                .next()
+                .and_then(|(p, _)| p.file_stem().and_then(|s| s.to_str()).map(str::to_string));
+            if let Some(ref name) = first {
+                tracing::info!("lazy mode: primary model set to '{}' (not pre-loaded)", name);
+            } else {
+                tracing::warn!(
+                    "no model specified and no .gguf files found in {}; \
+                     requests will fail until a model is available",
+                    models_dir.display()
+                );
+            }
+            first.unwrap_or_default()
+        }
+    };
+
+    // Start background keep-alive eviction task.
+    std::sync::Arc::clone(&registry).start_eviction_task();
 
     let addr: std::net::SocketAddr = format!("{}:{}", args.host, args.port)
         .parse()
-        .map_err(|e| anyhow::anyhow!("invalid bind address '{}:{}': {}", args.host, args.port, e))?;
+        .map_err(|e| {
+            anyhow::anyhow!("invalid bind address '{}:{}': {}", args.host, args.port, e)
+        })?;
 
     let system_prompt = if args.system_prompt.is_empty() {
         None
@@ -164,18 +207,28 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         .unwrap_or_default()
         .as_secs();
 
+    if args.api_key.is_some() {
+        tracing::info!("API key authentication enabled");
+    }
+
     let app = router(
         registry,
-        model_name.clone(),
+        primary_model.clone(),
         system_prompt,
         started_at,
         models_dir,
         args.hf_token,
+        args.api_key,
     )
     .layer(tower_http::cors::CorsLayer::permissive());
 
     tracing::info!("listening on {}", addr);
-    theme::print_serve_ready(&model_name, &addr.to_string());
+    let display_name = if primary_model.is_empty() {
+        "none (lazy)"
+    } else {
+        &primary_model
+    };
+    theme::print_serve_ready(display_name, &addr.to_string());
 
     let server = axum::serve(tokio::net::TcpListener::bind(addr).await?, app);
 
@@ -211,47 +264,3 @@ async fn shutdown_signal() {
     ctrl_c.await;
 }
 
-/// Load aliases from a TOML file.
-///
-/// The file format is:
-/// ```toml
-/// [aliases]
-/// "llama3" = "Llama-3.2-3B-Instruct-f16"
-/// ```
-///
-/// If the file does not exist or cannot be parsed, returns an empty map.
-fn load_aliases(path: Option<PathBuf>) -> HashMap<String, String> {
-    let path = path.unwrap_or_else(|| {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(home).join(".config/ferrumox/aliases.toml")
-    });
-
-    if !path.exists() {
-        return HashMap::new();
-    }
-
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("failed to read alias file {:?}: {}", path, e);
-            return HashMap::new();
-        }
-    };
-
-    #[derive(serde::Deserialize)]
-    struct AliasesFile {
-        #[serde(default)]
-        aliases: HashMap<String, String>,
-    }
-
-    match toml::from_str::<AliasesFile>(&content) {
-        Ok(f) => {
-            tracing::info!("loaded {} alias(es) from {:?}", f.aliases.len(), path);
-            f.aliases
-        }
-        Err(e) => {
-            tracing::warn!("failed to parse alias file {:?}: {}", path, e);
-            HashMap::new()
-        }
-    }
-}

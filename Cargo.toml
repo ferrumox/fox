@@ -1,18 +1,15 @@
 [package]
 name = "ferrumox"
-version = "0.9.0"
+version = "1.0.0"
 edition = "2021"
 description = "High-performance LLM inference engine - alternative to Ollama and vLLM"
 license = "MIT OR Apache-2.0"
 
 [features]
 default = []
-cuda = []
-metal = []
-cpu-only = []
 
 [dependencies]
-tokio = { version = "1.41", features = ["rt-multi-thread", "sync", "time", "macros", "signal"] }
+tokio = { version = "1.41", features = ["rt-multi-thread", "sync", "time", "macros", "signal", "process"] }
 axum = { version = "0.7", features = ["json", "macros"] }
 tower-http = { version = "0.5", features = ["cors"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -39,6 +36,8 @@ hex = "0.4"
 lru = "0.16.3"
 dashmap = "6"
 toml = "0.8"
+bytes = "1"
+dirs = "5"
 
 # Optional
 
@@ -57,3 +56,6 @@ path = "src/bin/bench.rs"
 
 [dev-dependencies]
 tokio-test = "0.4"
+tempfile = "3"
+tower = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"
