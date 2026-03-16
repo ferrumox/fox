@@ -49,12 +49,12 @@ pub fn print_styled(color: Option<Color>, bold: bool, dim: bool, text: &str) {
 // ── Semantic helpers ─────────────────────────────────────────────────────────
 
 /// Print the REPL banner to stderr:
-/// ```
+/// ```text
 ///   🦊  <model_name bold white>
 ///   ─────────────────────────────── (dim)
 ///   /bye or Ctrl+D to exit · /think to toggle reasoning · N tokens  (dim)
 /// ```
-pub fn print_banner(model_name: &str, context_len: u32) {
+pub fn print_banner(model_name: &str, _context_len: u32) {
     eprint_styled(None, false, false, "  🦊  ");
     eprint_styled(Some(Color::White), true, false, model_name);
     eprintln!();
@@ -63,10 +63,7 @@ pub fn print_banner(model_name: &str, context_len: u32) {
         None,
         false,
         true,
-        &format!(
-            "  /bye or Ctrl+D to exit · /think to toggle reasoning · {} tokens\n\n",
-            context_len
-        ),
+        "  /bye or Ctrl+D to exit · /think to toggle reasoning\n\n",
     );
 }
 
@@ -165,4 +162,65 @@ pub fn eprint_kv_pair(key: &str, value: &str) {
     eprint!("  ");
     eprint_styled(None, true, true, &format!("{:<14}", key));
     eprintln!("  {}", value);
+}
+
+/// Print the system info block (GPU, RAM, ctx) to stderr at REPL startup.
+/// GPU line is omitted when `gpu` is `None`; RAM line omitted when `total_bytes == 0`.
+/// Only total VRAM is shown at startup (used VRAM is unreliable before CUDA pages settle).
+pub fn print_system_info(gpu: Option<&super::GpuInfo>, ram: &super::RamInfo, max_ctx: u32) {
+    if let Some(g) = gpu {
+        let total_gb = g.total_bytes as f64 / 1_073_741_824.0;
+        eprint_styled(
+            None,
+            false,
+            true,
+            &format!("  GPU  · {}  ·  {:.1} GB\n", g.name, total_gb),
+        );
+    }
+    if ram.total_bytes > 0 {
+        let used_gb = ram.used_bytes as f64 / 1_073_741_824.0;
+        let total_gb = ram.total_bytes as f64 / 1_073_741_824.0;
+        eprint_styled(
+            None,
+            false,
+            true,
+            &format!("  RAM  · {:.1} / {:.1} GB\n", used_gb, total_gb),
+        );
+    }
+    eprint_styled(None, false, true, &format!("  ctx  · {} tokens máx\n\n", max_ctx));
+}
+
+/// Print the compact post-response status line to stderr:
+/// `  ctx: 847/4096 · GPU: 4.8 GB · RAM: 13.9 GB · 14.3 tok/s`
+///
+/// ctx colour: green < 70%, yellow < 90%, red ≥ 90%.
+/// GPU/RAM segments omitted when unavailable.
+pub fn print_status_line(
+    ctx_used: usize,
+    ctx_max: u32,
+    gpu: Option<&super::GpuInfo>,
+    ram: &super::RamInfo,
+    tok_per_sec: f64,
+) {
+    let ratio = if ctx_max > 0 { ctx_used as f64 / ctx_max as f64 } else { 0.0 };
+    let ctx_color = if ratio < 0.7 {
+        Color::Green
+    } else if ratio < 0.9 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+
+    eprint_styled(None, false, true, "  ");
+    eprint_styled(Some(ctx_color), false, true, &format!("ctx: {}/{}", ctx_used, ctx_max));
+
+    if let Some(g) = gpu {
+        let used_gb = g.used_bytes as f64 / 1_073_741_824.0;
+        eprint_styled(None, false, true, &format!(" · GPU: {:.1} GB", used_gb));
+    }
+    if ram.total_bytes > 0 {
+        let used_gb = ram.used_bytes as f64 / 1_073_741_824.0;
+        eprint_styled(None, false, true, &format!(" · RAM: {:.1} GB", used_gb));
+    }
+    eprint_styled(None, false, true, &format!(" · {:.1} tok/s\n\n", tok_per_sec));
 }

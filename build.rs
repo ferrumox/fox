@@ -109,6 +109,38 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=ggml");      // shared: ggml core
     println!("cargo:rustc-link-lib=dylib=ggml-cpu");  // shared: CPU backend (always needed)
 
+    // ── Copy backend .so/.dylib files next to the fox binary ─────────────────
+    // OUT_DIR is target/{profile}/build/ferrumox-<hash>/out — three levels up
+    // gives target/{profile}/, which is where the fox binary lands.
+    // This ensures both `cargo build` (debug) and `cargo build --release` have
+    // the backend shared libraries in the same directory as the binary.
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let bin_dest = out_dir
+        .parent() // ferrumox-<hash>
+        .and_then(|p| p.parent()) // build/
+        .and_then(|p| p.parent()) // target/{profile}/
+        .map(|p| p.to_path_buf());
+
+    if let Some(ref dest) = bin_dest {
+        let so_ext = if target_os == "macos" { "dylib" } else { "so" };
+        for search_dir in &[&llama_lib, &ggml_src, &bin_out] {
+            if let Ok(entries) = std::fs::read_dir(search_dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let p = entry.path();
+                    let is_backend = p.extension().and_then(|e| e.to_str()) == Some(so_ext)
+                        && p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.starts_with("libggml-"))
+                            .unwrap_or(false);
+                    if is_backend {
+                        let dst = dest.join(p.file_name().unwrap());
+                        let _ = std::fs::copy(&p, &dst);
+                    }
+                }
+            }
+        }
+    }
+
     // ── RPATH: find backend .so files next to the fox binary ($ORIGIN) ────────
     // This lets users copy fox + libggml-cuda.so to any directory and have it
     // just work without LD_LIBRARY_PATH.

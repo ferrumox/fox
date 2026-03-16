@@ -39,6 +39,11 @@ pub(super) struct PerRequestState {
     /// `CONTROL_TOKEN_PATTERNS`: held back in `pending_output` until the full
     /// pattern is assembled, then suppressed and generation stops.
     pub(super) model_control_patterns: Vec<String>,
+    /// Accumulator for raw token bytes that may form an incomplete UTF-8 sequence
+    /// (e.g. the first two bytes of a 4-byte emoji split across BPE tokens).
+    /// Bytes are drained into valid UTF-8 strings before entering the filter
+    /// pipeline, preventing `String::from_utf8_lossy` replacement artifacts (??).
+    pub(super) utf8_buf: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +243,32 @@ pub(super) fn check_stop_sequences(
     // No match — trim the buffer to avoid unbounded growth.
     trim_text_buffer(&mut state.text_buffer, max_stop_len);
     (new_text, false)
+}
+
+/// Drain as many complete UTF-8 codepoints as possible from the front of `buf`.
+///
+/// Returns the valid UTF-8 prefix as a `String` and leaves any trailing
+/// incomplete byte sequence in `buf` to be completed by the next token.
+/// At EOS, callers should call this with an empty append (no-op) and then
+/// discard any residual bytes (which represent a malformed sequence).
+pub(super) fn drain_valid_utf8(buf: &mut Vec<u8>) -> String {
+    if buf.is_empty() {
+        return String::new();
+    }
+    match std::str::from_utf8(buf) {
+        Ok(s) => {
+            let result = s.to_string();
+            buf.clear();
+            result
+        }
+        Err(e) => {
+            let valid_up_to = e.valid_up_to();
+            // SAFETY: valid_up_to is guaranteed by from_utf8 to be a char boundary.
+            let valid = unsafe { std::str::from_utf8_unchecked(&buf[..valid_up_to]) }.to_string();
+            *buf = buf[valid_up_to..].to_vec();
+            valid
+        }
+    }
 }
 
 /// Keep only the trailing `max_stop_len` characters of the buffer (aligned to a char boundary).

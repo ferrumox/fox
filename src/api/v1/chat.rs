@@ -65,6 +65,7 @@ pub async fn chat_completions(
         seed: req.seed,
         stop: req.stop.clone(),
         show_thinking: false,
+        initial_in_thinking: false,
     };
 
     let req_id = entry.engine.next_request_id();

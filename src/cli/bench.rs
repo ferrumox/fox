@@ -131,6 +131,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
             seed: Some(42),
             stop: None,
             show_thinking: false,
+        initial_in_thinking: false,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

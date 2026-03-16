@@ -115,6 +115,18 @@ pub trait Model: Send + Sync {
 
     fn token_to_piece(&self, token: i32) -> Result<String>;
 
+    /// Returns the raw bytes produced by `llama_token_to_piece` without UTF-8
+    /// validation or lossy replacement.  Used by the engine to accumulate
+    /// per-request byte buffers so that multi-token UTF-8 sequences (e.g. emoji
+    /// split across BPE tokens) are decoded correctly.
+    ///
+    /// The default implementation encodes the `token_to_piece` String back to
+    /// bytes, which is safe for stub/mock models that already return valid UTF-8.
+    /// `LlamaCppModel` overrides this to return the actual raw C bytes.
+    fn token_to_piece_bytes(&self, token: i32) -> Vec<u8> {
+        self.token_to_piece(token).unwrap_or_default().into_bytes()
+    }
+
     /// Apply chat template to messages. Returns formatted prompt for tokenization.
     /// Fallback: simple "role: content\n" concatenation if template unavailable.
     fn apply_chat_template(&self, messages: &[(String, String)]) -> Result<String>;
@@ -399,6 +411,15 @@ impl LlamaCppModel {
         gpu_memory_fraction: f32,
         type_kv: u32,
     ) -> Result<Self> {
+        // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
+        // Fox shows its own clean progress spinner instead.
+        unsafe extern "C" fn noop_log(
+            _level: ffi::ggml_log_level,
+            _text: *const std::os::raw::c_char,
+            _user_data: *mut std::os::raw::c_void,
+        ) {}
+        unsafe { ffi::llama_log_set(Some(noop_log), std::ptr::null_mut()) };
+
         // Load GPU/CPU backends compiled as dynamic libraries (GGML_BACKEND_DL).
         // Passing null searches the executable's directory and cwd — fox ships
         // libggml-cuda.so and libggml-cpu.so next to the binary.
@@ -575,6 +596,51 @@ impl LlamaCppModel {
             if n as usize <= buf.len() {
                 let s = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
                 return Ok(s);
+            }
+            buf.resize(n as usize, 0);
+        }
+    }
+
+    /// Raw-bytes variant: same as `token_to_piece_impl` but returns `Vec<u8>`
+    /// without any UTF-8 validation so the engine can accumulate partial
+    /// multi-byte sequences (e.g. emoji split across BPE tokens) before decoding.
+    fn token_to_piece_bytes_impl(&self, token: i32) -> Vec<u8> {
+        let vocab = self.vocab;
+        if vocab.is_null() {
+            return vec![];
+        }
+        let mut buf = vec![0u8; 64];
+        loop {
+            let n = unsafe {
+                ffi::llama_token_to_piece(
+                    vocab,
+                    token,
+                    buf.as_mut_ptr() as *mut std::ffi::c_char,
+                    buf.len() as i32,
+                    0,
+                    true,
+                )
+            };
+            if n < 0 {
+                let need = (-n) as usize;
+                buf.resize(need, 0);
+                let n2 = unsafe {
+                    ffi::llama_token_to_piece(
+                        vocab,
+                        token,
+                        buf.as_mut_ptr() as *mut std::ffi::c_char,
+                        buf.len() as i32,
+                        0,
+                        true,
+                    )
+                };
+                if n2 < 0 {
+                    return vec![];
+                }
+                return buf[..n2 as usize].to_vec();
+            }
+            if (n as usize) <= buf.len() {
+                return buf[..n as usize].to_vec();
             }
             buf.resize(n as usize, 0);
         }
@@ -1034,6 +1100,10 @@ impl Model for LlamaCppModel {
         self.token_to_piece_impl(token)
     }
 
+    fn token_to_piece_bytes(&self, token: i32) -> Vec<u8> {
+        self.token_to_piece_bytes_impl(token)
+    }
+
     fn apply_chat_template(&self, messages: &[(String, String)]) -> Result<String> {
         self.apply_chat_template_impl(messages)
     }
@@ -1094,21 +1164,22 @@ impl Model for LlamaCppModel {
 
     fn stop_tokens(&self) -> Vec<String> {
         let mut result: Vec<String> = Vec::new();
-        // Collect the text form of every control token in the vocabulary.
+        // Collect the text form of every control OR EOG token in the vocabulary.
         //
-        // This includes:
-        //   - EOG tokens (EOS/EOT variants like `<|endoftext|>`, `<|end|>`)
-        //   - Role-separator tokens (`<|user|>`, `<|system|>`, `<|assistant|>`, …)
+        // This covers:
+        //   - Control tokens: role separators (`<|user|>`, `<|system|>`, …)
+        //   - EOG tokens: EOS/EOT variants (`<|endoftext|>`, `<|im_end|>`, model-specific
+        //     stop markers like `,<!__EOF teleport>`, etc.)
         //
-        // Both categories must be treated as stop signals: if the model emits any
-        // of them mid-generation it has crossed a turn boundary and should stop.
-        // `is_eog_token()` already handles the token-ID path; these text patterns
-        // are needed for the rare case where llama.cpp returns the token ID as a
-        // non-EOG but the text representation is a control delimiter.
+        // `is_eog_token()` suppresses these by token ID when llama.cpp recognises them
+        // correctly.  Adding their text forms here ensures the text-based filter also
+        // catches them when the model spells out the stop sequence as regular tokens
+        // (which happens on some quants where the EOG flag is missing from metadata).
         let n_tokens = unsafe { ffi::llama_vocab_n_tokens(self.vocab) };
         for token_id in 0..n_tokens {
             let is_control = unsafe { ffi::llama_vocab_is_control(self.vocab, token_id) };
-            if !is_control {
+            let is_eog = unsafe { ffi::llama_vocab_is_eog(self.vocab, token_id) };
+            if !is_control && !is_eog {
                 continue;
             }
             if let Ok(s) = self.token_to_piece_impl(token_id) {

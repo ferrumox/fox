@@ -4,7 +4,7 @@ mod ffi;
 pub mod model;
 mod output_filter;
 
-use output_filter::{apply_output_filter, check_stop_sequences, PerRequestState};
+use output_filter::{apply_output_filter, check_stop_sequences, drain_valid_utf8, PerRequestState};
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -327,13 +327,14 @@ impl InferenceEngine {
             let _ = eos_token_id; // kept for metrics / future use
             let reached_max = req.generated_tokens + 1 >= req.max_new_tokens;
 
-            // Detokenize (EOS tokens produce empty text to avoid leaking control tokens).
-            let raw_text = if is_eos {
-                String::new()
+            // Detokenize to raw bytes (EOS tokens produce no bytes).
+            // Bytes may represent an incomplete UTF-8 sequence (e.g. the first two bytes
+            // of a 4-byte emoji split across BPE tokens).  They are accumulated in the
+            // per-request state buffer below and only decoded when complete.
+            let token_bytes: Vec<u8> = if is_eos {
+                vec![]
             } else {
-                let mut t = self.model.token_to_piece(token_id).unwrap_or_default();
-                t = t.replace(SPM_SPACE, " ");
-                t
+                self.model.token_to_piece_bytes(token_id)
             };
 
             // Apply output filtering AND stop sequence detection in a single lock scope.
@@ -341,7 +342,8 @@ impl InferenceEngine {
                 let mut state_map = match self.per_request_state.lock() {
                     Ok(g) => g,
                     Err(_) => {
-                        // Lock poisoned — skip processing, emit raw text with no stop check.
+                        // Lock poisoned — skip processing, emit lossy text with no stop check.
+                        let raw_text = String::from_utf8_lossy(&token_bytes).into_owned();
                         if req.response_tx.send(Token {
                             id: *req_id,
                             token_id,
@@ -361,9 +363,17 @@ impl InferenceEngine {
                 let model_control_patterns = self.model_stop_tokens.clone();
                 let state = state_map.entry(*req_id).or_insert_with(|| PerRequestState {
                     show_thinking: req.sampling.show_thinking,
+                    in_thinking: req.sampling.initial_in_thinking,
                     model_control_patterns,
                     ..Default::default()
                 });
+
+                // Accumulate raw token bytes and drain complete UTF-8 codepoints.
+                // This prevents "??" artifacts when multi-byte characters (e.g. emoji)
+                // are split across BPE tokens and passed through from_utf8_lossy.
+                state.utf8_buf.extend_from_slice(&token_bytes);
+                let raw_text = drain_valid_utf8(&mut state.utf8_buf)
+                    .replace(SPM_SPACE, " ");
 
                 // Stage 1: thinking-block suppression + control-token holdback.
                 // Returns (filtered_text, control_stop) where control_stop is true when a

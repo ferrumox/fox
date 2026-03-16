@@ -22,6 +22,12 @@ pub struct SamplingParams {
     /// When true, emit `<think>…</think>` reasoning tokens to the output stream
     /// instead of silently discarding them.  Useful for debugging or transparency.
     pub show_thinking: bool,
+    /// When true, the engine initialises the per-request output filter with
+    /// `in_thinking = true`, indicating that the prompt already ends with an
+    /// open `<think>` tag and the first generated tokens are reasoning content.
+    /// Set together with `show_thinking` when the caller has appended `<think>`
+    /// to the prompt to force the model into thinking mode (Qwen3-style).
+    pub initial_in_thinking: bool,
 }
 
 impl Default for SamplingParams {
@@ -34,6 +40,7 @@ impl Default for SamplingParams {
             seed: None,
             stop: None,
             show_thinking: false,
+            initial_in_thinking: false,
         }
     }
 }

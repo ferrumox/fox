@@ -19,7 +19,7 @@ use crate::engine::InferenceEngine;
 use crate::kv_cache::KVCacheManager;
 use crate::scheduler::{InferenceRequest, SamplingParams};
 
-use super::get_gpu_memory_bytes;
+use super::{get_gpu_info, get_gpu_memory_bytes, get_ram_info};
 use super::resolve_model_path;
 use super::theme;
 
@@ -187,6 +187,9 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
     let model_name = engine.model_name();
 
     theme::print_banner(model_name, args.max_context_len);
+    let startup_gpu = get_gpu_info();
+    let startup_ram = get_ram_info();
+    theme::print_system_info(startup_gpu.as_ref(), &startup_ram, args.max_context_len);
 
     // Keep the engine loop running for the lifetime of the session.
     let engine_loop = {
@@ -291,17 +294,6 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
         println!();
         let secs = elapsed.as_secs_f64();
         let toks_per_sec = if secs > 0.0 { token_count as f64 / secs } else { 0.0 };
-        theme::eprint_styled(
-            None,
-            false,
-            true,
-            &format!(
-                "  {} tokens · {:.1}s · {:.1} tok/s\n\n",
-                token_count,
-                secs,
-                toks_per_sec
-            ),
-        );
 
         if response.is_empty() {
             eprintln!("(Context window full — clearing conversation history.)");
@@ -310,6 +302,14 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
         } else {
             messages.push(("assistant".to_string(), response));
         }
+
+        let ctx_tokens = engine
+            .apply_chat_template(&messages)
+            .and_then(|p| engine.tokenize(&p).map(|t| t.len()))
+            .unwrap_or(0);
+        let gpu_info = get_gpu_info();
+        let ram_info = get_ram_info();
+        theme::print_status_line(ctx_tokens, args.max_context_len, gpu_info.as_ref(), &ram_info, toks_per_sec);
     }
 
     engine_loop.abort();
@@ -324,7 +324,7 @@ async fn stream_turn_collecting(
     spinner: ProgressBar,
     show_thinking: bool,
 ) -> Result<(String, usize)> {
-    let prompt = engine.apply_chat_template(messages).unwrap_or_else(|_| {
+    let mut prompt = engine.apply_chat_template(messages).unwrap_or_else(|_| {
         messages
             .iter()
             .map(|(r, c)| format!("{}: {}", r, c))
@@ -332,12 +332,21 @@ async fn stream_turn_collecting(
             .join("\n")
     });
 
+    // For models that require an explicit thinking activation (e.g. Qwen3-Instruct),
+    // append the opening <think> tag to the prompt so the model starts in reasoning
+    // mode.  The engine state is also initialised with in_thinking=true so the output
+    // filter knows the first generated tokens are reasoning content, not regular output.
+    if show_thinking {
+        prompt.push_str("<think>\n");
+    }
+
     let prompt_tokens = engine
         .tokenize(&prompt)
         .unwrap_or_else(|_| prompt.bytes().map(|b| b as i32).take(4096).collect());
 
     let mut sampling = build_sampling_params(args);
     sampling.show_thinking = show_thinking;
+    sampling.initial_in_thinking = show_thinking;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let req_id = engine.next_request_id();
@@ -348,6 +357,9 @@ async fn stream_turn_collecting(
     let mut response = String::new();
     let mut token_count: usize = 0;
     let mut first_token = true;
+    // Track whether we are currently inside a <think>…</think> block so we
+    // can apply ANSI dim styling to the reasoning section.
+    let mut in_thinking_display = show_thinking;
 
     while let Some(token) = rx.recv().await {
         if !token.text.is_empty() {
@@ -356,9 +368,29 @@ async fn stream_turn_collecting(
                 eprintln!();
                 theme::print_fox_label();
                 let _ = std::io::stderr().flush();
+                // The <think> tag was injected into the prompt; emit it
+                // synthetically with dim styling so the user sees it.
+                if show_thinking {
+                    print!("\x1b[2m<think>\n");
+                    let _ = stdout.lock().flush();
+                }
                 first_token = false;
             }
-            print!("{}", token.text);
+
+            if in_thinking_display {
+                if let Some(idx) = token.text.find("</think>") {
+                    // Print everything up to and including </think> in dim,
+                    // then reset and print any text that follows normally.
+                    let end = idx + "</think>".len();
+                    print!("{}\x1b[0m{}", &token.text[..end], &token.text[end..]);
+                    in_thinking_display = false;
+                } else {
+                    // Still inside thinking block — dim mode stays active.
+                    print!("{}", token.text);
+                }
+            } else {
+                print!("{}", token.text);
+            }
             let _ = stdout.lock().flush();
             response.push_str(&token.text);
             token_count += 1;
@@ -380,7 +412,7 @@ async fn stream_turn(
     engine: &Arc<InferenceEngine>,
     messages: &[(String, String)],
 ) -> Result<()> {
-    let prompt = engine.apply_chat_template(messages).unwrap_or_else(|_| {
+    let mut prompt = engine.apply_chat_template(messages).unwrap_or_else(|_| {
         messages
             .iter()
             .map(|(r, c)| format!("{}: {}", r, c))
@@ -388,11 +420,16 @@ async fn stream_turn(
             .join("\n")
     });
 
+    if args.show_thinking {
+        prompt.push_str("<think>\n");
+    }
+
     let prompt_tokens = engine
         .tokenize(&prompt)
         .unwrap_or_else(|_| prompt.bytes().map(|b| b as i32).take(4096).collect());
 
-    let sampling = build_sampling_params(args);
+    let mut sampling = build_sampling_params(args);
+    sampling.initial_in_thinking = args.show_thinking;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let req_id = engine.next_request_id();
@@ -408,6 +445,10 @@ async fn stream_turn(
     };
 
     let stdout = std::io::stdout();
+    if args.show_thinking {
+        print!("<think>\n");
+        let _ = stdout.lock().flush();
+    }
     while let Some(token) = rx.recv().await {
         if !token.text.is_empty() {
             print!("{}", token.text);
@@ -431,5 +472,6 @@ fn build_sampling_params(args: &RunArgs) -> SamplingParams {
         seed: args.seed,
         stop: None,
         show_thinking: args.show_thinking,
+        initial_in_thinking: false, // set by callers that force thinking mode
     }
 }
