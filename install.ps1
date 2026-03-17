@@ -1,7 +1,7 @@
 # install.ps1 — Install fox (ferrumox) on Windows from GitHub Releases.
 #
 # Usage (run in PowerShell as Administrator or with user-writable install dir):
-#   irm https://raw.githubusercontent.com/ManuelSLemos/ferrum-engine/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/ferrumox/fox/main/install.ps1 | iex
 #
 # Options (set before piping or pass as env vars):
 #   $env:FOX_VERSION = "v1.0.0"          # specific version (default: latest)
@@ -15,7 +15,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$Repo = "ManuelSLemos/ferrum-engine"
+$Repo = "ferrumox/fox"
 $Target = "x86_64-pc-windows-msvc"
 
 if (-not $InstallDir) {
