@@ -165,10 +165,10 @@ pub trait Model: Send + Sync {
 // StubModel — test-only Model implementation (no FFI)
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub struct StubModel;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 impl Model for StubModel {
     fn prefill_sync(
         &self,

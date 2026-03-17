@@ -39,7 +39,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy (deny warnings)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --features test-helpers -- -D warnings
 
   test:
     name: Tests
@@ -63,7 +63,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: cargo test
-        run: cargo test --all
+        run: cargo test --all --features test-helpers
 
   build-release:
     name: Release Build

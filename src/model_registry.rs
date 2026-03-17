@@ -291,7 +291,7 @@ async fn load_model(name: &str, path: &Path, cfg: &RegistryConfig) -> Result<Eng
 // Test helpers
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 impl EngineEntry {
     /// Build a test `EngineEntry` backed by `StubModel` (no FFI).
     /// Must be called inside a Tokio runtime (i.e. inside `#[tokio::test]`).
@@ -325,7 +325,7 @@ impl EngineEntry {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 impl ModelRegistry {
     /// Inject a pre-built engine entry without touching the filesystem (for tests).
     pub fn preload_for_test(&self, name: impl Into<String>, entry: Arc<EngineEntry>) {

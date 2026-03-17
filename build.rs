@@ -111,9 +111,9 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=llama");
     println!("cargo:rustc-link-lib=dylib=ggml-base"); // shared: core ggml types
     println!("cargo:rustc-link-lib=dylib=ggml"); // shared: backend dlopen registry
-    // NOTE: do NOT link ggml-cpu / ggml-metal / ggml-cuda explicitly.
-    // With GGML_BACKEND_DL=ON they are MODULE libraries loaded at runtime via
-    // dlopen. On macOS, cmake MODULEs use .so which the macOS linker rejects.
+                                                 // NOTE: do NOT link ggml-cpu / ggml-metal / ggml-cuda explicitly.
+                                                 // With GGML_BACKEND_DL=ON they are MODULE libraries loaded at runtime via
+                                                 // dlopen. On macOS, cmake MODULEs use .so which the macOS linker rejects.
 
     // ── Copy backend .so/.dylib files next to the fox binary ─────────────────
     // OUT_DIR is target/{profile}/build/ferrumox-<hash>/out — three levels up
@@ -141,10 +141,7 @@ fn main() {
             if let Ok(entries) = std::fs::read_dir(search_dir) {
                 for entry in entries.filter_map(|e| e.ok()) {
                     let p = entry.path();
-                    let fname = p
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
+                    let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
                     let is_backend = exts.contains(&ext)
                         && (fname.starts_with("libggml-")

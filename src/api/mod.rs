@@ -4,7 +4,7 @@ pub mod ollama;
 pub mod pull_handler;
 mod router;
 pub mod shared;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers;
 mod types;
 pub mod v1;

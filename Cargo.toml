@@ -7,6 +7,9 @@ license = "MIT OR Apache-2.0"
 
 [features]
 default = []
+# Exposes StubModel, EngineEntry::for_test, ModelRegistry::preload_for_test, and
+# test_helpers for use in integration tests under tests/.
+test-helpers = ["dep:tower", "dep:http-body-util"]
 
 [dependencies]
 tokio = { version = "1.41", features = ["rt-multi-thread", "sync", "time", "macros", "signal", "process"] }
@@ -39,7 +42,9 @@ toml = "0.8"
 bytes = "1"
 dirs = "5"
 
-# Optional
+# Optional (enabled via test-helpers feature)
+tower = { version = "0.4", features = ["util"], optional = true }
+http-body-util = { version = "0.1", optional = true }
 
 [build-dependencies]
 bindgen = "0.69"
