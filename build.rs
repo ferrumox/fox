@@ -183,7 +183,7 @@ fn main() {
             }
         }
         _ => {
-            println!("cargo:rustc-link-lib=dylib=stdc++");
+            // Windows MSVC: the C++ runtime is linked automatically by the toolchain.
         }
     }
 
