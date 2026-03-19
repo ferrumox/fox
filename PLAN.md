@@ -153,7 +153,18 @@ LLM inference engine in Rust, open source, with higher throughput than vLLM and 
 | Linux | `.deb` / `.rpm` packages | Built in CI via `cargo-deb` and `cargo-generate-rpm`; systemd unit file included |
 | Linux | AppImage | Single-file portable binary; no root, no package manager required |
 
-**Key files:** `.github/workflows/release.yml`, `build.rs`, `Cargo.toml` (features), `Formula/fox.rb`
+#### Developer Experience
+
+| Feature | Details |
+|---|---|
+| CORS middleware | `tower-http::cors` by default (`Access-Control-Allow-Origin: *`); `--cors-origins` flag to restrict; enables browser-native clients without proxy |
+| Port auto-detection | `--port auto`: scans range 8080–8180, falls back to OS ephemeral; `$FOX_PORT=auto` supported |
+| VRAM estimation on load | Before loading a model, estimate memory requirement (`file_size × 1.8`); warn if available VRAM is tight; recommend `--n-gpu-layers` reduction or MoE offload if >threshold |
+| `fox probe` command | Load a model + optional LoRA, run a dummy forward pass, report success/failure and load time; useful for CI/CD validation before deploying |
+| `fox gpu-info` command | Display detected GPU backend, VRAM total/available, driver version; useful for debugging hardware configuration |
+| GPU backend runtime flag | `--gpu-backend auto\|cuda\|vulkan\|opencl\|cpu`; auto-detect chain: CUDA → Vulkan → OpenCL → CPU; overrides build-time defaults |
+
+**Key files:** `.github/workflows/release.yml`, `build.rs`, `Cargo.toml` (features), `Formula/fox.rb`, `src/cli/serve.rs`, `src/cli/mod.rs`
 **Prerequisite:** none
 **Success criterion:** ferrumox >2x throughput vs Ollama on 7B (RTX 3090), visible in CI; `brew install fox` works on a fresh M-series Mac; Windows binary runs without admin rights
 
@@ -168,12 +179,13 @@ LLM inference engine in Rust, open source, with higher throughput than vLLM and 
 | CUDA Graphs | `lparams.use_cuda_graphs = true`; expose in `RegistryConfig`; only effective on CUDA |
 | Full CPU↔GPU Swap | C glue in `vendor/llama.cpp/src/ferrum_kv_transfer.cpp` with `ggml_backend_tensor_get/set`; called from `InferenceEngine::run_decode` |
 | Apple Silicon — Unified Memory | Detect `ggml_backend_metal_*`; skip CPU↔GPU swap path entirely (memory is already shared); report unified memory pool in `GET /metrics` |
-| Additional Samplers | min-p, mirostat v2 in `SamplingParams` and `ChatCompletionRequest` (map to existing llama.cpp APIs) |
+| Additional Samplers | min-p, mirostat v2, presence penalty, frequency penalty (separate from repetition penalty, full OpenAI spec) in `SamplingParams` and `ChatCompletionRequest` |
+| MoE CPU Offloading | `--moe-cpu` flag: offload all expert tensors to CPU (~80% VRAM reduction for Mixtral/DeepSeek-MoE/Qwen-MoE); `--n-moe-cpu N` for partial offload of first N expert layers; configure via llama.cpp `n_gpu_layers` expert-layer logic |
 | `fox convert` CLI | Wraps `llama-convert` for AWQ/GPTQ → GGUF; access to quantized HF models without a GGUF |
 
 **Key files:** `src/engine/model.rs`, `src/cli/serve.rs`, `src/scheduler/mod.rs`, `vendor/llama.cpp/`
 **Prerequisite:** CI benchmark gate from v1.1.0 (to measure impact of each change)
-**Success criterion:** >3000 tok/s on 7B (A100), TTFT P95 <100ms
+**Success criterion:** >3000 tok/s on 7B (A100), TTFT P95 <100ms; Mixtral 8x7B runs on 8GB VRAM with `--moe-cpu`
 
 ---
 
@@ -187,10 +199,17 @@ LLM inference engine in Rust, open source, with higher throughput than vLLM and 
 | Rate Limiting per API Key | Token bucket per key in `AppState`; `--rate-limit-rpm N`, `--rate-limit-tpm N`; 429 with `Retry-After` |
 | Multi-key Auth | `[[api_keys]]` in config.toml; `ApiKeyConfig` with rate_limit, allowed_models, label |
 | Webhook Notifications | `--webhook-url`; POST JSON on pull complete, request finish, error |
+| Multi-path Model Discovery | `--model-dirs` accepts multiple paths (`;`-separated); auto-scan `~/.cache/huggingface/hub/` (direct sinergia with `fox pull`), `~/.ollama/models/` (parse manifests + GGUF magic-byte verification), `~/.lmstudio/models/`; max depth 4 levels; dedup by resolved path; filter non-LLM files (audio, vision-only models) |
+| `fox discover` command | Explicit discovery refresh: re-scans all configured paths and prints newly found models; useful when models are added without restarting the server |
+| Shard detection | Group `model-00001-of-00005.gguf` files as a single logical model entry; display combined size |
+| HTTP model management | `POST /api/models/:name/load` — load model on demand without restart; `POST /api/models/:name/unload` — explicit unload; `GET /api/models/:name/status` — loaded/unloaded/loading |
+| WebSocket streaming | `GET /ws/generate` — bidirectional WebSocket transport; client sends JSON request, server streams tokens as text frames, closes with `{"done":true}`; same inference pipeline as SSE, different transport; useful for clients behind proxies that block SSE |
+| Anthropic API compatibility | `POST /anthropic/v1/messages` — maps Anthropic Messages format to internal engine; supports text content blocks, system prompt, streaming; allows Claude SDK clients to use local models without code changes |
+| `fox init` command | Generate deployment scaffolding: Dockerfile, docker-compose.yml, k8s deployment YAML, Railway/Fly.io config; output to stdout or directory |
 
-**Key files:** `src/api/routes.rs` (AppState), `src/api/auth.rs`, new `src/mcp/`
+**Key files:** `src/api/routes.rs` (AppState), `src/api/auth.rs`, new `src/mcp/`, `src/cli/mod.rs`, `src/cli/discover.rs`
 **Prerequisite:** stable v1.2.0 baseline
-**Success criterion:** ferrumox listed as compatible MCP server in Cursor/Continue.dev; Web UI functional without extra configuration
+**Success criterion:** ferrumox listed as compatible MCP server in Cursor/Continue.dev; Web UI functional without extra configuration; models in HF cache appear in `/v1/models` automatically
 
 ---
 
@@ -251,12 +270,14 @@ LLM inference engine in Rust, open source, with higher throughput than vLLM and 
 |---|---|
 | Plugin System (Samplers) | `SamplerPlugin` trait; dynamic `.so/.dll` loading; C ABI for cross-language compatibility |
 | LoRA Adapter Hot-Loading | `llama_lora_adapter_init`; `--lora-path`; `lora_adapter` field in requests; multiple simultaneous adapters |
+| LoRA Auto-Detection | During model discovery, scan same directory for `*lora*` / `*adapter*` files matching the model stem; auto-associate without explicit `--lora-path`; surface in `/v1/models` metadata |
+| Response Cache | Middleware layer between router and engine; key: `xxhash3_64(model + prompt + max_tokens + temperature + top_p + stop)`; LRU eviction at 1000 entries / 512MB; TTL 1h; enabled only when `temperature == 0.0` by default (deterministic mode); stats in `/metrics`: `cache_hits_total`, `cache_misses_total`, `cache_size_bytes` |
 | Batch Inference API | `POST /v1/batch`; array of requests → array of responses; concurrent scheduler dispatch |
 | Admin API | `GET/POST /admin/models`, `GET /admin/config`; separate `--admin-key` |
 | Helm Chart | Official chart; HPA based on `ferrumox_queue_depth`; graceful shutdown with drain timeout |
 
-**Key files:** `src/api/routes.rs`, `src/engine/model.rs`, new `charts/ferrumox/`
-**Success criterion:** watermarking plugin example documented; LoRA with 5+ simultaneous adapters; Helm chart in public repo
+**Key files:** `src/api/routes.rs`, `src/engine/model.rs`, new `charts/ferrumox/`, new `src/cache/`
+**Success criterion:** watermarking plugin example documented; LoRA with 5+ simultaneous adapters; Helm chart in public repo; cache hit rate >80% on repeated identical prompts with `temperature=0`
 
 ---
 
@@ -343,10 +364,19 @@ v1.2.0 (Compute Acceleration)
 
 ```
 fox serve          # start the HTTP server
+                   #   --gpu-backend auto|cuda|vulkan|opencl|cpu  (v1.1.0)
+                   #   --port auto                                 (v1.1.0)
+                   #   --moe-cpu                                   (v1.2.0)
+                   #   --n-moe-cpu N                               (v1.2.0)
+                   #   --model-dirs path1;path2;...                (v1.3.0)
 fox run            # single-shot terminal inference
                    #   --show-thinking   stream the <think>…</think> block
 fox pull           # download GGUF model from HuggingFace Hub
 fox show           # show model info (architecture, quantization, size)
+fox probe          # load model + optional LoRA, verify forward pass, report errors (v1.1.0)
+fox gpu-info       # display GPU backend, VRAM total/available, driver version (v1.1.0)
+fox discover       # refresh model discovery from all configured paths (v1.3.0)
+fox init           # generate deployment scaffolding: Dockerfile, k8s, Railway, Fly (v1.3.0)
 fox mcp            # start MCP server (planned v1.3.0)
 fox convert        # convert AWQ/GPTQ → GGUF (planned v1.2.0)
 fox-bench          # integrated benchmark

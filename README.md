@@ -1,49 +1,45 @@
+<div align="center">
+
 # fox
 
-Run local LLMs. Drop-in replacement for Ollama — same API, faster responses.
+**The fastest local LLM server. Drop-in replacement for Ollama.**
 
 [![CI](https://github.com/ferrumox/fox/actions/workflows/ci.yml/badge.svg)](https://github.com/ferrumox/fox/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](CHANGELOG.md)
+[![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://rustup.rs/)
+[![GitHub Stars](https://img.shields.io/github/stars/ferrumox/fox?style=social)](https://github.com/ferrumox/fox/stargazers)
+
+[![Sponsor](https://img.shields.io/badge/❤️_Sponsor-ea4aaa?style=for-the-badge&logo=github-sponsors&logoColor=white)](https://github.com/sponsors/manuelslemos)
+
+</div>
+
+**Fox is free forever.** No asterisks. No "free for now." No pivot to paid. MIT licensed, always.
 
 ---
 
-## Quick start
+## Try it in 30 seconds
 
 ```bash
-# 1. Install
+# Linux / macOS
 curl -fsSL https://github.com/ferrumox/fox/releases/latest/download/install.sh | sh
 
-# 2. Pull a model and start the server
-fox pull llama3.2          # searches HuggingFace, picks best result
-fox serve
-
-# 3. Query it (OpenAI-compatible)
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"Llama-3.2-3B-Instruct-Q4_K_M","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
-
-# 4. Interactive REPL (no model-path needed)
-fox run
+# Windows
+irm https://raw.githubusercontent.com/ferrumox/fox/main/install.ps1 | iex
 ```
 
-That's it. If you're already using Ollama, just change the port from `11434` to `8080`.
+```bash
+# Pull a model and start
+fox pull llama3.2
+fox serve
 
----
+# Ask something (OpenAI-compatible)
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"llama3.2","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
 
-## Client compatibility
-
-| Client / Tool | Protocol | Status |
-|---------------|----------|--------|
-| Open WebUI | Ollama | ✓ Works out of the box |
-| Continue.dev | Ollama | ✓ Works out of the box |
-| LangChain | OpenAI | ✓ Works out of the box |
-| LlamaIndex | OpenAI | ✓ Works out of the box |
-| Cursor / Copilot Chat | OpenAI | ✓ Works out of the box |
-| `ollama` CLI | Ollama | ✓ Works out of the box |
-| `openai` Python SDK | OpenAI | ✓ Works out of the box |
-
-See [`examples/`](examples/) for integration guides.
+# If you already use Ollama — just change the port from 11434 to 8080. That's it.
+```
 
 ---
 
@@ -73,6 +69,176 @@ RTX 4060 · Llama-3.2-3B-Instruct-Q4_K_M · 4 concurrent clients · 50 requests:
 
 ---
 
+## Works with every tool you already use
+
+**No code changes needed** — just change the base URL to `http://localhost:8080`.
+
+| Client / Tool | Protocol | Status |
+|---------------|----------|--------|
+| Open WebUI | Ollama | ✓ Works out of the box |
+| Continue.dev | Ollama | ✓ Works out of the box |
+| LangChain | OpenAI | ✓ Works out of the box |
+| LlamaIndex | OpenAI | ✓ Works out of the box |
+| Cursor / Copilot Chat | OpenAI | ✓ Works out of the box |
+| `ollama` CLI | Ollama | ✓ Works out of the box |
+| `openai` Python SDK | OpenAI | ✓ Works out of the box |
+
+### Python
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="sk-local")
+
+resp = client.chat.completions.create(
+    model="llama3.2",
+    messages=[{"role": "user", "content": "Say hi in 5 words."}],
+)
+print(resp.choices[0].message.content)
+```
+
+### Node.js
+
+```ts
+import OpenAI from "openai";
+
+const openai = new OpenAI({ baseURL: "http://localhost:8080/v1", apiKey: "sk-local" });
+
+const resp = await openai.chat.completions.create({
+  model: "llama3.2",
+  messages: [{ role: "user", content: "Say hi in 5 words." }],
+});
+console.log(resp.choices[0].message?.content);
+```
+
+### IDE configuration
+
+**VSCode / Cursor**
+```json
+{ "github.copilot.advanced": { "serverUrl": "http://localhost:8080" } }
+```
+
+**Continue.dev** (`~/.continue/config.json`)
+```json
+{
+  "models": [{
+    "title": "fox (local)",
+    "provider": "openai",
+    "model": "llama3.2",
+    "apiBase": "http://localhost:8080/v1"
+  }]
+}
+```
+
+See [`examples/`](examples/) for more integration guides.
+
+---
+
+## GPU support
+
+Fox detects CUDA, Metal, and Vulkan at runtime — **one binary runs on any hardware**.
+
+| Platform | GPU backends | Auto-detects |
+|----------|-------------|--------------|
+| Linux x86_64 | CUDA + Vulkan | ✅ |
+| Windows x86_64 | CUDA + Vulkan | ✅ |
+| macOS Apple Silicon | Metal | ✅ |
+| macOS Intel | CPU only | — |
+| Linux ARM64 | CPU only | — |
+
+Auto-detection priority: **CUDA → Vulkan → Metal → CPU**. Override with `--gpu-backend cuda|vulkan|cpu`.
+
+---
+
+## Installation
+
+### Linux / macOS
+
+```bash
+curl -fsSL https://github.com/ferrumox/fox/releases/latest/download/install.sh | sh
+```
+
+Or download a binary directly:
+
+```bash
+# Linux x86_64
+curl -L https://github.com/ferrumox/fox/releases/latest/download/fox-linux-x86_64 -o fox && chmod +x fox
+
+# macOS Apple Silicon
+curl -L https://github.com/ferrumox/fox/releases/latest/download/fox-macos-arm64 -o fox && chmod +x fox
+
+# macOS Intel
+curl -L https://github.com/ferrumox/fox/releases/latest/download/fox-macos-x86_64 -o fox && chmod +x fox
+```
+
+### Windows
+
+```powershell
+irm https://raw.githubusercontent.com/ferrumox/fox/main/install.ps1 | iex
+```
+
+Or download [`fox-windows-x86_64.exe`](https://github.com/ferrumox/fox/releases/latest/download/fox-windows-x86_64.exe) directly.
+
+### Build from source
+
+```bash
+git clone --recurse-submodules https://github.com/ferrumox/fox
+cd fox
+cargo build --release
+```
+
+GPU backend is detected at runtime — no recompilation needed when switching between CPU, CUDA, and Metal.
+
+### Docker
+
+```bash
+docker run -p 8080:8080 \
+  -v ~/.cache/ferrumox/models:/root/.cache/ferrumox/models \
+  ferrumox/fox serve
+
+# Or with docker compose
+docker compose up
+```
+
+---
+
+## Usage
+
+```bash
+# Search HuggingFace for GGUF models
+fox search gemma
+fox search qwen coder --limit 5
+
+# Pull a model
+fox pull llama3.2            # top result, balanced quantization
+fox pull gemma3:12b          # specific size
+fox pull gemma3:12b-q4       # specific quantization
+fox pull bartowski/gemma-3-12b-it-GGUF  # specific HF repo
+
+# Start the server
+fox serve                    # lazy loading — no model needed upfront
+fox serve --max-models 3     # keep up to 3 models loaded simultaneously
+
+# Interactive REPL
+fox run
+fox run "Explain ownership in Rust"  # single-shot
+
+# Manage models
+fox list                     # list downloaded models
+fox show llama3.2            # model info: architecture, quantization, size
+fox ps                       # list currently loaded models
+
+# Manage aliases
+fox alias set llama3 Llama-3.2-3B-Instruct-Q4_K_M
+fox alias list
+
+# Benchmark
+fox bench llama3.2
+fox bench llama3.2 --runs 10
+```
+
+---
+
 ## API endpoints
 
 | Method | Path | Description |
@@ -95,126 +261,23 @@ RTX 4060 · Llama-3.2-3B-Instruct-Q4_K_M · 4 concurrent clients · 50 requests:
 
 ---
 
-## Requirements
+## Features
 
-| Backend | Requirement |
-|---------|-------------|
-| CPU | x86_64 or arm64, AVX2 |
-| CUDA | CUDA 12.x (detected at runtime — no recompilation needed) |
-| Metal | macOS 13+, Apple Silicon (detected at runtime) |
-| Vulkan | Windows x86_64, Vulkan SDK 1.3+ |
-
-No runtime dependencies beyond GPU drivers — single static binary.
-
----
-
-## Installation
-
-### Linux / macOS
-
-```bash
-curl -fsSL https://github.com/ferrumox/fox/releases/latest/download/install.sh | sh
-```
-
-Supports `x86_64` and `arm64` (Apple Silicon with Metal).
-
-### Windows
-
-```powershell
-irm https://raw.githubusercontent.com/ferrumox/fox/main/install.ps1 | iex
-```
-
-Installs `fox.exe` to `%LOCALAPPDATA%\ferrumox\bin` and offers to add it to your PATH.
-
-### Build from source
-
-```bash
-git clone --recurse-submodules https://github.com/ferrumox/fox
-cd fox
-
-# Works on any platform — GPU backend is detected at runtime
-cargo build --release
-```
-
-fox detects CUDA, Metal, and Vulkan at runtime, so a single binary runs on CPU, NVIDIA, or Apple Silicon hardware without recompilation.
-
-Binaries: `target/release/fox` and `target/release/fox-bench`.
-
-### Docker
-
-```bash
-# Docker Hub (no build required)
-docker run -p 8080:8080 \
-  -v ~/.cache/ferrumox/models:/root/.cache/ferrumox/models \
-  ferrumox/fox serve
-
-# Or build locally with docker compose
-# 1. Put your GGUF model in ./models/
-mkdir -p models
-
-# 2. Start the server
-docker compose up
-
-# 3. Or pull via the API
-docker compose up -d
-curl -X POST http://localhost:8080/api/pull \
-  -d '{"name":"llama3.2"}'
-```
-
----
-
-## Usage
-
-```bash
-# Search HuggingFace for GGUF models
-fox search gemma
-fox search qwen coder --limit 5
-fox search gemma --sort likes
-
-# Pull a model — searches HuggingFace automatically
-fox pull gemma3                    # top result for "gemma3", balanced quant
-fox pull gemma3:12b                # top result for "gemma3 12b"
-fox pull gemma3:12b-q4             # top result for "gemma3 12b", Q4 variant
-fox pull gemma3:12b-q8             # top result for "gemma3 12b", Q8 variant
-
-# Pull a specific HuggingFace repo directly
-fox pull bartowski/gemma-3-12b-it-GGUF
-fox pull bartowski/gemma-3-12b-it-GGUF:q5   # repo + quant prefix
-
-# Start server (model is optional — lazy loading if omitted)
-fox serve
-fox serve --model-path ~/.cache/ferrumox/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf
-
-# Serve multiple models simultaneously (LRU eviction)
-fox serve --max-models 3
-
-# Enable API key authentication
-fox serve --api-key "$FOX_API_KEY"
-
-# Reduce KV cache VRAM with quantized cache
-fox serve --type-kv q8_0
-
-# Interactive REPL (lazy loading — no model-path needed)
-fox run
-fox run "Explain ownership in Rust"   # single-shot
-
-# With a specific model
-fox run --model-path ~/.cache/ferrumox/models/model.gguf
-
-# Benchmark a model locally
-fox bench llama3.2
-fox bench llama3.2 --runs 5
-
-# Manage aliases
-fox alias set llama3 Llama-3.2-3B-Instruct-Q4_K_M
-fox alias list
-
-# List downloaded models
-fox list
-
-# Show model info
-fox show Llama-3.2-3B-Instruct-Q4_K_M
-```
+- Runs any GGUF model (Llama, Mistral, Gemma, Qwen, DeepSeek, and more)
+- **OpenAI-compatible API** — works with any tool that supports OpenAI
+- **Ollama-compatible API** — works with any tool that supports Ollama
+- **Multi-model serving** — keep multiple models loaded, switch between them instantly
+- **Lazy loading** — no need to specify a model upfront; fox loads it on first request
+- **Prefix caching** — shared system prompts are processed once and reused across requests
+- **Continuous batching** — multiple concurrent users processed in parallel, not serialized
+- **Function calling** and **structured JSON output** (OpenAI spec)
+- **Request cancellation** — closing the connection immediately frees GPU memory
+- **KV cache quantization** — `--type-kv q8_0` or `q4_0` cuts VRAM usage with minimal quality loss
+- **API key authentication** — optional `FOX_API_KEY` for access control
+- **Prometheus metrics** — latency, throughput, KV cache usage out of the box
+- **Config file** at `~/.config/ferrumox/config.toml`
+- **Aliases** — short names instead of full model filenames
+- **Docker** and **systemd** support included
 
 ---
 
@@ -252,8 +315,8 @@ system_prompt = "You are a helpful assistant."
 
 ```toml
 [aliases]
-"llama3" = "Llama-3.2-3B-Instruct-Q4_K_M"
-"mistral" = "Mistral-7B-Instruct-v0.3-Q4_K_M"
+"llama3"   = "Llama-3.2-3B-Instruct-Q4_K_M"
+"mistral"  = "Mistral-7B-Instruct-v0.3-Q4_K_M"
 ```
 
 ---
@@ -261,38 +324,28 @@ system_prompt = "You are a helpful assistant."
 ## Benchmark
 
 ```bash
-# Build first
-cargo build --release
-
-# Single server
-./target/release/fox-bench \
-  --url http://localhost:8080 \
-  --model llama3.2 \
-  --concurrency 8 \
-  --requests 100
-
-# Compare vs Ollama (side-by-side table)
+# Compare fox vs Ollama side by side
 ./target/release/fox-bench \
   --url http://localhost:8080 \
   --compare-url http://localhost:11434 \
   --model llama3.2
 
-# JSON output for CI / embedding in docs
+# JSON output for CI
 ./target/release/fox-bench \
   --url http://localhost:8080 \
   --compare-url http://localhost:11434 \
   --model llama3.2 \
   --output json
 
-# Reproducible benchmark script (saves results to benches/results.md)
+# Reproducible benchmark (saves to benches/results.md)
 ./scripts/benchmark.sh llama3.2 4 50
 ```
 
-Sample comparison output:
+Sample output:
 
 ```
 ┌─────────────────┬──────────────┬──────────────┬──────────┐
-│ Metric          │   ferrumox   │    ollama    │ Δ        │
+│ Metric          │     fox      │    ollama    │ Δ        │
 ├─────────────────┼──────────────┼──────────────┼──────────┤
 │ TTFT P50        │          87ms│         310ms│ +72%     │
 │ TTFT P95        │         134ms│         480ms│ +72%     │
@@ -305,25 +358,6 @@ Sample comparison output:
 
 ---
 
-## Features
-
-- Runs any GGUF model (Llama, Mistral, Gemma, Qwen, and more)
-- **OpenAI-compatible API** — works with any tool that supports OpenAI
-- **Ollama-compatible API** — works with any tool that supports Ollama
-- **Multi-model serving** — keep multiple models loaded, switch between them instantly
-- **Lazy loading** — no need to specify a model upfront; fox loads it on first request
-- **Function calling** and **structured JSON output** (OpenAI spec)
-- **Request cancellation** — closing the connection immediately frees GPU memory
-- **API key authentication** — optional `FOX_API_KEY` for access control
-- **KV cache quantization** — `--type-kv q8_0` or `q4_0` cuts VRAM usage with minimal quality loss
-- **Dynamic GPU backends** — CUDA, Metal, and Vulkan detected at runtime; one binary, any hardware
-- **Prometheus metrics** — latency, throughput, memory usage out of the box
-- **Config file** at `~/.config/ferrumox/config.toml`
-- **Aliases** — use short names instead of full model filenames
-- **Docker** and **systemd** support included
-
----
-
 ## Project structure
 
 ```
@@ -332,14 +366,14 @@ fox/
 │   ├── main.rs              # Entry point, config, signal handling
 │   ├── metrics.rs           # Prometheus metrics registry
 │   ├── model_registry.rs    # Multi-model registry with LRU eviction
+│   ├── config.rs            # Config file loading
+│   ├── registry.rs          # Model discovery helpers
 │   ├── api/                 # REST API (OpenAI + Ollama compat)
 │   │   ├── router.rs        # Axum router setup
-│   │   ├── routes.rs        # AppState + handler wiring
 │   │   ├── types.rs         # Request/response types
 │   │   ├── auth.rs          # API key middleware
 │   │   ├── error.rs         # Unified error types
 │   │   ├── pull_handler.rs  # POST /api/pull SSE streaming
-│   │   ├── mod.rs           # Re-exports
 │   │   ├── v1/              # OpenAI-compat handlers
 │   │   │   ├── chat.rs
 │   │   │   ├── completions.rs
@@ -357,9 +391,7 @@ fox/
 │   ├── scheduler/           # Continuous batching + prefix cache
 │   ├── kv_cache/            # PageTable, ref-counted block manager
 │   ├── engine/              # Inference engine, sampling, output filtering
-│   ├── cli/                 # Subcommands: serve, run, pull, list, show, ps
-│   └── bin/
-│       └── bench.rs         # fox-bench standalone benchmark binary
+│   └── cli/                 # Subcommands: serve, run, pull, list, show, ps
 ├── examples/
 │   ├── curl.sh              # curl examples for all API routes
 │   ├── langchain.py         # LangChain integration
@@ -397,15 +429,50 @@ make download-model  Download default model (Llama-3.2-3B Q4_K_M)
 
 ---
 
-## Contributing
+## Requirements
 
-Issues and PRs welcome at [github.com/ferrumox/fox](https://github.com/ferrumox/fox).
+| Backend | Requirement |
+|---------|-------------|
+| CPU | x86_64 or arm64, AVX2 |
+| CUDA | CUDA 12.x |
+| Metal | macOS 13+, Apple Silicon |
+| Vulkan | Windows x86_64, Vulkan SDK 1.3+ |
+
+No runtime dependencies beyond GPU drivers — single static binary.
+
+---
+
+## Community
+
+- **Bug reports**: [GitHub Issues](https://github.com/ferrumox/fox/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/ferrumox/fox/discussions)
+- **Changelog**: [CHANGELOG.md](CHANGELOG.md)
+- **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 To run tests:
 
 ```bash
 FOX_SKIP_LLAMA=1 cargo test --all
 ```
+
+---
+
+## Support the project
+
+Fox is built and maintained by [Manuel S. Lemos](https://github.com/manuelslemos) in his spare time. It's free forever — no paid tiers, no feature gating, no VC money.
+
+If fox saves you time or replaces a paid API bill, consider sponsoring:
+
+| | |
+|---|---|
+| ☕ **$5 / month** | Coffee tier — eternal gratitude + sponsor badge |
+| 🐛 **$25 / month** | Bug priority — your issues move to the front of the queue + name in [SPONSORS.md](SPONSORS.md) |
+| 🏢 **$100 / month** | Team supporter — your logo in the README + shoutout in every release |
+| 🚀 **$500 / month** | Infrastructure partner — direct line + input on the roadmap |
+
+[**❤️ GitHub Sponsors**](https://github.com/sponsors/manuelslemos) · [**☕ Buy Me a Coffee**](https://buymeacoffee.com/manuelslemos)
+
+> 100% of sponsorships go toward keeping fox free and actively maintained.
 
 ---
 
