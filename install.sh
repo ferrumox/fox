@@ -69,6 +69,12 @@ tar -xzf "$TMP_DIR/$TARBALL" -C "$TMP_DIR"
 
 mkdir -p "$BIN_DIR"
 install -m 755 "$TMP_DIR/fox" "$BIN_DIR/fox"
+[[ -f "$TMP_DIR/fox-bench" ]] && install -m 755 "$TMP_DIR/fox-bench" "$BIN_DIR/fox-bench"
+
+# Install shared libraries alongside the binary (RPATH=$ORIGIN).
+for lib in "$TMP_DIR"/*.so* "$TMP_DIR"/*.dylib; do
+  [[ -f "$lib" ]] && install -m 755 "$lib" "$BIN_DIR/"
+done
 
 echo "Installed fox to $BIN_DIR/fox"
 echo "Run: fox --help"

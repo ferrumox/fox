@@ -133,7 +133,7 @@ jobs:
           FILES=(fox fox-bench)
           # .so   → Linux shared libs + macOS MODULE backends (ggml-cpu.so, ggml-metal.so)
           # .dylib → macOS SHARED libs (llama, ggml-base, ggml)
-          for so in "$RELEASE_DIR"/libggml*.so "$RELEASE_DIR"/libllama*.so "$RELEASE_DIR"/libggml*.dylib "$RELEASE_DIR"/libllama*.dylib; do
+          for so in "$RELEASE_DIR"/libggml*.so* "$RELEASE_DIR"/libllama*.so* "$RELEASE_DIR"/libggml*.dylib "$RELEASE_DIR"/libllama*.dylib; do
             [[ -f "$so" ]] && FILES+=("$so")
           done
           tar czf "$TARBALL" -C "$RELEASE_DIR" "${FILES[@]##*/}"
