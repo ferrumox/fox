@@ -144,7 +144,7 @@ fn main() {
                     let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
                     let is_backend = exts.contains(&ext)
-                        && (fname.starts_with("libggml-")
+                        && (fname.starts_with("libggml")
                             || fname.starts_with("libllama.")
                             || fname == format!("llama.{ext}"));
                     if is_backend {

@@ -25,8 +25,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 # Build.  BuildKit cache mounts keep the incremental build cache across
 # image rebuilds so only changed crates (and llama.cpp when vendor/ changes)
 # are recompiled.
-COPY src/ src/
-COPY build.rs ./
+COPY . .
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/app/target \
     cargo build --release --bin fox --bin fox-bench && \
@@ -55,7 +54,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # All binaries and shared backends go into the same directory so that the
 # RPATH=$ORIGIN embedded in the fox binary resolves the backends at runtime.
-COPY --from=builder /bundle/ /usr/local/bin/
+COPY --from=builder /bundle/ /usr/local/lib/fox/
+
+# Register the backend libraries and create versioned SONAME symlinks
+# (e.g. libllama.so.0 → libllama.so) so the dynamic linker finds them.
+RUN echo "/usr/local/lib/fox" > /etc/ld.so.conf.d/fox.conf && ldconfig
+
+# Wrapper so fox is on PATH while backends stay in /usr/local/lib/fox/.
+RUN ln -s /usr/local/lib/fox/fox      /usr/local/bin/fox && \
+    ln -s /usr/local/lib/fox/fox-bench /usr/local/bin/fox-bench
 
 ENV FOX_HOST=0.0.0.0
 ENV FOX_PORT=8080
