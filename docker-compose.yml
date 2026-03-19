@@ -1,7 +1,6 @@
 services:
   ferrumox:
-    build: .
-    image: ferrumox:latest
+    image: ferrumox/fox:latest
     ports:
       - "8080:8080"
     volumes:

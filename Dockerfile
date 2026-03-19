@@ -1,31 +1,50 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 1: builder
-# Full Rust + CMake + clang toolchain needed to compile llama.cpp via the
-# build.rs script.
+# Uses the CUDA devel image so nvcc is available and libggml-cuda.so is built.
+# Rust is installed manually since it is not included in the CUDA base image.
 # ──────────────────────────────────────────────────────────────────────────────
-FROM rust:1.84-bookworm AS builder
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cmake \
-    clang \
-    libclang-dev \
+    curl cmake clang libclang-dev ninja-build \
     && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:$PATH"
 
 WORKDIR /app
 
-# Cache dependency compilation separately from source changes.
+# Fetch Rust dependencies before copying source so this layer is cached
+# as long as Cargo.toml / Cargo.lock do not change.
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src && echo 'fn main() {}' > src/main.rs && \
-    cargo build --release 2>/dev/null || true
-RUN rm -rf src
+COPY vendor/ vendor/
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    cargo fetch
 
-# Copy the full source tree and build for real.
-COPY . .
-RUN cargo build --release
+# Build.  BuildKit cache mounts keep the incremental build cache across
+# image rebuilds so only changed crates (and llama.cpp when vendor/ changes)
+# are recompiled.
+COPY src/ src/
+COPY build.rs ./
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --bin fox --bin fox-bench && \
+    # Collect everything the runtime stage needs into /bundle so the COPY
+    # below does not require glob expansion across build cache mounts.
+    mkdir -p /bundle && \
+    cp target/release/fox target/release/fox-bench /bundle/ && \
+    find target/release -maxdepth 1 \( -name 'lib*.so*' -o -name 'lib*.dylib' \) \
+         -exec cp {} /bundle/ \;
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 2: minimal runtime image
-# Only the compiled binaries and their shared-library dependencies are kept.
+#
+# libggml-cuda.so is present but loaded lazily at runtime.
+# When a GPU is available (docker run --gpus all), nvidia-container-toolkit
+# injects the host CUDA driver libraries and the CUDA backend activates.
+# Without a GPU the engine falls back to CPU automatically — no env-var
+# toggle required, no separate image needed.
 # ──────────────────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
@@ -34,10 +53,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/fox       /usr/local/bin/fox
-COPY --from=builder /app/target/release/fox-bench  /usr/local/bin/fox-bench
+# All binaries and shared backends go into the same directory so that the
+# RPATH=$ORIGIN embedded in the fox binary resolves the backends at runtime.
+COPY --from=builder /bundle/ /usr/local/bin/
 
-# Default port
+ENV FOX_HOST=0.0.0.0
+ENV FOX_PORT=8080
+
 EXPOSE 8080
 
 ENTRYPOINT ["fox"]
+CMD ["serve"]
