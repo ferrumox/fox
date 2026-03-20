@@ -33,7 +33,7 @@ pub fn sampling_from_ollama(opts: Option<&OllamaOptions>) -> (SamplingParams, us
             repetition_penalty: rep,
             seed,
             stop,
-            show_thinking: false,
+            show_thinking: true,
             initial_in_thinking: false,
         },
         max_tokens,

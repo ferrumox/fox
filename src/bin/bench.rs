@@ -401,6 +401,7 @@ async fn run_request(
                     actual_tokens = Some(u.completion_tokens);
                 }
                 for choice in &chunk.choices {
+                    // Set TTFT on first chunk with non-empty content.
                     if choice
                         .delta
                         .content
@@ -410,11 +411,14 @@ async fn run_request(
                         if ttft.is_none() {
                             ttft = Some(start.elapsed());
                         }
-                        chunk_count += 1;
                     }
                     if choice.finish_reason.is_some() {
+                        // Stop chunk: don't count it as a generated token.
                         break;
                     }
+                    // Count every intermediate chunk as one token (content may
+                    // be empty for some backends but the inference step happened).
+                    chunk_count += 1;
                 }
             }
         }
@@ -464,7 +468,7 @@ async fn run_workload(
 
     let client = Arc::new(
         Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(Duration::from_secs(300))
             .build()?,
     );
     let semaphore = Arc::new(Semaphore::new(concurrency));

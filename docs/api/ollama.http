@@ -1,0 +1,202 @@
+# Fox — Ollama-compatible API
+# Compatible with VS Code REST Client, JetBrains HTTP Client, and curl.
+#
+# Set @host and @model before running.
+
+@host = http://localhost:8080
+@model = qwen
+
+###
+
+# ── Server info ───────────────────────────────────────────────────────────────
+
+### Version
+GET {{host}}/api/version
+
+### List models on disk
+GET {{host}}/api/tags
+
+### List loaded models
+GET {{host}}/api/ps
+
+###
+
+# ── Generate ──────────────────────────────────────────────────────────────────
+
+### Generate (non-streaming)
+POST {{host}}/api/generate
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "prompt": "Why is the sky blue?",
+  "stream": false
+}
+
+###
+
+### Generate (streaming NDJSON)
+POST {{host}}/api/generate
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "prompt": "Tell me a short joke.",
+  "stream": true
+}
+
+###
+
+### Generate with system prompt
+POST {{host}}/api/generate
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "prompt": "Explain recursion.",
+  "system": "You are a teacher. Explain concepts simply.",
+  "stream": false
+}
+
+###
+
+### Generate with options
+POST {{host}}/api/generate
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "prompt": "Write a haiku about rain.",
+  "stream": false,
+  "options": {
+    "temperature": 1.0,
+    "top_p": 0.9,
+    "top_k": 40,
+    "repeat_penalty": 1.1,
+    "num_predict": 128,
+    "seed": 42
+  }
+}
+
+###
+
+# ── Chat ──────────────────────────────────────────────────────────────────────
+
+### Chat (non-streaming)
+POST {{host}}/api/chat
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    { "role": "user", "content": "What is the capital of Spain?" }
+  ],
+  "stream": false
+}
+
+###
+
+### Chat (streaming NDJSON)
+POST {{host}}/api/chat
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    { "role": "user", "content": "Count from 1 to 5." }
+  ],
+  "stream": true
+}
+
+###
+
+### Multi-turn chat
+POST {{host}}/api/chat
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    { "role": "user",      "content": "My name is Ana." },
+    { "role": "assistant", "content": "Hello Ana, nice to meet you!" },
+    { "role": "user",      "content": "What did I just tell you?" }
+  ],
+  "stream": false
+}
+
+###
+
+### Chat with options
+POST {{host}}/api/chat
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    { "role": "user", "content": "Describe a sunset in two sentences." }
+  ],
+  "stream": false,
+  "options": {
+    "temperature": 0.8,
+    "num_predict": 128
+  }
+}
+
+###
+
+# ── Embeddings ────────────────────────────────────────────────────────────────
+
+### Single embedding
+POST {{host}}/api/embed
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "input": "The fox runs fast."
+}
+
+###
+
+### Batch embeddings
+POST {{host}}/api/embed
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "input": [
+    "The fox runs fast.",
+    "El zorro corre rápido."
+  ]
+}
+
+###
+
+# ── Model management ──────────────────────────────────────────────────────────
+
+### Show model details
+POST {{host}}/api/show
+Content-Type: application/json
+
+{
+  "name": "{{model}}"
+}
+
+###
+
+### Pull a model from HuggingFace
+POST {{host}}/api/pull
+Content-Type: application/json
+
+{
+  "name": "Qwen/Qwen2.5-0.5B-Instruct-GGUF"
+}
+
+###
+
+### Delete a model
+DELETE {{host}}/api/delete
+Content-Type: application/json
+
+{
+  "name": "{{model}}"
+}

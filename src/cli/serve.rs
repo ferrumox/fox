@@ -110,14 +110,17 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         anyhow::bail!("max_context_len must be greater than 0");
     }
 
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("ferrumox=info,warn"));
+
     if args.json_logs {
         tracing_subscriber::registry()
-            .with(EnvFilter::from_default_env())
+            .with(filter)
             .with(tracing_subscriber::fmt::layer().json())
             .init();
     } else {
         tracing_subscriber::registry()
-            .with(EnvFilter::from_default_env())
+            .with(filter)
             .with(tracing_subscriber::fmt::layer().pretty())
             .init();
     }

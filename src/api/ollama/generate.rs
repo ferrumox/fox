@@ -16,9 +16,13 @@ pub async fn ollama_generate(
     State(state): State<AppState>,
     Json(req): Json<OllamaGenerateRequest>,
 ) -> axum::response::Response {
+    let start = Instant::now();
     let entry = match state.registry.get_or_load(&req.model).await {
         Ok(e) => e,
-        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+        Err(e) => {
+            tracing::warn!(model = %req.model, error = %e, "model not found");
+            return (StatusCode::NOT_FOUND, e.to_string()).into_response();
+        }
     };
 
     let mut messages: Vec<(String, String)> = Vec::new();
@@ -58,9 +62,29 @@ pub async fn ollama_generate(
     let model_name = req.model.clone();
     let stream_mode = req.stream.unwrap_or(true);
 
+    tracing::info!(
+        model = %req.model,
+        stream = stream_mode,
+        prompt_tokens = prompt_tokens_len,
+        "request"
+    );
+
     if stream_mode {
+        let log_model = model_name.clone();
+        let log_prompt = prompt_tokens_len;
         let stream = ndjson_stream(rx, move |token: Token, eval_count: u32, elapsed_ns: u64| {
             let is_done = token.stop_reason.is_some();
+            if is_done {
+                tracing::info!(
+                    model = %log_model,
+                    stream = true,
+                    prompt_tokens = log_prompt as u32,
+                    completion_tokens = eval_count,
+                    duration_ms = elapsed_ns / 1_000_000,
+                    finish_reason = %ollama_done_reason(&token.stop_reason),
+                    "done"
+                );
+            }
             OllamaGenerateChunk {
                 model: model_name.clone(),
                 created_at: now_rfc3339(),
@@ -83,15 +107,23 @@ pub async fn ollama_generate(
         });
         ndjson_response(stream)
     } else {
-        let start = Instant::now();
         let (full_response, eval_count, stop_reason) = collect_tokens(&mut rx).await;
+        tracing::info!(
+            model = %model_name,
+            stream = false,
+            prompt_tokens = prompt_tokens_len as u32,
+            completion_tokens = eval_count,
+            duration_ms = start.elapsed().as_millis() as u64,
+            finish_reason = %ollama_done_reason(&stop_reason),
+            "done"
+        );
         let chunk = OllamaGenerateChunk {
             model: model_name,
             created_at: now_rfc3339(),
             response: full_response,
             done: true,
             done_reason: Some(ollama_done_reason(&stop_reason)),
-            total_duration: Some(start.elapsed().as_nanos() as u64),
+            total_duration: Some(start.elapsed().as_nanos() as u64), // reuses handler-level start
             load_duration: Some(0),
             prompt_eval_count: Some(prompt_tokens_len as u32),
             eval_count: Some(eval_count),

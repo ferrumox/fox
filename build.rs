@@ -102,9 +102,13 @@ fn main() {
     let ggml_src = build_dir.join("ggml").join("src");
     let bin_out = build_dir.join("bin");
 
+    // bin_out must come FIRST so the linker finds libggml.so / libggml-base.so
+    // before it encounters libggml.a in ggml/src/. With GGML_BACKEND_DL=ON the
+    // static archives reference ggml_backend_cpu_reg directly, causing link
+    // errors if the .a is resolved instead of the .so.
+    println!("cargo:rustc-link-search=native={}", bin_out.display());
     println!("cargo:rustc-link-search=native={}", llama_lib.display());
     println!("cargo:rustc-link-search=native={}", ggml_src.display());
-    println!("cargo:rustc-link-search=native={}", bin_out.display());
 
     // llama.cpp's add_library(llama) has no explicit STATIC/SHARED, so with
     // BUILD_SHARED_LIBS=ON it becomes a shared library on all platforms.
@@ -142,11 +146,14 @@ fn main() {
                 for entry in entries.filter_map(|e| e.ok()) {
                     let p = entry.path();
                     let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    let is_backend = exts.contains(&ext)
+                    // Match both plain .so and versioned soname files like
+                    // libllama.so.0 / libllama.so.0.9.7 (p.extension() returns
+                    // the last component, not "so", for versioned names).
+                    let so_ext = if target_os == "macos" { "dylib" } else { "so" };
+                    let is_backend = fname.contains(&format!(".{so_ext}"))
                         && (fname.starts_with("libggml")
                             || fname.starts_with("libllama.")
-                            || fname == format!("llama.{ext}"));
+                            || fname == format!("llama.{so_ext}"));
                     if is_backend {
                         let dst = dest.join(p.file_name().unwrap());
                         let _ = std::fs::copy(&p, &dst);

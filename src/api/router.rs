@@ -93,6 +93,7 @@ pub fn router(
         )
         .route("/api/chat", post(crate::api::ollama::chat::ollama_chat))
         .route("/api/pull", post(crate::api::pull_handler::ollama_pull))
+        .route("/", get(|| async { "Fox is running" }))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::api::auth::auth_middleware,

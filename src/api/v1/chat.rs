@@ -9,7 +9,7 @@ use axum::{
     },
     Json,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::api::router::AppState;
@@ -25,9 +25,13 @@ pub async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> axum::response::Response {
+    let start = Instant::now();
     let entry = match state.registry.get_or_load(&req.model).await {
         Ok(e) => e,
-        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+        Err(e) => {
+            tracing::warn!(model = %req.model, error = %e, "model not found");
+            return (StatusCode::NOT_FOUND, e.to_string()).into_response();
+        }
     };
 
     let id = Uuid::new_v4().to_string();
@@ -81,7 +85,16 @@ pub async fn chat_completions(
     // Tools force a single non-streaming response so we can parse the full output.
     let effective_stream = req.stream && req.tools.is_none();
 
+    tracing::info!(
+        model = %req.model,
+        stream = effective_stream,
+        prompt_tokens = prompt_tokens_len,
+        "request"
+    );
+
     if effective_stream {
+        let log_model = req.model.clone();
+        let log_prompt = prompt_tokens_len;
         let stream = async_stream::stream! {
             let mut completion_tokens: u32 = 0;
             while let Some(token) = rx.recv().await {
@@ -89,6 +102,17 @@ pub async fn chat_completions(
                 let is_done = token.stop_reason.is_some();
                 let finish_reason = token.stop_reason.as_ref().map(finish_reason_str).map(str::to_string);
                 completion_tokens += 1;
+                if is_done {
+                    tracing::info!(
+                        model = %log_model,
+                        stream = true,
+                        prompt_tokens = log_prompt,
+                        completion_tokens,
+                        duration_ms = start.elapsed().as_millis() as u64,
+                        finish_reason = %finish_reason.as_deref().unwrap_or("stop"),
+                        "done"
+                    );
+                }
                 let usage = if is_done {
                     Some(Usage {
                         prompt_tokens: prompt_tokens_len as u32,
@@ -150,6 +174,16 @@ pub async fn chat_completions(
         } else {
             final_finish_reason
         };
+
+        tracing::info!(
+            model = %req.model,
+            stream = false,
+            prompt_tokens = prompt_tokens_len as u32,
+            completion_tokens,
+            duration_ms = start.elapsed().as_millis() as u64,
+            finish_reason = %finish_reason,
+            "done"
+        );
 
         Json(ChatCompletionResponse {
             id,
