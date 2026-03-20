@@ -341,8 +341,15 @@ impl InferenceEngine {
             let (text, is_stop_hit) = {
                 let mut state_map = match self.per_request_state.lock() {
                     Ok(g) => g,
-                    Err(_) => {
-                        // Lock poisoned — skip processing, emit lossy text with no stop check.
+                    Err(e) => {
+                        // Lock poisoned — a thread panicked while holding this lock.
+                        // This is a bug; log it and emit lossy text with no stop check as a
+                        // best-effort recovery so the client still receives a response.
+                        tracing::error!(
+                            request_id = req_id,
+                            "per_request_state lock poisoned: {}; emitting token without filtering",
+                            e
+                        );
                         let raw_text = String::from_utf8_lossy(&token_bytes).into_owned();
                         if req
                             .response_tx
@@ -364,11 +371,12 @@ impl InferenceEngine {
                         continue;
                     }
                 };
-                let model_control_patterns = self.model_stop_tokens.clone();
+                // Clone stop tokens only on first token for this request (inside or_insert_with),
+                // not on every subsequent token.
                 let state = state_map.entry(*req_id).or_insert_with(|| PerRequestState {
                     show_thinking: req.sampling.show_thinking,
                     in_thinking: req.sampling.initial_in_thinking,
-                    model_control_patterns,
+                    model_control_patterns: self.model_stop_tokens.clone(),
                     ..Default::default()
                 });
 
@@ -425,8 +433,9 @@ impl InferenceEngine {
                     self.model.clear_sequence(req.kv_seq_id);
                 }
                 self.scheduler.mark_finished(*req_id, StopReason::Preempt);
-                if let Ok(mut state) = self.per_request_state.lock() {
-                    state.remove(req_id);
+                match self.per_request_state.lock() {
+                    Ok(mut state) => { state.remove(req_id); }
+                    Err(e) => tracing::error!("per_request_state lock poisoned on cleanup: {}", e),
                 }
                 continue;
             }

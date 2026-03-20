@@ -59,8 +59,32 @@ pub struct ChatCompletionRequest {
     pub response_format: Option<ResponseFormat>,
 }
 
+pub const DEFAULT_MAX_TOKENS: u32 = 256;
+
 fn default_max_tokens() -> Option<u32> {
-    Some(256)
+    Some(DEFAULT_MAX_TOKENS)
+}
+
+impl ChatCompletionRequest {
+    /// Validate numeric fields. Called by request handlers before processing.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(t) = self.temperature {
+            if t < 0.0 {
+                return Err(format!("temperature must be >= 0, got {t}"));
+            }
+        }
+        if let Some(p) = self.top_p {
+            if !(0.0..=1.0).contains(&p) {
+                return Err(format!("top_p must be in [0, 1], got {p}"));
+            }
+        }
+        if let Some(r) = self.repetition_penalty {
+            if r < 0.0 {
+                return Err(format!("repetition_penalty must be >= 0, got {r}"));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]

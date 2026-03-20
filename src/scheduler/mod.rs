@@ -5,7 +5,7 @@
 mod batch;
 
 pub use batch::{
-    InferenceRequest, RequestState, SamplingParams, ScheduledBatch, StopReason, Token,
+    InferenceRequest, SamplingParams, ScheduledBatch, StopReason, Token,
 };
 
 use std::collections::VecDeque;
@@ -44,11 +44,14 @@ struct PrefixCacheEntry {
 
 /// Process-stable random state for token hashing.
 /// Initialized once so `hash_tokens` is deterministic within a single run.
+// Used only in tests; #[allow] prevents a spurious dead_code warning.
+#[allow(dead_code)]
 static HASH_STATE: std::sync::OnceLock<ahash::RandomState> = std::sync::OnceLock::new();
 
 /// Hash a slice of token IDs using ahash (faster and more collision-resistant
 /// than DefaultHasher, stable within a single process run).
-pub fn hash_tokens(tokens: &[i32]) -> u64 {
+#[allow(dead_code)]
+pub(crate) fn hash_tokens(tokens: &[i32]) -> u64 {
     let state = HASH_STATE.get_or_init(ahash::RandomState::new);
     state.hash_one(tokens)
 }
@@ -90,7 +93,8 @@ impl Scheduler {
             work_notify: tokio::sync::Notify::new(),
             seq_id_pool: std::sync::Mutex::new(pool),
             prefix_cache: std::sync::Mutex::new(lru::LruCache::new(
-                NonZeroUsize::new(prefix_cache_max).expect("prefix_cache_max >= 1"),
+                NonZeroUsize::new(prefix_cache_max)
+                    .expect("prefix_cache_max is max_batch_size/4 clamped to >= 1"),
             )),
             prefix_cache_max,
             prefix_hits: AtomicU64::new(0),
@@ -100,7 +104,13 @@ impl Scheduler {
 
     /// Submit a request to the waiting queue.
     pub fn submit(&self, req: InferenceRequest) {
-        let mut q = self.waiting_queue.lock().unwrap_or_else(|e| e.into_inner());
+        let mut q = match self.waiting_queue.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("waiting_queue lock poisoned on submit: {}", e);
+                e.into_inner()
+            }
+        };
         info!(request_id = req.id, "request admitted to waiting queue");
         q.push_back(req);
         drop(q);
@@ -126,21 +136,23 @@ impl Scheduler {
     /// 3. If no blocks, LIFO preempt last admitted
     /// 4. Return prefill and decode id lists
     pub fn schedule_step(&self) -> ScheduledBatch {
+        // Lock ordering (must be consistent across ALL callers to avoid deadlock):
+        //   running_batch → waiting_queue → seq_id_pool → prefix_cache
         let mut running = match self.running_batch.lock() {
             Ok(g) => g,
-            Err(_) => return ScheduledBatch::default(),
+            Err(e) => { tracing::error!("running_batch lock poisoned: {}", e); return ScheduledBatch::default(); }
         };
         let mut waiting = match self.waiting_queue.lock() {
             Ok(g) => g,
-            Err(_) => return ScheduledBatch::default(),
+            Err(e) => { tracing::error!("waiting_queue lock poisoned: {}", e); return ScheduledBatch::default(); }
         };
         let mut pool = match self.seq_id_pool.lock() {
             Ok(g) => g,
-            Err(_) => return ScheduledBatch::default(),
+            Err(e) => { tracing::error!("seq_id_pool lock poisoned: {}", e); return ScheduledBatch::default(); }
         };
         let mut pcache = match self.prefix_cache.lock() {
             Ok(g) => g,
-            Err(_) => return ScheduledBatch::default(),
+            Err(e) => { tracing::error!("prefix_cache lock poisoned: {}", e); return ScheduledBatch::default(); }
         };
 
         // 1. Evict Finished and free blocks + return seq IDs.

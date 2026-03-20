@@ -3,6 +3,19 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// Default values for ServeArgs — centralised so grep/docs find them in one place.
+const DEFAULT_GPU_MEMORY_FRACTION: &str = "0.85";
+const DEFAULT_MAX_BATCH_SIZE: &str = "32";
+const DEFAULT_BLOCK_SIZE: &str = "16";
+const DEFAULT_HOST: &str = "0.0.0.0";
+const DEFAULT_PORT: &str = "8080";
+const DEFAULT_MAX_CONTEXT_LEN: &str = "4096";
+const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
+const DEFAULT_SWAP_FRACTION: &str = "0.0";
+const DEFAULT_MAX_MODELS: &str = "1";
+const DEFAULT_KEEP_ALIVE_SECS: &str = "300";
+const DEFAULT_TYPE_KV: &str = "f16";
+
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -24,40 +37,40 @@ pub struct ServeArgs {
     pub model_path: Option<PathBuf>,
 
     /// Fraction of GPU memory to use for KV cache (0.0-1.0)
-    #[arg(long, default_value = "0.85", env = "FOX_GPU_MEMORY_FRACTION")]
+    #[arg(long, default_value = DEFAULT_GPU_MEMORY_FRACTION, env = "FOX_GPU_MEMORY_FRACTION")]
     pub gpu_memory_fraction: f32,
 
     /// Maximum batch size for inference
-    #[arg(long, default_value = "32", env = "FOX_MAX_BATCH_SIZE")]
+    #[arg(long, default_value = DEFAULT_MAX_BATCH_SIZE, env = "FOX_MAX_BATCH_SIZE")]
     pub max_batch_size: usize,
 
     /// Tokens per KV block
-    #[arg(long, default_value = "16", env = "FOX_BLOCK_SIZE")]
+    #[arg(long, default_value = DEFAULT_BLOCK_SIZE, env = "FOX_BLOCK_SIZE")]
     pub block_size: usize,
 
     /// Host to bind the server to
-    #[arg(long, default_value = "0.0.0.0", env = "FOX_HOST")]
+    #[arg(long, default_value = DEFAULT_HOST, env = "FOX_HOST")]
     pub host: String,
 
     /// Port to bind the server to
-    #[arg(long, default_value = "8080", env = "FOX_PORT")]
+    #[arg(long, default_value = DEFAULT_PORT, env = "FOX_PORT")]
     pub port: u16,
 
     /// Maximum context length (tokens)
-    #[arg(long, default_value = "4096", env = "FOX_MAX_CONTEXT_LEN")]
+    #[arg(long, default_value = DEFAULT_MAX_CONTEXT_LEN, env = "FOX_MAX_CONTEXT_LEN")]
     pub max_context_len: u32,
 
     /// Default system prompt injected when no system message is present.
     /// Pass an empty string to disable injection.
     #[arg(
         long,
-        default_value = "You are a helpful assistant.",
+        default_value = DEFAULT_SYSTEM_PROMPT,
         env = "FOX_SYSTEM_PROMPT"
     )]
     pub system_prompt: String,
 
     /// Fraction of GPU memory reserved for CPU↔GPU KV-cache swap space (0.0-1.0).
-    #[arg(long, default_value = "0.0", env = "FOX_SWAP_FRACTION")]
+    #[arg(long, default_value = DEFAULT_SWAP_FRACTION, env = "FOX_SWAP_FRACTION")]
     pub swap_fraction: f32,
 
     /// Use JSON log format (for production)
@@ -70,7 +83,7 @@ pub struct ServeArgs {
     pub hf_token: Option<String>,
 
     /// Maximum number of models to keep in memory simultaneously (LRU eviction).
-    #[arg(long, default_value = "1", env = "FOX_MAX_MODELS")]
+    #[arg(long, default_value = DEFAULT_MAX_MODELS, env = "FOX_MAX_MODELS")]
     pub max_models: usize,
 
     /// Path to aliases TOML file. Default: ~/.config/ferrumox/aliases.toml
@@ -78,11 +91,11 @@ pub struct ServeArgs {
     pub alias_file: Option<PathBuf>,
 
     /// Seconds a model stays in memory after its last request (0 = never evict by time).
-    #[arg(long, default_value = "300", env = "FOX_KEEP_ALIVE_SECS")]
+    #[arg(long, default_value = DEFAULT_KEEP_ALIVE_SECS, env = "FOX_KEEP_ALIVE_SECS")]
     pub keep_alive_secs: u64,
 
     /// KV cache quantization: f16 (default), q8_0, q4_0
-    #[arg(long, default_value = "f16", env = "FOX_TYPE_KV")]
+    #[arg(long, default_value = DEFAULT_TYPE_KV, env = "FOX_TYPE_KV")]
     pub type_kv: String,
 
     /// Require `Authorization: Bearer <key>` on every API request.
@@ -99,21 +112,32 @@ fn parse_type_kv(s: &str) -> u32 {
     }
 }
 
-pub async fn run_serve(args: ServeArgs) -> Result<()> {
-    if args.gpu_memory_fraction <= 0.0 || args.gpu_memory_fraction > 1.0 {
-        anyhow::bail!(
-            "gpu_memory_fraction must be in range (0, 1], got {}",
-            args.gpu_memory_fraction
-        );
+impl ServeArgs {
+    fn validate(&self) -> Result<()> {
+        if self.gpu_memory_fraction <= 0.0 || self.gpu_memory_fraction > 1.0 {
+            anyhow::bail!(
+                "gpu_memory_fraction must be in range (0, 1], got {}",
+                self.gpu_memory_fraction
+            );
+        }
+        if self.max_context_len == 0 {
+            anyhow::bail!("max_context_len must be greater than 0");
+        }
+        if self.max_batch_size == 0 {
+            anyhow::bail!("max_batch_size must be greater than 0");
+        }
+        if self.block_size == 0 {
+            anyhow::bail!("block_size must be greater than 0");
+        }
+        Ok(())
     }
-    if args.max_context_len == 0 {
-        anyhow::bail!("max_context_len must be greater than 0");
-    }
+}
 
+fn setup_logging(json: bool) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("ferrumox=info,warn"));
 
-    if args.json_logs {
+    if json {
         tracing_subscriber::registry()
             .with(filter)
             .with(tracing_subscriber::fmt::layer().json())
@@ -124,6 +148,11 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             .with(tracing_subscriber::fmt::layer().pretty())
             .init();
     }
+}
+
+pub async fn run_serve(args: ServeArgs) -> Result<()> {
+    args.validate()?;
+    setup_logging(args.json_logs);
 
     let gpu_memory_bytes = get_gpu_memory_bytes();
 
@@ -172,11 +201,16 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         }
         None => {
             // Lazy mode: discover the first model in models_dir as the primary.
-            let first = list_models(&models_dir)
-                .unwrap_or_default()
-                .into_iter()
-                .next()
-                .and_then(|(p, _)| p.file_stem().and_then(|s| s.to_str()).map(str::to_string));
+            let first = match list_models(&models_dir) {
+                Ok(models) => models
+                    .into_iter()
+                    .next()
+                    .and_then(|(p, _)| p.file_stem().and_then(|s| s.to_str()).map(str::to_string)),
+                Err(e) => {
+                    tracing::error!("failed to list models in {}: {}", models_dir.display(), e);
+                    None
+                }
+            };
             if let Some(ref name) = first {
                 tracing::info!(
                     "lazy mode: primary model set to '{}' (not pre-loaded)",
@@ -251,19 +285,27 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl-C handler");
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::warn!("failed to listen for Ctrl-C: {}", e);
+            // Block forever — server stays up if signal setup fails.
+            std::future::pending::<()>().await;
+        }
     };
 
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-        tokio::select! {
-            _ = ctrl_c => {}
-            _ = sigterm.recv() => {}
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = ctrl_c => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to install SIGTERM handler: {}", e);
+                ctrl_c.await;
+            }
         }
     }
 

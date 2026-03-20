@@ -65,7 +65,8 @@ pub struct ModelRegistry {
 
 impl ModelRegistry {
     pub fn new(config: RegistryConfig, aliases: HashMap<String, String>) -> Self {
-        let cap = NonZeroUsize::new(config.max_models.max(1)).unwrap();
+        let cap = NonZeroUsize::new(config.max_models.max(1))
+            .expect("max(1) guarantees a non-zero value");
         Self {
             engines: DashMap::new(),
             lru: Mutex::new(lru::LruCache::new(cap)),
