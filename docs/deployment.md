@@ -25,9 +25,10 @@ The `-v` mount preserves downloaded models between container restarts. Without i
 
 | Tag | Description |
 |-----|-------------|
-| `latest` | Latest release with CUDA support |
+| `latest` | Latest stable release |
 | `1.0.0` | Pinned release version |
-| `cpu` | CPU-only build (no CUDA dependency) |
+
+> The image includes CUDA support and falls back to CPU automatically when no GPU is available. No separate CPU image is needed.
 
 ### Environment variables in Docker
 

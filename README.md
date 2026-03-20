@@ -296,6 +296,8 @@ All flags can also be set via environment variable or `~/.config/ferrumox/config
 | `--gpu-memory-fraction` | `FOX_GPU_MEMORY_FRACTION` | 0.85 | Fraction of GPU RAM for KV cache |
 | `--type-kv` | `FOX_TYPE_KV` | `f16` | KV cache precision: `f16`, `q8_0`, or `q4_0` |
 | `--max-batch-size` | `FOX_MAX_BATCH_SIZE` | 32 | Continuous batch size |
+| `--swap-fraction` | `FOX_SWAP_FRACTION` | 0.0 | GPU↔CPU KV-cache swap space fraction |
+| `--block-size` | `FOX_BLOCK_SIZE` | 16 | Tokens per KV block |
 | `--system-prompt` | `FOX_SYSTEM_PROMPT` | — | System prompt injected in every request |
 | `--api-key` | `FOX_API_KEY` | — | Require `Authorization: Bearer <key>` on all requests |
 | `--hf-token` | `HF_TOKEN` | — | HuggingFace token for private repos |
