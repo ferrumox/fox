@@ -54,17 +54,26 @@ pub fn print_styled(color: Option<Color>, bold: bool, dim: bool, text: &str) {
 ///   ─────────────────────────────── (dim)
 ///   /bye or Ctrl+D to exit · /think to toggle reasoning · N tokens  (dim)
 /// ```
-pub fn print_banner(model_name: &str, _context_len: u32) {
+pub fn print_banner(model_name: &str, _context_len: u32, supports_thinking: bool) {
     eprint_styled(None, false, false, "  🦊  ");
     eprint_styled(Some(Color::White), true, false, model_name);
     eprintln!();
     eprint_styled(None, false, true, &format!("  {}\n", "─".repeat(44)));
-    eprint_styled(
-        None,
-        false,
-        true,
-        "  /bye or Ctrl+D to exit · /think to toggle reasoning\n\n",
-    );
+    if supports_thinking {
+        eprint_styled(
+            None,
+            false,
+            true,
+            "  /bye or Ctrl+D to exit · /think to toggle reasoning\n\n",
+        );
+    } else {
+        eprint_styled(
+            None,
+            false,
+            true,
+            "  /bye or Ctrl+D to exit\n\n",
+        );
+    }
 }
 
 /// Print the user-prompt glyph `  ❯ ` (bold cyan) to stderr and flush.
@@ -167,7 +176,13 @@ pub fn eprint_kv_pair(key: &str, value: &str) {
 /// Print the system info block (GPU, RAM, ctx) to stderr at REPL startup.
 /// GPU line is omitted when `gpu` is `None`; RAM line omitted when `total_bytes == 0`.
 /// Only total VRAM is shown at startup (used VRAM is unreliable before CUDA pages settle).
-pub fn print_system_info(gpu: Option<&super::GpuInfo>, ram: &super::RamInfo, max_ctx: u32) {
+pub fn print_system_info(
+    gpu: Option<&super::GpuInfo>,
+    ram: &super::RamInfo,
+    max_ctx: u32,
+    supports_thinking: bool,
+    thinking_on: bool,
+) {
     if let Some(g) = gpu {
         let total_gb = g.total_bytes as f64 / 1_073_741_824.0;
         eprint_styled(
@@ -191,8 +206,20 @@ pub fn print_system_info(gpu: Option<&super::GpuInfo>, ram: &super::RamInfo, max
         None,
         false,
         true,
-        &format!("  ctx  · {} tokens máx\n\n", max_ctx),
+        &format!("  ctx  · {} tokens max\n", max_ctx),
     );
+    if supports_thinking {
+        eprint_styled(None, false, true, "  think· ");
+        if thinking_on {
+            eprint_styled(Some(Color::Cyan), false, false, "on");
+        } else {
+            eprint_styled(None, false, true, "off");
+        }
+        eprintln!();
+    } else {
+        eprint_styled(None, false, true, "  think· n/d\n");
+    }
+    eprintln!();
 }
 
 /// Print the compact post-response status line to stderr:

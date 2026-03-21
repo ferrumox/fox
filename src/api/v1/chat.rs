@@ -62,14 +62,15 @@ pub async fn chat_completions(
 
     let max_tokens = req.max_tokens.unwrap_or(256) as usize;
     let sampling = SamplingParams {
-        temperature: req.temperature.unwrap_or(1.0).max(0.0),
-        top_p: req.top_p.unwrap_or(1.0).clamp(0.0, 1.0),
+        temperature: req.temperature.unwrap_or(0.8).max(0.0),
+        top_p: req.top_p.unwrap_or(0.9).clamp(0.0, 1.0),
         top_k: req.top_k.unwrap_or(0),
         repetition_penalty: req.repetition_penalty.unwrap_or(1.0).max(1.0),
         seed: req.seed,
         stop: req.stop.clone(),
         show_thinking: false,
         initial_in_thinking: false,
+        max_thinking_chars: 8192,
     };
 
     let req_id = entry.engine.next_request_id();

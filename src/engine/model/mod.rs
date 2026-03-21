@@ -21,6 +21,15 @@ pub use stub::StubModel;
 // Shared types
 // ---------------------------------------------------------------------------
 
+/// Sampling parameters recommended by the model's GGUF metadata.
+/// Fields are `None` when the model doesn't specify a recommendation for that parameter.
+#[derive(Debug, Clone)]
+pub struct RecommendedSampling {
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<u32>,
+}
+
 /// Model architecture configuration.
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
@@ -132,6 +141,25 @@ pub trait Model: Send + Sync {
     /// Apply chat template to messages. Returns formatted prompt for tokenization.
     /// Fallback: simple "role: content\n" concatenation if template unavailable.
     fn apply_chat_template(&self, messages: &[(String, String)]) -> Result<String>;
+
+    /// Effective per-sequence context length (tokens) this model was configured with.
+    /// For `LlamaCppModel` this is the value used in `llama_init_from_model`.
+    fn context_len(&self) -> u32 {
+        4096
+    }
+
+    /// Returns `true` when the model has native thinking support — i.e. `<think>` is a
+    /// single special token in the vocabulary (Qwen3, DeepSeek-R1, etc.).
+    /// Models without native thinking always return `false`.
+    fn supports_thinking(&self) -> bool {
+        false
+    }
+
+    /// Return sampling parameters recommended by the model's GGUF metadata, if any.
+    /// Returns `None` when the model file contains no sampling hints.
+    fn recommended_sampling(&self) -> Option<RecommendedSampling> {
+        None
+    }
 
     /// Remove all KV cache / recurrent state for the given sequence ID.
     /// Must be called before a seq_id is reused for a new request; otherwise the new request

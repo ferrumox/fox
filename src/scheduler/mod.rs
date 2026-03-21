@@ -5,7 +5,7 @@
 mod batch;
 
 pub use batch::{
-    InferenceRequest, SamplingParams, ScheduledBatch, StopReason, Token,
+    InferenceRequest, RequestState, SamplingParams, ScheduledBatch, StopReason, Token,
 };
 
 use std::collections::VecDeque;

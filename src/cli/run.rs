@@ -39,20 +39,23 @@ pub struct RunArgs {
     pub alias_file: Option<PathBuf>,
 
     /// Maximum number of tokens to generate per turn
-    #[arg(long, default_value = "512")]
+    #[arg(long, default_value = "4096")]
     pub max_new_tokens: usize,
 
-    /// Sampling temperature (0 = greedy)
-    #[arg(long, default_value = "1.0")]
-    pub temperature: f32,
+    /// Sampling temperature (0 = greedy). Defaults to the model's recommended value if
+    /// present in its metadata, otherwise 0.8.
+    #[arg(long)]
+    pub temperature: Option<f32>,
 
-    /// Top-p nucleus sampling threshold
-    #[arg(long, default_value = "1.0")]
-    pub top_p: f32,
+    /// Top-p nucleus sampling threshold. Defaults to the model's recommended value if
+    /// present in its metadata, otherwise 0.9.
+    #[arg(long)]
+    pub top_p: Option<f32>,
 
-    /// Top-K filter (0 = disabled)
-    #[arg(long, default_value = "0")]
-    pub top_k: u32,
+    /// Top-K filter (0 = disabled). Defaults to the model's recommended value if
+    /// present in its metadata, otherwise 0.
+    #[arg(long)]
+    pub top_k: Option<u32>,
 
     /// Repetition penalty (1.0 = disabled)
     #[arg(long, default_value = "1.0")]
@@ -74,9 +77,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub no_system_prompt: bool,
 
-    /// Maximum context length (tokens)
-    #[arg(long, default_value = "4096")]
-    pub max_context_len: u32,
+    /// Maximum context length per sequence (tokens).
+    /// If omitted, fox auto-detects the model's trained context length.
+    #[arg(long)]
+    pub max_context_len: Option<u32>,
 
     /// Fraction of GPU/RAM to use for KV cache
     #[arg(long, default_value = "0.85")]
@@ -193,10 +197,14 @@ async fn run_oneshot(args: &RunArgs, engine: &Arc<InferenceEngine>, prompt: Stri
 async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
     let model_name = engine.model_name();
 
-    theme::print_banner(model_name, args.max_context_len);
+    let effective_ctx = engine.context_len();
+    let supports_thinking = engine.supports_thinking();
+    let mut show_thinking = supports_thinking;
+
+    theme::print_banner(model_name, effective_ctx, supports_thinking);
     let startup_gpu = get_gpu_info();
     let startup_ram = get_ram_info();
-    theme::print_system_info(startup_gpu.as_ref(), &startup_ram, args.max_context_len);
+    theme::print_system_info(startup_gpu.as_ref(), &startup_ram, effective_ctx, supports_thinking, show_thinking);
 
     // Keep the engine loop running for the lifetime of the session.
     let engine_loop = {
@@ -205,8 +213,6 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
             let _ = engine.run_loop().await;
         })
     };
-
-    let mut show_thinking = args.show_thinking;
     let mut messages: Vec<(String, String)> = Vec::new();
     if !args.no_system_prompt && !args.system_prompt.is_empty() {
         messages.push(("system".to_string(), args.system_prompt.clone()));
@@ -275,9 +281,18 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
         }
 
         if input == "/think" {
-            show_thinking = !show_thinking;
-            let status = if show_thinking { "enabled" } else { "disabled" };
-            theme::eprint_styled(None, false, true, &format!("  Reasoning {status}\n\n"));
+            if !supports_thinking {
+                theme::eprint_styled(
+                    Some(crossterm::style::Color::Yellow),
+                    false,
+                    false,
+                    "  This model has no native reasoning support (<think> token not found)\n\n",
+                );
+            } else {
+                show_thinking = !show_thinking;
+                let status = if show_thinking { "on" } else { "off" };
+                theme::eprint_styled(None, false, true, &format!("  think · {status}\n\n"));
+            }
             continue;
         }
 
@@ -322,7 +337,7 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
         let ram_info = get_ram_info();
         theme::print_status_line(
             ctx_tokens,
-            args.max_context_len,
+            engine.context_len(),
             gpu_info.as_ref(),
             &ram_info,
             toks_per_sec,
@@ -361,7 +376,8 @@ async fn stream_turn_collecting(
         .tokenize(&prompt)
         .unwrap_or_else(|_| prompt.bytes().map(|b| b as i32).take(4096).collect());
 
-    let mut sampling = build_sampling_params(args);
+    let recommended = engine.recommended_sampling();
+    let mut sampling = build_sampling_params(args, recommended.as_ref());
     sampling.show_thinking = show_thinking;
     sampling.initial_in_thinking = show_thinking;
 
@@ -445,7 +461,8 @@ async fn stream_turn(
         .tokenize(&prompt)
         .unwrap_or_else(|_| prompt.bytes().map(|b| b as i32).take(4096).collect());
 
-    let mut sampling = build_sampling_params(args);
+    let recommended = engine.recommended_sampling();
+    let mut sampling = build_sampling_params(args, recommended.as_ref());
     sampling.initial_in_thinking = args.show_thinking;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -480,15 +497,30 @@ async fn stream_turn(
     Ok(())
 }
 
-fn build_sampling_params(args: &RunArgs) -> SamplingParams {
+fn build_sampling_params(
+    args: &RunArgs,
+    recommended: Option<&crate::engine::model::RecommendedSampling>,
+) -> SamplingParams {
+    // Priority: user flag > model metadata > hardcoded default.
+    let temperature = args.temperature
+        .or_else(|| recommended.and_then(|r| r.temperature))
+        .unwrap_or(0.8);
+    let top_p = args.top_p
+        .or_else(|| recommended.and_then(|r| r.top_p))
+        .unwrap_or(0.9);
+    let top_k = args.top_k
+        .or_else(|| recommended.and_then(|r| r.top_k))
+        .unwrap_or(0);
+
     SamplingParams {
-        temperature: args.temperature,
-        top_p: args.top_p,
-        top_k: args.top_k,
+        temperature,
+        top_p,
+        top_k,
         repetition_penalty: args.repetition_penalty,
         seed: args.seed,
         stop: None,
         show_thinking: args.show_thinking,
         initial_in_thinking: false, // set by callers that force thinking mode
+        max_thinking_chars: 8192,
     }
 }

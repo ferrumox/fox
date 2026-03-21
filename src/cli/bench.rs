@@ -40,9 +40,10 @@ pub struct BenchArgs {
     #[arg(long, default_value = "200")]
     pub max_new_tokens: usize,
 
-    /// Maximum context length (tokens)
-    #[arg(long, default_value = "4096")]
-    pub max_context_len: u32,
+    /// Maximum context length per sequence (tokens).
+    /// If omitted, fox auto-detects the model's trained context length.
+    #[arg(long)]
+    pub max_context_len: Option<u32>,
 
     /// Number of runs to average results over
     #[arg(long, default_value = "1")]
@@ -141,6 +142,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
             stop: None,
             show_thinking: false,
             initial_in_thinking: false,
+            max_thinking_chars: 8192,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

@@ -110,6 +110,21 @@ impl InferenceEngine {
         &self.model_name
     }
 
+    /// Effective per-sequence context length (tokens) this engine was configured with.
+    pub fn context_len(&self) -> u32 {
+        self.model.context_len()
+    }
+
+    /// Whether the loaded model has native thinking support (`<think>` special token).
+    pub fn supports_thinking(&self) -> bool {
+        self.model.supports_thinking()
+    }
+
+    /// Sampling parameters recommended by the model's GGUF metadata, if any.
+    pub fn recommended_sampling(&self) -> Option<model::RecommendedSampling> {
+        self.model.recommended_sampling()
+    }
+
     /// Main inference loop.
     pub async fn run_loop(self: Arc<Self>) -> Result<()> {
         let engine = self.clone();
@@ -377,6 +392,7 @@ impl InferenceEngine {
                     show_thinking: req.sampling.show_thinking,
                     in_thinking: req.sampling.initial_in_thinking,
                     model_control_patterns: self.model_stop_tokens.clone(),
+                    max_thinking_chars: req.sampling.max_thinking_chars,
                     ..Default::default()
                 });
 

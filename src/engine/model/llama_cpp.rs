@@ -47,6 +47,14 @@ fn query_gpu_free_bytes() -> Option<usize> {
     Some(mib * 1024 * 1024)
 }
 
+/// Choose the effective per-sequence context length.
+///
+/// Returns `user_limit` when the user specified one explicitly, otherwise
+/// falls back to `model_train_ctx` (the context the model was trained with).
+pub(crate) fn resolve_context_len(user_limit: Option<u32>, model_train_ctx: u32) -> u32 {
+    user_limit.unwrap_or(model_train_ctx)
+}
+
 #[cfg(not(fox_stub))]
 /// Llama.cpp model via FFI.
 pub struct LlamaCppModel {
@@ -55,6 +63,8 @@ pub struct LlamaCppModel {
     vocab: *const ffi::llama_vocab,
     config: ModelConfig,
     eos_token: i32,
+    /// Effective per-sequence context length (tokens) used when creating the llama.cpp context.
+    effective_ctx: u32,
 }
 
 #[cfg(not(fox_stub))]
@@ -63,7 +73,7 @@ impl LlamaCppModel {
     pub fn load(
         model_path: &std::path::Path,
         max_batch_size: usize,
-        max_context_len: u32,
+        max_context_len: Option<u32>,
         gpu_memory_bytes: usize,
         gpu_memory_fraction: f32,
         type_kv: u32,
@@ -126,6 +136,19 @@ impl LlamaCppModel {
         // n_seq_max controls how many concurrent sequences the KV cache tracks.
         let n_seq = (max_batch_size as u32).max(4);
 
+        // Resolve effective per-sequence context: use the user's explicit limit, or
+        // auto-detect from the model's trained context length (llama_model_n_ctx_train).
+        let model_train_ctx =
+            unsafe { ffi::llama_model_n_ctx_train(model.as_ptr()) } as u32;
+        let effective_max_ctx = resolve_context_len(max_context_len, model_train_ctx);
+        if max_context_len.is_none() {
+            tracing::info!(
+                model_train_ctx,
+                effective_ctx = effective_max_ctx,
+                "auto context: using model's trained context length"
+            );
+        }
+
         // Cap total KV context to fit in available GPU (or RAM) memory.
         // Query FREE memory now (after model weights are loaded) so we don't OOM.
         // Falls back to gpu_memory_bytes * fraction if nvidia-smi is unavailable.
@@ -137,15 +160,15 @@ impl LlamaCppModel {
         let max_tokens_by_mem = if bytes_per_token > 0 && budget_bytes > 0 {
             (budget_bytes / bytes_per_token) as u32
         } else {
-            max_context_len * n_seq
+            effective_max_ctx * n_seq
         };
-        // Honour the user's max_context_len per sequence, but don't exceed memory budget.
-        let n_ctx = (max_context_len * n_seq)
+        // Honour the effective_max_ctx per sequence, but don't exceed memory budget.
+        let n_ctx = (effective_max_ctx * n_seq)
             .min(max_tokens_by_mem)
-            .max(max_context_len);
+            .max(effective_max_ctx);
         ctx_params.n_ctx = n_ctx;
         // n_batch must be at least as large as n_ctx to handle full prompts in one pass
-        ctx_params.n_batch = max_context_len.max(max_batch_size as u32);
+        ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
         ctx_params.flash_attn_type = 1; // LLAMA_FLASH_ATTN_TYPE_ENABLED
         ctx_params.offload_kqv = true;
@@ -169,7 +192,87 @@ impl LlamaCppModel {
             vocab,
             config,
             eos_token,
+            effective_ctx: effective_max_ctx,
         })
+    }
+
+    /// Read a single GGUF metadata value by key name.
+    /// Returns `None` when the key is absent or cannot be decoded as UTF-8.
+    fn read_meta_str(&self, key: &str) -> Option<String> {
+        let key_c = CString::new(key).ok()?;
+        let mut buf = vec![0u8; 512];
+        let n = unsafe {
+            ffi::llama_model_meta_val_str(
+                self._model.as_ptr(),
+                key_c.as_ptr(),
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len(),
+            )
+        };
+        if n < 0 {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+    }
+
+    /// Read a GGUF metadata value as `f32`. Returns `None` when missing or not parseable.
+    fn read_meta_f32(&self, key: &str) -> Option<f32> {
+        self.read_meta_str(key)?.trim().parse::<f32>().ok()
+    }
+
+    /// Read a GGUF metadata value as `u32`. Returns `None` when missing or not parseable.
+    fn read_meta_u32(&self, key: &str) -> Option<u32> {
+        self.read_meta_str(key)?.trim().parse::<u32>().ok()
+    }
+
+    /// Iterate all GGUF metadata keys/values and look for sampling-related hints.
+    /// Logs all keys at TRACE level. Returns a partial `RecommendedSampling`.
+    fn read_sampling_from_meta(&self) -> super::RecommendedSampling {
+        let count = unsafe { ffi::llama_model_meta_count(self._model.as_ptr()) };
+        let mut temperature: Option<f32> = None;
+        let mut top_p: Option<f32> = None;
+        let mut top_k: Option<u32> = None;
+
+        let mut key_buf = vec![0u8; 256];
+        let mut val_buf = vec![0u8; 512];
+
+        for i in 0..count {
+            let kn = unsafe {
+                ffi::llama_model_meta_key_by_index(
+                    self._model.as_ptr(),
+                    i,
+                    key_buf.as_mut_ptr() as *mut c_char,
+                    key_buf.len(),
+                )
+            };
+            let vn = unsafe {
+                ffi::llama_model_meta_val_str_by_index(
+                    self._model.as_ptr(),
+                    i,
+                    val_buf.as_mut_ptr() as *mut c_char,
+                    val_buf.len(),
+                )
+            };
+            if kn < 0 || vn < 0 {
+                continue;
+            }
+            let key = String::from_utf8_lossy(&key_buf[..kn as usize]).into_owned();
+            let val = String::from_utf8_lossy(&val_buf[..vn as usize]).into_owned();
+            tracing::trace!(key = %key, value = %val, "GGUF metadata");
+
+            let key_lc = key.to_lowercase();
+            if temperature.is_none() && key_lc.contains("temperature") {
+                temperature = val.trim().parse::<f32>().ok();
+            }
+            if top_p.is_none() && key_lc.contains("top_p") {
+                top_p = val.trim().parse::<f32>().ok();
+            }
+            if top_k.is_none() && key_lc.contains("top_k") {
+                top_k = val.trim().parse::<u32>().ok();
+            }
+        }
+
+        super::RecommendedSampling { temperature, top_p, top_k }
     }
 
     fn tokenize_impl(&self, text: &str) -> Result<Vec<i32>> {
@@ -393,15 +496,15 @@ impl LlamaCppModel {
                     buf.len() as i32,
                 )
             };
-            if n >= 0 {
-                let len = (n as usize).min(buf.len());
-                let result = String::from_utf8_lossy(&buf[..len]).into_owned();
+            if n >= 0 && (n as usize) <= buf.len() {
+                // Buffer was large enough — return the complete result.
+                let result = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
                 if !result.is_empty() {
                     tracing::debug!(template = tmpl_str, "applied chat template");
                     return Ok(result);
                 }
-            }
-            if n > 0 {
+            } else if n > 0 {
+                // Buffer was too small — resize to the exact size needed and retry.
                 let need = n as usize;
                 buf.resize(need, 0);
                 let n2 = unsafe {
@@ -414,10 +517,10 @@ impl LlamaCppModel {
                         buf.len() as i32,
                     )
                 };
-                if n2 >= 0 {
-                    let len = (n2 as usize).min(buf.len());
-                    let result = String::from_utf8_lossy(&buf[..len]).into_owned();
+                if n2 >= 0 && (n2 as usize) <= buf.len() {
+                    let result = String::from_utf8_lossy(&buf[..n2 as usize]).into_owned();
                     if !result.is_empty() {
+                        tracing::debug!(template = tmpl_str, "applied chat template (resized)");
                         return Ok(result);
                     }
                 }
@@ -767,6 +870,30 @@ impl Model for LlamaCppModel {
         self.apply_chat_template_impl(messages)
     }
 
+    fn context_len(&self) -> u32 {
+        self.effective_ctx
+    }
+
+    fn supports_thinking(&self) -> bool {
+        // Reasoning models (Qwen3, DeepSeek-R1, …) have `<think>` as a single
+        // special token.  Tokenising it with add_special=true produces at most
+        // [BOS, <think>] (2 tokens).  Non-reasoning models split it into many
+        // character/subword pieces, so the count will be higher.
+        self.tokenize_impl("<think>")
+            .map(|t| t.len() <= 2)
+            .unwrap_or(false)
+    }
+
+    fn recommended_sampling(&self) -> Option<super::RecommendedSampling> {
+        let rec = self.read_sampling_from_meta();
+        // Return Some only if at least one parameter was found in the metadata.
+        if rec.temperature.is_some() || rec.top_p.is_some() || rec.top_k.is_some() {
+            Some(rec)
+        } else {
+            None
+        }
+    }
+
     fn clear_sequence(&self, seq_id: i32) {
         let ctx_guard = match self._ctx.lock() {
             Ok(g) => g,
@@ -871,7 +998,7 @@ impl LlamaCppModel {
     pub fn load(
         model_path: &std::path::Path,
         max_batch_size: usize,
-        max_context_len: u32,
+        max_context_len: Option<u32>,
         gpu_memory_bytes: usize,
         gpu_memory_fraction: f32,
         type_kv: u32,
@@ -980,5 +1107,52 @@ impl Model for LlamaCppModel {
 
     fn stop_tokens(&self) -> Vec<String> {
         vec![]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_context_len;
+
+    // --- resolve_context_len ---
+
+    #[test]
+    fn auto_uses_model_trained_ctx() {
+        // When user passes None, the model's trained context is used as-is.
+        assert_eq!(resolve_context_len(None, 8192), 8192);
+    }
+
+    #[test]
+    fn auto_uses_model_trained_ctx_large() {
+        // Works for models with very large trained context (e.g. Qwen2.5 128k).
+        assert_eq!(resolve_context_len(None, 131_072), 131_072);
+    }
+
+    #[test]
+    fn explicit_limit_overrides_model_ctx() {
+        // When the user specifies a value, it takes priority over the model's context.
+        assert_eq!(resolve_context_len(Some(4096), 131_072), 4096);
+    }
+
+    #[test]
+    fn explicit_limit_equal_to_model_ctx() {
+        // Setting the limit to exactly the model's trained context is valid.
+        assert_eq!(resolve_context_len(Some(8192), 8192), 8192);
+    }
+
+    #[test]
+    fn explicit_limit_larger_than_model_ctx() {
+        // User can request more than trained context; model/memory budget caps it later.
+        assert_eq!(resolve_context_len(Some(16_384), 8192), 16_384);
+    }
+
+    #[test]
+    fn explicit_limit_of_one_is_respected() {
+        // Pathological but valid: user forces a minimal context.
+        assert_eq!(resolve_context_len(Some(1), 32_768), 1);
     }
 }

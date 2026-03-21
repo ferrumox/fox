@@ -60,7 +60,7 @@ mod tests {
                     models_dir: PathBuf::from("/tmp"),
                     max_models: 1,
                     max_batch_size: 1,
-                    max_context_len: 512,
+                    max_context_len: Some(512),
                     block_size: 16,
                     gpu_memory_bytes: 0,
                     gpu_memory_fraction: 0.85,

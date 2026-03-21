@@ -35,6 +35,7 @@ pub fn sampling_from_ollama(opts: Option<&OllamaOptions>) -> (SamplingParams, us
             stop,
             show_thinking: true,
             initial_in_thinking: false,
+            max_thinking_chars: 8192,
         },
         max_tokens,
     )

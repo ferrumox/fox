@@ -44,6 +44,12 @@ pub(super) struct PerRequestState {
     /// Bytes are drained into valid UTF-8 strings before entering the filter
     /// pipeline, preventing `String::from_utf8_lossy` replacement artifacts (??).
     pub(super) utf8_buf: Vec<u8>,
+    /// Number of `<think>…` characters accumulated in the current thinking block.
+    /// Reset each time a new `<think>` tag is entered.
+    pub(super) thinking_chars: usize,
+    /// Maximum characters allowed inside a `<think>…` block before it is
+    /// force-closed.  0 = no limit.  Set from `SamplingParams::max_thinking_chars`.
+    pub(super) max_thinking_chars: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +83,7 @@ pub(super) fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (St
     // 1. Enter <think> block (usually a single special token like 248068 for Qwen3.5).
     if raw.contains("<think>") {
         state.in_thinking = true;
+        state.thinking_chars = 0; // reset budget counter for each new block
         if state.show_thinking {
             // Emit the <think> tag so the user can see when reasoning starts.
             return (raw.to_string(), false);
@@ -117,6 +124,20 @@ pub(super) fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (St
 
     // 3. Inside a thinking block.
     if state.in_thinking {
+        // Budget enforcement: force-close the block when the character limit is reached.
+        // This prevents infinite thinking loops where the model never generates `</think>`.
+        if state.max_thinking_chars > 0 {
+            state.thinking_chars += raw.chars().count();
+            if state.thinking_chars >= state.max_thinking_chars {
+                state.in_thinking = false;
+                // Emit a synthetic closing tag so show_thinking output is well-formed,
+                // then let subsequent tokens flow through as normal response content.
+                if state.show_thinking {
+                    return ("</think>\n".to_string(), false);
+                }
+                return (String::new(), false);
+            }
+        }
         if state.show_thinking {
             // Emit thinking tokens directly (no holdback needed — control patterns
             // like <|im_end|> should not appear inside a thinking block).
@@ -424,6 +445,87 @@ mod tests {
         let (t2, h2) = check_stop_sequences(&mut s, "world".to_string(), &stops(&["User:"]));
         assert_eq!(t2, "world");
         assert!(!h2);
+    }
+
+    // --- thinking budget enforcement ---
+
+    fn state_with_budget(max_thinking_chars: usize) -> PerRequestState {
+        PerRequestState {
+            max_thinking_chars,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_budget_not_exceeded_passes_through_normally() {
+        let mut s = state_with_budget(100);
+        // Enter thinking block.
+        assert_eq!(aof(&mut s, "<think>"), "");
+        assert!(s.in_thinking);
+        // Short thought — well under budget.
+        assert_eq!(aof(&mut s, "short"), "");
+        assert!(s.in_thinking, "should still be thinking");
+        // Normal close.
+        assert_eq!(aof(&mut s, "</think> answer"), " answer");
+        assert!(!s.in_thinking);
+    }
+
+    #[test]
+    fn test_budget_force_closes_thinking_block() {
+        // Budget of 5 chars: the 6-char token "123456" should trigger force-close.
+        let mut s = state_with_budget(5);
+        assert_eq!(aof(&mut s, "<think>"), "");
+        assert!(s.in_thinking);
+        // 6 chars — exceeds budget of 5.
+        assert_eq!(aof(&mut s, "123456"), "");
+        assert!(!s.in_thinking, "budget exceeded → in_thinking must be false");
+        // Next tokens flow through as normal response content.
+        assert_eq!(aof(&mut s, "hello"), "hello");
+    }
+
+    #[test]
+    fn test_budget_force_closes_with_show_thinking() {
+        let mut s = state_with_budget(5);
+        s.show_thinking = true;
+        // Enter + enter budget via tag (tag is returned in show_thinking mode).
+        let tag_out = aof(&mut s, "<think>");
+        assert_eq!(tag_out, "<think>");
+        assert!(s.in_thinking);
+        // 6 chars — exceeds budget → synthetic </think>\n emitted.
+        let out = aof(&mut s, "123456");
+        assert_eq!(out, "</think>\n", "synthetic close tag must be emitted");
+        assert!(!s.in_thinking);
+        // Subsequent tokens are normal output.
+        assert_eq!(aof(&mut s, "response"), "response");
+    }
+
+    #[test]
+    fn test_budget_zero_means_no_limit() {
+        let mut s = state_with_budget(0); // 0 = unlimited
+        assert_eq!(aof(&mut s, "<think>"), "");
+        // Pump in a lot of content — should never force-close.
+        for _ in 0..100 {
+            assert_eq!(aof(&mut s, "aaaaaaaaaa"), ""); // 10 chars per call, 1000 total
+            assert!(s.in_thinking, "no limit → always stays in thinking");
+        }
+        // Normal close still works.
+        assert_eq!(aof(&mut s, "</think> done"), " done");
+        assert!(!s.in_thinking);
+    }
+
+    #[test]
+    fn test_budget_resets_on_new_think_block() {
+        let mut s = state_with_budget(10);
+        // First block: use 8 chars, then close normally.
+        assert_eq!(aof(&mut s, "<think>"), "");
+        assert_eq!(aof(&mut s, "12345678"), ""); // 8 chars used
+        assert_eq!(aof(&mut s, "</think>"), "");
+        assert_eq!(s.thinking_chars, 8);
+        // Second block: budget counter must reset on entry.
+        assert_eq!(aof(&mut s, "<think>"), "");
+        assert_eq!(s.thinking_chars, 0, "budget counter must reset on re-entry");
+        assert_eq!(aof(&mut s, "12345678"), ""); // still within budget
+        assert!(s.in_thinking);
     }
 
     // --- trim_text_buffer ---

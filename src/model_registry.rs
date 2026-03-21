@@ -24,7 +24,8 @@ pub struct RegistryConfig {
     pub models_dir: PathBuf,
     pub max_models: usize,
     pub max_batch_size: usize,
-    pub max_context_len: u32,
+    /// Per-sequence context length. `None` = auto-detect from the model's trained context.
+    pub max_context_len: Option<u32>,
     pub block_size: usize,
     pub gpu_memory_bytes: usize,
     pub gpu_memory_fraction: f32,
@@ -358,7 +359,7 @@ mod tests {
             models_dir: dir.to_path_buf(),
             max_models,
             max_batch_size: 4,
-            max_context_len: 512,
+            max_context_len: Some(512),
             block_size: 16,
             gpu_memory_bytes: 4 * 1024 * 1024,
             gpu_memory_fraction: 0.9,

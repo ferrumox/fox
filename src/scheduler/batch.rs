@@ -28,6 +28,11 @@ pub struct SamplingParams {
     /// Set together with `show_thinking` when the caller has appended `<think>`
     /// to the prompt to force the model into thinking mode (Qwen3-style).
     pub initial_in_thinking: bool,
+    /// Maximum characters of `<think>…` content before the block is force-closed
+    /// and the model is allowed to start its response.  Prevents infinite thinking
+    /// loops where the model never generates `</think>`.
+    /// 0 = no limit.  Default: 8192 (roughly 2 000–3 000 tokens).
+    pub max_thinking_chars: usize,
 }
 
 impl Default for SamplingParams {
@@ -41,6 +46,7 @@ impl Default for SamplingParams {
             stop: None,
             show_thinking: false,
             initial_in_thinking: false,
+            max_thinking_chars: 8192,
         }
     }
 }

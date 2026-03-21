@@ -9,7 +9,6 @@ const DEFAULT_MAX_BATCH_SIZE: &str = "32";
 const DEFAULT_BLOCK_SIZE: &str = "16";
 const DEFAULT_HOST: &str = "0.0.0.0";
 const DEFAULT_PORT: &str = "8080";
-const DEFAULT_MAX_CONTEXT_LEN: &str = "4096";
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
 const DEFAULT_SWAP_FRACTION: &str = "0.0";
 const DEFAULT_MAX_MODELS: &str = "1";
@@ -56,9 +55,10 @@ pub struct ServeArgs {
     #[arg(long, default_value = DEFAULT_PORT, env = "FOX_PORT")]
     pub port: u16,
 
-    /// Maximum context length (tokens)
-    #[arg(long, default_value = DEFAULT_MAX_CONTEXT_LEN, env = "FOX_MAX_CONTEXT_LEN")]
-    pub max_context_len: u32,
+    /// Maximum context length per sequence (tokens).
+    /// If omitted, fox auto-detects the model's trained context length.
+    #[arg(long, env = "FOX_MAX_CONTEXT_LEN")]
+    pub max_context_len: Option<u32>,
 
     /// Default system prompt injected when no system message is present.
     /// Pass an empty string to disable injection.
@@ -120,7 +120,7 @@ impl ServeArgs {
                 self.gpu_memory_fraction
             );
         }
-        if self.max_context_len == 0 {
+        if self.max_context_len == Some(0) {
             anyhow::bail!("max_context_len must be greater than 0");
         }
         if self.max_batch_size == 0 {
