@@ -256,6 +256,11 @@ impl LlamaCppModel {
             if kn < 0 || vn < 0 {
                 continue;
             }
+            // Skip values that didn't fit in the buffer (e.g. long chat templates).
+            // Sampling parameters are always short numeric strings — no false negatives.
+            if vn as usize > val_buf.len() || kn as usize > key_buf.len() {
+                continue;
+            }
             let key = String::from_utf8_lossy(&key_buf[..kn as usize]).into_owned();
             let val = String::from_utf8_lossy(&val_buf[..vn as usize]).into_owned();
             tracing::trace!(key = %key, value = %val, "GGUF metadata");
