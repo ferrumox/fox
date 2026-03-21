@@ -1,65 +1,29 @@
 // ModelRegistry: load models on demand, keep up to N in memory (LRU + time-based eviction).
 
+mod config;
+mod entry;
+mod loader;
+
+pub use config::RegistryConfig;
+pub use entry::EngineEntry;
+
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
 use crate::cli::list_models;
-use crate::engine::model::{LlamaCppModel, Model};
-use crate::engine::InferenceEngine;
-use crate::kv_cache::KVCacheManager;
-use crate::metrics::Metrics;
-use crate::scheduler::Scheduler;
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-pub struct RegistryConfig {
-    pub models_dir: PathBuf,
-    pub max_models: usize,
-    pub max_batch_size: usize,
-    /// Per-sequence context length. `None` = auto-detect from the model's trained context.
-    pub max_context_len: Option<u32>,
-    pub block_size: usize,
-    pub gpu_memory_bytes: usize,
-    pub gpu_memory_fraction: f32,
-    pub metrics: Option<Arc<Metrics>>,
-    /// Seconds since last use before a model is evicted. 0 = never evict by time.
-    pub keep_alive_secs: u64,
-    /// KV cache element type: 1=F16 (default), 8=Q8_0, 2=Q4_0
-    pub type_kv: u32,
-}
-
-// ---------------------------------------------------------------------------
-// EngineEntry
-// ---------------------------------------------------------------------------
-
-pub struct EngineEntry {
-    pub engine: Arc<InferenceEngine>,
-    /// Aborted when this entry is dropped (LRU eviction or explicit unload).
-    loop_handle: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for EngineEntry {
-    fn drop(&mut self) {
-        self.loop_handle.abort();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ModelRegistry
-// ---------------------------------------------------------------------------
+use self::loader::load_model;
 
 pub struct ModelRegistry {
     engines: DashMap<String, Arc<EngineEntry>>,
     lru: Mutex<lru::LruCache<String, ()>>,
-    last_used: DashMap<String, Instant>,
+    pub(crate) last_used: DashMap<String, Instant>,
     config: RegistryConfig,
     aliases: HashMap<String, String>,
 }
@@ -145,11 +109,7 @@ impl ModelRegistry {
         removed
     }
 
-    // -----------------------------------------------------------------------
-    // Private helpers
-    // -----------------------------------------------------------------------
-
-    fn evict_lru_if_needed(&self) {
+    pub(crate) fn evict_lru_if_needed(&self) {
         while self.engines.len() >= self.config.max_models {
             let lru_key = {
                 let mut lru = self.lru.lock().unwrap_or_else(|e| e.into_inner());
@@ -166,7 +126,7 @@ impl ModelRegistry {
         }
     }
 
-    fn evict_expired(&self) {
+    pub(crate) fn evict_expired(&self) {
         if self.config.keep_alive_secs == 0 {
             return;
         }
@@ -230,103 +190,6 @@ impl ModelRegistry {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Model loading
-// ---------------------------------------------------------------------------
-
-async fn load_model(name: &str, path: &Path, cfg: &RegistryConfig) -> Result<EngineEntry> {
-    let path = path.to_path_buf();
-    let name = name.to_string();
-    let max_batch_size = cfg.max_batch_size;
-    let max_context_len = cfg.max_context_len;
-    let gpu_memory_bytes = cfg.gpu_memory_bytes;
-    let gpu_memory_fraction = cfg.gpu_memory_fraction;
-    let block_size = cfg.block_size;
-    let metrics = cfg.metrics.clone();
-    let type_kv = cfg.type_kv;
-
-    tracing::info!("loading model '{}' from {:?}", name, path);
-
-    let model = tokio::task::spawn_blocking(move || {
-        LlamaCppModel::load(
-            &path,
-            max_batch_size,
-            max_context_len,
-            gpu_memory_bytes,
-            gpu_memory_fraction,
-            type_kv,
-        )
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;
-
-    let model_config = model.model_config();
-    let model: Arc<dyn Model> = Arc::new(model);
-    let kv_cache = Arc::new(KVCacheManager::new(
-        &model_config,
-        gpu_memory_bytes,
-        gpu_memory_fraction,
-        block_size,
-        type_kv,
-    ));
-    let scheduler = Arc::new(Scheduler::new(kv_cache.clone(), max_batch_size));
-    let engine = Arc::new(InferenceEngine::new(
-        model, scheduler, kv_cache, name, metrics,
-    ));
-
-    let loop_handle = {
-        let e = engine.clone();
-        tokio::spawn(async move {
-            if let Err(err) = e.run_loop().await {
-                tracing::error!("engine loop error: {err}");
-            }
-        })
-    };
-
-    Ok(EngineEntry {
-        engine,
-        loop_handle,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
-
-#[cfg(any(test, feature = "test-helpers"))]
-impl EngineEntry {
-    /// Build a test `EngineEntry` backed by `StubModel` (no FFI).
-    /// Must be called inside a Tokio runtime (i.e. inside `#[tokio::test]`).
-    pub fn for_test(name: &str) -> Arc<Self> {
-        use crate::engine::model::StubModel;
-        use crate::kv_cache::KVCacheManager;
-        use crate::scheduler::Scheduler;
-
-        let model: Arc<dyn crate::engine::model::Model> = Arc::new(StubModel);
-        let cfg = model.model_config();
-        // Small KV cache: 4 MiB, fraction 0.9, block_size 16
-        let kv = Arc::new(KVCacheManager::new(&cfg, 4 * 1024 * 1024, 0.9, 16, 1));
-        let sched = Arc::new(Scheduler::new(kv.clone(), 4));
-        let engine = Arc::new(crate::engine::InferenceEngine::new(
-            model,
-            sched,
-            kv,
-            name.to_string(),
-            None,
-        ));
-        let loop_handle = {
-            let e = engine.clone();
-            tokio::spawn(async move {
-                let _ = e.run_loop().await;
-            })
-        };
-        Arc::new(Self {
-            engine,
-            loop_handle,
-        })
-    }
-}
-
 #[cfg(any(test, feature = "test-helpers"))]
 impl ModelRegistry {
     /// Inject a pre-built engine entry without touching the filesystem (for tests).
@@ -340,10 +203,6 @@ impl ModelRegistry {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -368,8 +227,6 @@ mod tests {
             type_kv: 1,
         }
     }
-
-    // -- unload ---------------------------------------------------------------
 
     #[tokio::test]
     async fn test_unload_removes_loaded_model() {
@@ -396,12 +253,9 @@ mod tests {
         assert!(!registry.unload("does-not-exist"));
     }
 
-    // -- evict_lru_if_needed --------------------------------------------------
-
     #[tokio::test]
     async fn test_lru_eviction_when_at_capacity() {
         let dir = tempfile::tempdir().unwrap();
-        // max_models = 1 → loading a second model evicts the first
         let registry = Arc::new(ModelRegistry::new(
             minimal_cfg(dir.path(), 1, 0),
             HashMap::new(),
@@ -413,17 +267,13 @@ mod tests {
 
         assert_eq!(registry.loaded().len(), 1);
 
-        // Manually trigger LRU eviction then insert model-b
         registry.evict_lru_if_needed();
         registry.preload_for_test("model-b", entry_b);
 
-        // After eviction, only model-b should remain
         let loaded_names: Vec<String> = registry.loaded().into_iter().map(|(n, _)| n).collect();
         assert!(!loaded_names.contains(&"model-a".to_string()));
         assert!(loaded_names.contains(&"model-b".to_string()));
     }
-
-    // -- evict_expired --------------------------------------------------------
 
     #[tokio::test]
     async fn test_evict_expired_removes_stale_model() {
@@ -438,7 +288,6 @@ mod tests {
         let entry = EngineEntry::for_test("old-model");
         registry.preload_for_test("old-model", entry);
 
-        // Back-date last_used by more than keep_alive_secs
         registry.last_used.insert(
             "old-model".to_string(),
             Instant::now() - Duration::from_secs(120),
@@ -459,7 +308,6 @@ mod tests {
 
         let entry = EngineEntry::for_test("fresh");
         registry.preload_for_test("fresh", entry);
-        // last_used is set to now by preload_for_test — still fresh
 
         registry.evict_expired();
 
@@ -471,7 +319,6 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let dir = tempfile::tempdir().unwrap();
-        // keep_alive_secs = 0 → never evict by time
         let registry = Arc::new(ModelRegistry::new(
             minimal_cfg(dir.path(), 4, 0),
             HashMap::new(),
@@ -486,11 +333,8 @@ mod tests {
 
         registry.evict_expired();
 
-        // Model should still be there — keep_alive_secs = 0 disables time eviction
         assert_eq!(registry.loaded().len(), 1);
     }
-
-    // -- resolve_model_name ---------------------------------------------------
 
     #[test]
     fn test_resolve_exact_match() {

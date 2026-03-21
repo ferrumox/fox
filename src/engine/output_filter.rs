@@ -22,7 +22,7 @@ pub(super) const CONTROL_TOKEN_PATTERNS: &[&str] = &[
 
 /// Per-request mutable state for output processing.
 #[derive(Default)]
-pub(super) struct PerRequestState {
+pub(crate) struct PerRequestState {
     /// True while we are inside a `<think>…</think>` block.
     pub(super) in_thinking: bool,
     /// When true the `<think>…</think>` block is forwarded to the caller instead
@@ -69,7 +69,7 @@ pub(super) struct PerRequestState {
 /// (`<`, `|`, `im`, `_end`, `|`, `>`).  A single-token `contains("<|")` check
 /// misses this.  We therefore buffer the output in `state.pending_output` and
 /// only flush text that cannot be the start of a control pattern.
-pub(super) fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (String, bool) {
+pub(crate) fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (String, bool) {
     if raw.is_empty() {
         return (String::new(), false);
     }
@@ -216,7 +216,7 @@ pub(super) fn all_control_patterns(model_pats: &[String]) -> Vec<&str> {
 /// Note: built-in control-token patterns (`<|im_end|>` etc.) are already handled
 /// upstream in `apply_output_filter` / `flush_pending_output`.  This function
 /// only deals with user-supplied stop strings.
-pub(super) fn check_stop_sequences(
+pub(crate) fn check_stop_sequences(
     state: &mut PerRequestState,
     new_text: String,
     stop: &Option<Vec<String>>,
@@ -272,7 +272,7 @@ pub(super) fn check_stop_sequences(
 /// incomplete byte sequence in `buf` to be completed by the next token.
 /// At EOS, callers should call this with an empty append (no-op) and then
 /// discard any residual bytes (which represent a malformed sequence).
-pub(super) fn drain_valid_utf8(buf: &mut Vec<u8>) -> String {
+pub(crate) fn drain_valid_utf8(buf: &mut Vec<u8>) -> String {
     if buf.is_empty() {
         return String::new();
     }
