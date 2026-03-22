@@ -149,6 +149,9 @@ pub struct OllamaGenerateRequest {
     /// How long to keep the model loaded (e.g. "5m", "0" to unload immediately).
     #[serde(default)]
     pub keep_alive: Option<String>,
+    /// Base64-encoded images for multimodal models — accepted, ignored (no vision support).
+    #[serde(default)]
+    pub images: Option<Vec<String>>,
 }
 
 /// A single token event in the /api/generate stream.
@@ -192,6 +195,9 @@ pub struct OllamaChatMessage {
     /// For role=="tool" messages: id matching the assistant's prior tool_call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Base64-encoded images for multimodal models — accepted, ignored (no vision support).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]

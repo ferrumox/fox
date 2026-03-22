@@ -152,6 +152,7 @@ pub async fn ollama_chat(
                     thinking: None,
                     tool_calls: None,
                     tool_call_id: None,
+                    images: None,
                 },
                 done: is_done,
                 done_reason: if is_done {
@@ -219,6 +220,7 @@ pub async fn ollama_chat(
                 thinking,
                 tool_calls: ollama_tool_calls,
                 tool_call_id: None,
+                images: None,
             },
             done: true,
             done_reason: Some(done_reason),
@@ -231,9 +233,16 @@ pub async fn ollama_chat(
         };
         let mut line = serde_json::to_string(&chunk).unwrap_or_default();
         line.push('\n');
+        // Use NDJSON content-type when the client requested stream=true (even though
+        // we buffer for tool calls): the client expects NDJSON framing.
+        let ct = if stream_mode {
+            "application/x-ndjson"
+        } else {
+            "application/json"
+        };
         axum::response::Response::builder()
             .status(200)
-            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::CONTENT_TYPE, ct)
             .body(axum::body::Body::from(Bytes::from(line.into_bytes())))
             .unwrap()
     }

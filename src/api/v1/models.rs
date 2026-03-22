@@ -1,6 +1,8 @@
-// GET /v1/models, GET /health, GET /metrics handlers.
+// GET /v1/models, GET /v1/models/:id, GET /health, GET /metrics handlers.
 
-use axum::{extract::State, http::header, response::IntoResponse, Json};
+use axum::{extract::{Path, State}, http::header, response::IntoResponse, Json};
+
+use axum::http::StatusCode;
 
 use crate::api::router::AppState;
 use crate::api::types::{HealthResponse, ModelInfo, ModelsResponse};
@@ -53,6 +55,48 @@ pub async fn models(State(state): State<AppState>) -> Json<ModelsResponse> {
         object: "list".to_string(),
         data,
     })
+}
+
+/// Returns info for a single model by stem name (OpenAI `GET /v1/models/{model}`).
+pub async fn model_by_id(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> impl IntoResponse {
+    let entries = list_models(&state.models_dir).unwrap_or_default();
+    let found = entries.into_iter().find_map(|(path, meta)| {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|stem| *stem == model_id.as_str())
+            .map(|stem| {
+                let created = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                ModelInfo {
+                    id: stem.to_string(),
+                    object: "model".to_string(),
+                    created,
+                    owned_by: "fox".to_string(),
+                }
+            })
+    });
+    match found {
+        Some(info) => Json(info).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({
+                "error": {
+                    "message": format!("The model '{}' does not exist", model_id),
+                    "type": "invalid_request_error",
+                    "param": "model",
+                    "code": "model_not_found"
+                }
+            })),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn metrics_handler() -> impl IntoResponse {

@@ -138,10 +138,10 @@ pub fn sampling_from_ollama(
             o.top_k.unwrap_or(40),
             o.repeat_penalty.unwrap_or(1.1),
             o.seed,
-            o.num_predict.unwrap_or(128) as usize,
+            o.num_predict.unwrap_or(if show_thinking { 2048 } else { 512 }) as usize,
             o.stop.clone(),
         ),
-        None => (0.8, 0.9, 40, 1.1, None, 128, None),
+        None => (0.8, 0.9, 40, 1.1, None, if show_thinking { 2048 } else { 512 }, None),
     };
     (
         SamplingParams {
@@ -164,13 +164,22 @@ pub fn sampling_from_ollama(
 // ---------------------------------------------------------------------------
 
 pub fn extract_thinking(text: &str) -> (Option<String>, String) {
+    let start_tag = "<think>";
     let end_tag = "</think>";
     if let Some(end) = text.find(end_tag) {
-        let think_start = text.find("<think>").map(|i| i + "<think>".len()).unwrap_or(0);
+        // Well-formed <think>...</think> block.
+        let think_start = text.find(start_tag).map(|i| i + start_tag.len()).unwrap_or(0);
         let thinking = text[think_start..end].trim().to_string();
         let content = text[end + end_tag.len()..].trim().to_string();
         let thinking = if thinking.is_empty() { None } else { Some(thinking) };
         return (thinking, content);
+    }
+    if let Some(start) = text.find(start_tag) {
+        // Unclosed <think> block — generation was cut off before </think>.
+        // Treat everything after <think> as thinking; visible content is empty.
+        let thinking = text[start + start_tag.len()..].trim().to_string();
+        let thinking = if thinking.is_empty() { None } else { Some(thinking) };
+        return (thinking, String::new());
     }
     (None, text.to_string())
 }
@@ -403,7 +412,7 @@ mod tests {
     #[test]
     fn test_sampling_from_ollama_defaults() {
         let (params, max_tokens) = sampling_from_ollama(None, false);
-        assert_eq!(max_tokens, 128);
+        assert_eq!(max_tokens, 512);
         assert!((params.temperature - 0.8).abs() < f32::EPSILON);
         assert!((params.top_p - 0.9).abs() < f32::EPSILON);
         assert_eq!(params.top_k, 40);
@@ -506,6 +515,29 @@ mod tests {
         );
         assert!(calls.is_none());
         assert!(!content.is_empty());
+    }
+
+    #[test]
+    fn test_extract_thinking_well_formed() {
+        let (thinking, content) = extract_thinking("<think>\nsome thought\n</think>\nthe answer");
+        assert_eq!(thinking.as_deref(), Some("some thought"));
+        assert_eq!(content, "the answer");
+    }
+
+    #[test]
+    fn test_extract_thinking_unclosed_block() {
+        // Generation cut off before </think> — thinking leaks into content without this fix.
+        let (thinking, content) =
+            extract_thinking("<think>\nI was still thinking when tokens ran out");
+        assert_eq!(thinking.as_deref(), Some("I was still thinking when tokens ran out"));
+        assert_eq!(content, "");
+    }
+
+    #[test]
+    fn test_extract_thinking_no_think_tag() {
+        let (thinking, content) = extract_thinking("plain response");
+        assert!(thinking.is_none());
+        assert_eq!(content, "plain response");
     }
 
     #[test]

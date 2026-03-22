@@ -53,6 +53,93 @@ fn query_gpu_free_bytes() -> Option<usize> {
     Some(mib * 1024 * 1024)
 }
 
+/// Read available system RAM in bytes from /proc/meminfo (Linux).
+/// Returns None on non-Linux systems or parse errors.
+#[cfg(not(fox_stub))]
+fn available_ram_bytes() -> Option<usize> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in text.lines() {
+        if line.starts_with("MemAvailable:") {
+            let kb: usize = line
+                .split_whitespace()
+                .nth(1)?
+                .parse()
+                .ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+/// Diagnose why `llama_model_load_from_file` returned null and return a
+/// human-readable error with actionable suggestions.
+#[cfg(not(fox_stub))]
+fn diagnose_load_failure(model_path: &std::path::Path) -> anyhow::Error {
+    // 1. Check GGUF magic bytes (0x47 0x47 0x55 0x46 == "GGUF").
+    let magic_ok = std::fs::File::open(model_path)
+        .ok()
+        .and_then(|mut f| {
+            use std::io::Read;
+            let mut buf = [0u8; 4];
+            f.read_exact(&mut buf).ok().map(|_| buf)
+        })
+        .map(|b| b == [0x47, 0x47, 0x55, 0x46])
+        .unwrap_or(false);
+
+    if !magic_ok {
+        return anyhow!(
+            "failed to load '{}': the file is not a valid GGUF model.\n\
+             It may be corrupt or from an incomplete download.\n\
+             → Delete the file and run `fox pull` again.",
+            model_path.display()
+        );
+    }
+
+    // 2. Compare file size to available memory.
+    let file_size = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0);
+    let file_gb = file_size as f64 / 1_073_741_824.0;
+
+    let gpu_free = query_gpu_free_bytes();
+    let ram_free = available_ram_bytes();
+
+    let file_size_usize = file_size as usize;
+    let memory_likely_cause = match (gpu_free, ram_free) {
+        (Some(vram), _) if file_size > 0 && vram < file_size_usize => true,
+        (None, Some(ram)) if file_size > 0 && ram < file_size_usize => true,
+        _ => false,
+    };
+
+    if memory_likely_cause || file_size > 0 {
+        let mut msg = format!(
+            "failed to load '{}' ({:.1} GB): not enough memory to fit the model.\n",
+            model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?"),
+            file_gb
+        );
+        if let Some(vram) = gpu_free {
+            msg.push_str(&format!("  GPU free:  {:.1} GB\n", vram as f64 / 1_073_741_824.0));
+        }
+        if let Some(ram) = ram_free {
+            msg.push_str(&format!("  RAM free:  {:.1} GB\n", ram as f64 / 1_073_741_824.0));
+        }
+        msg.push_str("\nSuggestions:\n");
+        msg.push_str("  • Use a smaller quantization — pull a Q4_K_M or Q3_K_M variant instead of Q8_0/F16.\n");
+        msg.push_str("  • Reduce context length with --max-context-len (e.g. 2048 instead of 8192).\n");
+        msg.push_str("  • Close other GPU processes (other models, browsers with WebGL, etc.).\n");
+        msg.push_str("  • Unload other loaded models first (fox models or POST /api/delete).\n");
+        if gpu_free.is_some() {
+            msg.push_str("  • If you have multiple GPUs, ensure CUDA_VISIBLE_DEVICES targets the right one.\n");
+        }
+        anyhow!("{}", msg.trim_end())
+    } else {
+        anyhow!(
+            "failed to load '{}': llama.cpp could not open the model.\n\
+             The file may use a GGUF version not supported by this build of Fox.\n\
+             → Check for a newer Fox release or try a different model variant.",
+            model_path.display()
+        )
+    }
+}
+
 /// Choose the effective per-sequence context length.
 ///
 /// Returns `user_limit` when the user specified one explicitly, otherwise
@@ -114,8 +201,8 @@ impl LlamaCppModel {
         // Offload all layers to GPU (-1 = all). On CPU-only builds llama.cpp ignores this.
         model_params.n_gpu_layers = -1;
         let model = unsafe { ffi::llama_model_load_from_file(path_c.as_ptr(), model_params) };
-        let model =
-            NonNull::new(model).ok_or_else(|| anyhow!("llama_model_load_from_file failed"))?;
+        let model = NonNull::new(model)
+            .ok_or_else(|| diagnose_load_failure(model_path))?;
 
         let vocab = unsafe { ffi::llama_model_get_vocab(model.as_ptr()) };
         if vocab.is_null() {

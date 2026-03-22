@@ -63,6 +63,10 @@ pub fn router(
         )
         .route("/v1/models", get(crate::api::v1::models::models))
         .route(
+            "/v1/models/:model_id",
+            get(crate::api::v1::models::model_by_id),
+        )
+        .route(
             "/v1/embeddings",
             post(crate::api::v1::embeddings::v1_embeddings),
         )
