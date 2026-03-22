@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::embeddings::EmbeddingInput;
 use super::shared::deserialize_stop;
+use super::tools::Tool;
 
 // --- Ollama Management ---
 
@@ -75,6 +76,21 @@ pub struct OllamaEmbedResponse {
     pub embeddings: Vec<Vec<f32>>,
 }
 
+// --- Ollama Tool Calls ---
+
+/// A tool call emitted by the assistant in an Ollama response.
+/// NOTE: `arguments` is a JSON *object* (not a JSON string like OpenAI).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct OllamaToolCall {
+    pub function: OllamaToolCallFunction,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct OllamaToolCallFunction {
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
 // --- Ollama Generate (POST /api/generate) ---
 
 /// Sampling options shared by /api/generate and /api/chat.
@@ -108,6 +124,12 @@ pub struct OllamaGenerateRequest {
     pub stream: Option<bool>,
     #[serde(default)]
     pub options: Option<OllamaOptions>,
+    /// "json" (string) or a JSON Schema object for structured output.
+    #[serde(default)]
+    pub format: Option<serde_json::Value>,
+    /// How long to keep the model loaded (e.g. "5m", "0" to unload immediately).
+    #[serde(default)]
+    pub keep_alive: Option<String>,
 }
 
 /// A single token event in the /api/generate stream.
@@ -135,11 +157,19 @@ pub struct OllamaGenerateChunk {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct OllamaChatMessage {
     pub role: String,
+    /// Empty string (not null) when tool_calls is present — Ollama convention.
+    #[serde(default)]
     pub content: String,
     /// Reasoning content from thinking models (Qwen3, DeepSeek-R1…).
     /// Matches the field name used by Ollama ≥0.7 for client compatibility.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+    /// Tool calls made by the assistant (present in response or in history).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<OllamaToolCall>>,
+    /// For role=="tool" messages: id matching the assistant's prior tool_call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,6 +180,15 @@ pub struct OllamaChatRequest {
     pub stream: Option<bool>,
     #[serde(default)]
     pub options: Option<OllamaOptions>,
+    /// Tool definitions (same structure as OpenAI).
+    #[serde(default)]
+    pub tools: Option<Vec<Tool>>,
+    /// "json" (string) or a JSON Schema object for structured output.
+    #[serde(default)]
+    pub format: Option<serde_json::Value>,
+    /// How long to keep the model loaded (e.g. "5m", "0" to unload immediately).
+    #[serde(default)]
+    pub keep_alive: Option<String>,
 }
 
 /// A single message event in the /api/chat stream.

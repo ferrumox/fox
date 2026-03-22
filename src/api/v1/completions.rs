@@ -15,9 +15,13 @@ pub async fn completions(
         model: req.model,
         messages: vec![ChatMessage {
             role: "user".to_string(),
-            content: req.prompt,
+            content: Some(req.prompt),
+            tool_call_id: None,
+            tool_calls: None,
+            name: None,
         }],
         max_tokens: req.max_tokens,
+        max_completion_tokens: None,
         temperature: req.temperature,
         top_p: None,
         top_k: None,
@@ -27,7 +31,12 @@ pub async fn completions(
         stream: req.stream,
         tools: None,
         tool_choice: None,
+        parallel_tool_calls: None,
         response_format: None,
+        stream_options: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        user: None,
     };
     chat_completions(State(state), Json(chat_req)).await
 }

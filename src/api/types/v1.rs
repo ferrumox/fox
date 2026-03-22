@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::shared::{default_max_tokens, deserialize_stop, Usage};
-use super::tools::{ResponseFormat, Tool, ToolCall};
+use super::tools::{ResponseFormat, StreamOptions, Tool, ToolCall, ToolCallDelta};
 
 // --- Chat Completions ---
 
@@ -11,6 +11,9 @@ pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: Option<u32>,
+    /// Alias for max_tokens (newer OpenAI API name). Takes effect when max_tokens is absent.
+    #[serde(default)]
+    pub max_completion_tokens: Option<u32>,
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
@@ -36,9 +39,24 @@ pub struct ChatCompletionRequest {
     /// "auto" | "none" | specific tool selector.
     #[serde(default)]
     pub tool_choice: Option<serde_json::Value>,
+    /// When false, the model must call at most one tool per turn.
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
     /// Structured output format.
     #[serde(default)]
     pub response_format: Option<ResponseFormat>,
+    /// Options for the streaming response.
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
+    /// Penalty for token frequency in the output (-2.0–2.0). Accepted but not applied.
+    #[serde(default)]
+    pub frequency_penalty: Option<f32>,
+    /// Penalty for token presence in the output (-2.0–2.0). Accepted but not applied.
+    #[serde(default)]
+    pub presence_penalty: Option<f32>,
+    /// Caller identifier — accepted for API compatibility, not used.
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 impl ChatCompletionRequest {
@@ -63,10 +81,21 @@ impl ChatCompletionRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    /// The message content. May be absent/null when role=="assistant" and tool_calls is present.
+    #[serde(default)]
+    pub content: Option<String>,
+    /// For role=="tool": identifies which tool_call this result responds to.
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    /// For role=="assistant" in multi-turn history: tool calls made in a prior turn.
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    /// Optional sender name (used by some frameworks for disambiguation).
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -89,7 +118,8 @@ pub struct ChatCompletionChoice {
 #[derive(Debug, Serialize)]
 pub struct ChatMessageResponse {
     pub role: String,
-    pub content: String,
+    /// Null when finish_reason=="tool_calls" (OpenAI spec).
+    pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
 }
@@ -119,6 +149,8 @@ pub struct ChatCompletionChunkChoice {
 pub struct ChatMessageDelta {
     pub role: Option<String>,
     pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
 // --- Completions ---

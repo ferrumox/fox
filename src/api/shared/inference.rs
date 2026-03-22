@@ -5,7 +5,53 @@ use uuid::Uuid;
 use crate::model_registry::EngineEntry;
 use crate::scheduler::SamplingParams;
 
-use crate::api::types::{OllamaOptions, Tool, ToolCall, ToolCallFunction};
+use crate::api::types::{OllamaOptions, ResponseFormat, Tool, ToolCall, ToolCallFunction};
+
+// ---------------------------------------------------------------------------
+// Message representation for template rendering
+// ---------------------------------------------------------------------------
+
+/// A chat message carrying all fields needed for prompt building.
+///
+/// This is an internal type — not part of the public API. Callers convert their
+/// own message types (OpenAI `ChatMessage`, Ollama `OllamaChatMessage`) into
+/// `MessageForTemplate` before calling [`prepare_prompt`].
+pub struct MessageForTemplate {
+    pub role: String,
+    pub content: Option<String>,
+    /// Tool calls made by the assistant (present in multi-turn assistant messages).
+    pub tool_calls: Option<Vec<ToolCall>>,
+    /// For `role == "tool"` messages: id matching the prior assistant tool_call.
+    pub tool_call_id: Option<String>,
+}
+
+/// Flatten a [`MessageForTemplate`] into a `(role, content)` tuple suitable
+/// for `apply_chat_template`, which speaks the llama.cpp FFI `(role, content)` format.
+///
+/// * `role == "tool"` → content is the tool's return value (passed through).
+/// * `role == "assistant"` with tool_calls → tool calls are serialised into content.
+/// * All other roles → content is used as-is (empty string when `None`).
+fn flatten_message_for_template(msg: &MessageForTemplate) -> (String, String) {
+    match msg.role.as_str() {
+        "assistant" if msg.tool_calls.is_some() => {
+            let calls = msg.tool_calls.as_ref().unwrap();
+            let serialized = calls
+                .iter()
+                .map(|tc| format!("[tool_call: {}({})]", tc.function.name, tc.function.arguments))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let content = match &msg.content {
+                Some(c) if !c.is_empty() => format!("{c}\n{serialized}"),
+                _ => serialized,
+            };
+            (msg.role.clone(), content)
+        }
+        _ => {
+            let content = msg.content.as_deref().unwrap_or("").to_string();
+            (msg.role.clone(), content)
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Sampling parameters
@@ -137,56 +183,111 @@ pub fn try_parse_tool_call(response: &str) -> (String, Option<Vec<ToolCall>>) {
 // Prompt preparation
 // ---------------------------------------------------------------------------
 
+/// Build the JSON mode system instruction string.
+fn json_mode_instruction(response_format: Option<&ResponseFormat>) -> Option<String> {
+    let rf = response_format?;
+    match rf.format_type.as_str() {
+        "json_object" => Some(
+            "Respond ONLY with valid JSON. Do not include any explanation or markdown.".to_string(),
+        ),
+        "json_schema" => {
+            let schema_hint = rf
+                .json_schema
+                .as_ref()
+                .and_then(|js| js.schema.as_ref())
+                .and_then(|s| serde_json::to_string(s).ok())
+                .unwrap_or_default();
+            if schema_hint.is_empty() {
+                Some(
+                    "Respond ONLY with valid JSON. Do not include any explanation or markdown."
+                        .to_string(),
+                )
+            } else {
+                Some(format!(
+                    "Respond ONLY with valid JSON matching this schema: {schema_hint}. \
+                     Do not include any explanation or markdown."
+                ))
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Inject system messages (system prompt, tools, JSON mode), apply the chat
 /// template, and tokenise the result.
 ///
 /// When `show_thinking` is true the opening `<think>\n` tag is appended to the
-/// rendered prompt so the model enters reasoning mode immediately (same
-/// behaviour as `fox run --show-thinking`).
+/// rendered prompt so the model enters reasoning mode immediately.
 ///
 /// Returns `(tokens, token_count)`.
 pub fn prepare_prompt(
     entry: &EngineEntry,
-    mut messages: Vec<(String, String)>,
+    mut messages: Vec<MessageForTemplate>,
     system_prompt: Option<&str>,
     tools: Option<&[Tool]>,
-    json_mode: bool,
+    response_format: Option<&ResponseFormat>,
     show_thinking: bool,
 ) -> (Vec<i32>, usize) {
-    // Inject system prompt when configured and none is already present.
+    // Inject server-level system prompt when none is already present.
     if let Some(sp) = system_prompt {
-        if messages.first().map(|(r, _)| r.as_str()) != Some("system") {
-            messages.insert(0, ("system".to_string(), sp.to_string()));
+        if messages.first().map(|m| m.role.as_str()) != Some("system") {
+            messages.insert(
+                0,
+                MessageForTemplate {
+                    role: "system".to_string(),
+                    content: Some(sp.to_string()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            );
         }
     }
 
     // Append tool descriptions to the system message (or create one).
     if let Some(tools) = tools {
         let tool_msg = tools_system_message(tools);
-        if messages.first().map(|(r, _)| r.as_str()) == Some("system") {
-            messages[0].1.push_str(&format!("\n\n{tool_msg}"));
+        if messages.first().map(|m| m.role.as_str()) == Some("system") {
+            let sys_content = messages[0].content.get_or_insert_with(String::new);
+            sys_content.push_str(&format!("\n\n{tool_msg}"));
         } else {
-            messages.insert(0, ("system".to_string(), tool_msg));
+            messages.insert(
+                0,
+                MessageForTemplate {
+                    role: "system".to_string(),
+                    content: Some(tool_msg),
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            );
         }
     }
 
     // Inject JSON-mode instruction.
-    if json_mode {
-        let json_instr =
-            "Respond ONLY with valid JSON. Do not include any explanation or markdown.";
-        if messages.first().map(|(r, _)| r.as_str()) == Some("system") {
-            messages[0].1.push_str(&format!("\n\n{json_instr}"));
+    if let Some(instr) = json_mode_instruction(response_format) {
+        if messages.first().map(|m| m.role.as_str()) == Some("system") {
+            let sys_content = messages[0].content.get_or_insert_with(String::new);
+            sys_content.push_str(&format!("\n\n{instr}"));
         } else {
-            messages.insert(0, ("system".to_string(), json_instr.to_string()));
+            messages.insert(
+                0,
+                MessageForTemplate {
+                    role: "system".to_string(),
+                    content: Some(instr),
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            );
         }
     }
 
+    // Flatten to (role, content) pairs for apply_chat_template (FFI boundary).
+    let flat: Vec<(String, String)> = messages.iter().map(flatten_message_for_template).collect();
+
     let mut prompt = entry
         .engine
-        .apply_chat_template(&messages)
+        .apply_chat_template(&flat)
         .unwrap_or_else(|_| {
-            messages
-                .iter()
+            flat.iter()
                 .map(|(r, c)| format!("{r}: {c}"))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -320,5 +421,40 @@ mod tests {
     fn test_tools_system_message_empty_tools() {
         let msg = tools_system_message(&[]);
         assert!(msg.contains("JSON"));
+    }
+
+    #[test]
+    fn test_flatten_message_assistant_with_tool_calls() {
+        use crate::api::types::{ToolCall, ToolCallFunction};
+        let msg = MessageForTemplate {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_abc".to_string(),
+                call_type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: "get_weather".to_string(),
+                    arguments: r#"{"city":"Madrid"}"#.to_string(),
+                },
+            }]),
+            tool_call_id: None,
+        };
+        let (role, content) = flatten_message_for_template(&msg);
+        assert_eq!(role, "assistant");
+        assert!(content.contains("get_weather"));
+        assert!(content.contains("Madrid"));
+    }
+
+    #[test]
+    fn test_flatten_message_tool_result() {
+        let msg = MessageForTemplate {
+            role: "tool".to_string(),
+            content: Some("Sunny, 22°C".to_string()),
+            tool_calls: None,
+            tool_call_id: Some("call_abc".to_string()),
+        };
+        let (role, content) = flatten_message_for_template(&msg);
+        assert_eq!(role, "tool");
+        assert_eq!(content, "Sunny, 22°C");
     }
 }
