@@ -1,9 +1,12 @@
 // POST /api/generate handler.
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::extract::State;
+
+use crate::api::shared::extractor::LenientJson;
 use bytes::Bytes;
 use std::time::Instant;
 
+use crate::api::error::load_model_or_respond;
 use crate::api::router::AppState;
 use crate::api::shared::inference::sampling_from_ollama;
 use crate::api::shared::streaming::{
@@ -14,15 +17,12 @@ use crate::scheduler::{InferenceRequest, Token};
 
 pub async fn ollama_generate(
     State(state): State<AppState>,
-    Json(req): Json<OllamaGenerateRequest>,
+    LenientJson(req): LenientJson<OllamaGenerateRequest>,
 ) -> axum::response::Response {
     let start = Instant::now();
-    let entry = match state.registry.get_or_load(&req.model).await {
+    let entry = match load_model_or_respond(&state.registry, &req.model).await {
         Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(model = %req.model, error = %e, "model not found");
-            return (StatusCode::NOT_FOUND, e.to_string()).into_response();
-        }
+        Err(r) => return r,
     };
 
     let mut messages: Vec<(String, String)> = Vec::new();
@@ -31,7 +31,8 @@ pub async fn ollama_generate(
     }
     messages.push(("user".to_string(), req.prompt.clone()));
 
-    let prompt = entry
+    let supports_thinking = entry.engine.supports_thinking();
+    let mut prompt = entry
         .engine
         .apply_chat_template(&messages)
         .unwrap_or_else(|_| {
@@ -41,6 +42,9 @@ pub async fn ollama_generate(
                 .collect::<Vec<_>>()
                 .join("\n")
         });
+    if supports_thinking {
+        prompt.push_str("<think>\n");
+    }
 
     let prompt_tokens: Vec<i32> = entry
         .engine
@@ -48,7 +52,13 @@ pub async fn ollama_generate(
         .unwrap_or_else(|_| prompt.bytes().map(|b| b as i32).take(4096).collect());
     let prompt_tokens_len = prompt_tokens.len();
 
-    let (sampling, max_tokens) = sampling_from_ollama(req.options.as_ref());
+    let stream_mode = req.stream.unwrap_or(true);
+
+    // /api/generate has no `thinking` field: always suppress thinking from output.
+    // The model still reasons because <think>\n was injected into the prompt.
+    let (mut sampling, max_tokens) = sampling_from_ollama(req.options.as_ref(), false);
+    sampling.initial_in_thinking = supports_thinking;
+
     let req_id = entry.engine.next_request_id();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
     entry.engine.submit_request(InferenceRequest::new(
@@ -60,12 +70,12 @@ pub async fn ollama_generate(
     ));
 
     let model_name = req.model.clone();
-    let stream_mode = req.stream.unwrap_or(true);
 
     tracing::info!(
         model = %req.model,
         stream = stream_mode,
         prompt_tokens = prompt_tokens_len,
+        thinking = supports_thinking,
         "request"
     );
 

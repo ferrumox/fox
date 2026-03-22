@@ -2,6 +2,7 @@
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
+use crate::api::error::load_model_or_respond;
 use crate::api::router::AppState;
 use crate::api::types::{EmbeddingObject, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage};
 
@@ -9,9 +10,9 @@ pub async fn v1_embeddings(
     State(state): State<AppState>,
     Json(req): Json<EmbeddingRequest>,
 ) -> impl IntoResponse {
-    let entry = match state.registry.get_or_load(&req.model).await {
+    let entry = match load_model_or_respond(&state.registry, &req.model).await {
         Ok(e) => e,
-        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+        Err(r) => return r,
     };
     let engine = &entry.engine;
     let inputs = req.input.into_vec();

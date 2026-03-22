@@ -12,7 +12,13 @@ use crate::api::types::{OllamaOptions, Tool, ToolCall, ToolCallFunction};
 // ---------------------------------------------------------------------------
 
 /// Build `SamplingParams` + `max_tokens` from Ollama-style options.
-pub fn sampling_from_ollama(opts: Option<&OllamaOptions>) -> (SamplingParams, usize) {
+///
+/// `show_thinking` should be set to `engine.supports_thinking()` by the caller
+/// so that thinking tokens are forwarded only when the model actually supports them.
+pub fn sampling_from_ollama(
+    opts: Option<&OllamaOptions>,
+    show_thinking: bool,
+) -> (SamplingParams, usize) {
     let (temp, top_p, top_k, rep, seed, max_tokens, stop) = match opts {
         Some(o) => (
             o.temperature.unwrap_or(0.8),
@@ -33,12 +39,33 @@ pub fn sampling_from_ollama(opts: Option<&OllamaOptions>) -> (SamplingParams, us
             repetition_penalty: rep,
             seed,
             stop,
-            show_thinking: true,
-            initial_in_thinking: false,
+            show_thinking,
+            initial_in_thinking: show_thinking,
             max_thinking_chars: 8192,
         },
         max_tokens,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Thinking extraction
+// ---------------------------------------------------------------------------
+
+/// Split a model response that may contain `<think>…</think>` into
+/// `(thinking_content, visible_content)`.
+///
+/// Used by Ollama-compatible endpoints to populate the separate `thinking`
+/// field that Ollama ≥0.7 exposes for reasoning models.
+pub fn extract_thinking(text: &str) -> (Option<String>, String) {
+    let end_tag = "</think>";
+    if let Some(end) = text.find(end_tag) {
+        let think_start = text.find("<think>").map(|i| i + "<think>".len()).unwrap_or(0);
+        let thinking = text[think_start..end].trim().to_string();
+        let content = text[end + end_tag.len()..].trim().to_string();
+        let thinking = if thinking.is_empty() { None } else { Some(thinking) };
+        return (thinking, content);
+    }
+    (None, text.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +140,10 @@ pub fn try_parse_tool_call(response: &str) -> (String, Option<Vec<ToolCall>>) {
 /// Inject system messages (system prompt, tools, JSON mode), apply the chat
 /// template, and tokenise the result.
 ///
+/// When `show_thinking` is true the opening `<think>\n` tag is appended to the
+/// rendered prompt so the model enters reasoning mode immediately (same
+/// behaviour as `fox run --show-thinking`).
+///
 /// Returns `(tokens, token_count)`.
 pub fn prepare_prompt(
     entry: &EngineEntry,
@@ -120,6 +151,7 @@ pub fn prepare_prompt(
     system_prompt: Option<&str>,
     tools: Option<&[Tool]>,
     json_mode: bool,
+    show_thinking: bool,
 ) -> (Vec<i32>, usize) {
     // Inject system prompt when configured and none is already present.
     if let Some(sp) = system_prompt {
@@ -149,7 +181,7 @@ pub fn prepare_prompt(
         }
     }
 
-    let prompt = entry
+    let mut prompt = entry
         .engine
         .apply_chat_template(&messages)
         .unwrap_or_else(|_| {
@@ -159,6 +191,12 @@ pub fn prepare_prompt(
                 .collect::<Vec<_>>()
                 .join("\n")
         });
+
+    // For reasoning models (Qwen3, DeepSeek-R1…) append the opening <think> tag
+    // so the model enters reasoning mode. Mirrors the behaviour of `fox run --show-thinking`.
+    if show_thinking {
+        prompt.push_str("<think>\n");
+    }
 
     let tokens: Vec<i32> = entry.engine.tokenize(&prompt).unwrap_or_else(|_| {
         if prompt.is_empty() {
@@ -182,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_sampling_from_ollama_defaults() {
-        let (params, max_tokens) = sampling_from_ollama(None);
+        let (params, max_tokens) = sampling_from_ollama(None, false);
         assert_eq!(max_tokens, 128);
         assert!((params.temperature - 0.8).abs() < f32::EPSILON);
         assert!((params.top_p - 0.9).abs() < f32::EPSILON);
@@ -201,7 +239,7 @@ mod tests {
             num_predict: Some(64),
             stop: None,
         };
-        let (params, max_tokens) = sampling_from_ollama(Some(&opts));
+        let (params, max_tokens) = sampling_from_ollama(Some(&opts), false);
         assert_eq!(max_tokens, 64);
         assert!((params.temperature - 0.3).abs() < f32::EPSILON);
         assert_eq!(params.seed, Some(42));

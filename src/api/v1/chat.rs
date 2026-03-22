@@ -2,7 +2,6 @@
 
 use axum::{
     extract::State,
-    http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -12,6 +11,7 @@ use axum::{
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+use crate::api::error::load_model_or_respond;
 use crate::api::router::AppState;
 use crate::api::shared::inference::{prepare_prompt, try_parse_tool_call};
 use crate::api::shared::streaming::finish_reason_str;
@@ -26,12 +26,9 @@ pub async fn chat_completions(
     Json(req): Json<ChatCompletionRequest>,
 ) -> axum::response::Response {
     let start = Instant::now();
-    let entry = match state.registry.get_or_load(&req.model).await {
+    let entry = match load_model_or_respond(&state.registry, &req.model).await {
         Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(model = %req.model, error = %e, "model not found");
-            return (StatusCode::NOT_FOUND, e.to_string()).into_response();
-        }
+        Err(r) => return r,
     };
 
     let id = Uuid::new_v4().to_string();
@@ -58,9 +55,11 @@ pub async fn chat_completions(
         state.system_prompt.as_deref(),
         req.tools.as_deref(),
         json_mode,
+        entry.engine.supports_thinking(),
     );
 
     let max_tokens = req.max_tokens.unwrap_or(256) as usize;
+    let supports_thinking = entry.engine.supports_thinking();
     let sampling = SamplingParams {
         temperature: req.temperature.unwrap_or(0.8).max(0.0),
         top_p: req.top_p.unwrap_or(0.9).clamp(0.0, 1.0),
@@ -68,8 +67,10 @@ pub async fn chat_completions(
         repetition_penalty: req.repetition_penalty.unwrap_or(1.0).max(1.0),
         seed: req.seed,
         stop: req.stop.clone(),
+        // OpenAI has no `thinking` field: the model reasons (initial_in_thinking injects <think>)
+        // but the output filter suppresses the thinking block, returning only visible content.
         show_thinking: false,
-        initial_in_thinking: false,
+        initial_in_thinking: supports_thinking,
         max_thinking_chars: 8192,
     };
 
@@ -90,6 +91,7 @@ pub async fn chat_completions(
         model = %req.model,
         stream = effective_stream,
         prompt_tokens = prompt_tokens_len,
+        thinking = supports_thinking,
         "request"
     );
 

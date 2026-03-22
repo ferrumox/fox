@@ -2,6 +2,8 @@
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
+use crate::api::shared::extractor::LenientJson;
+
 use crate::api::router::AppState;
 use crate::api::shared::digest::{get_digest, modified_at_rfc3339};
 use crate::api::types::{
@@ -99,7 +101,7 @@ pub async fn ollama_ps(State(state): State<AppState>) -> Json<PsResponse> {
 
 pub async fn ollama_show(
     State(state): State<AppState>,
-    Json(req): Json<ShowRequest>,
+    LenientJson(req): LenientJson<ShowRequest>,
 ) -> impl IntoResponse {
     let entries = match list_models(&state.models_dir) {
         Ok(e) => e,
@@ -159,7 +161,7 @@ pub async fn ollama_show(
 
 pub async fn ollama_delete(
     State(state): State<AppState>,
-    Json(req): Json<DeleteRequest>,
+    LenientJson(req): LenientJson<DeleteRequest>,
 ) -> impl IntoResponse {
     let entries = match list_models(&state.models_dir) {
         Ok(e) => e,

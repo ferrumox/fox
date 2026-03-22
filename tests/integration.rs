@@ -10,6 +10,34 @@ use ferrumox::api::test_helpers::*;
 use ferrumox::model_registry::EngineEntry;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Thinking suppression helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Collect all content delta strings from an SSE stream.
+fn sse_content(bytes: &[u8]) -> String {
+    parse_sse_chunks(bytes)
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect()
+}
+
+/// Collect all content strings from an NDJSON Ollama chat stream.
+fn ndjson_chat_content(bytes: &[u8]) -> String {
+    parse_ndjson_lines(bytes)
+        .iter()
+        .filter_map(|c| c["message"]["content"].as_str())
+        .collect()
+}
+
+/// Collect all response strings from an NDJSON Ollama generate stream.
+fn ndjson_generate_response(bytes: &[u8]) -> String {
+    parse_ndjson_lines(bytes)
+        .iter()
+        .filter_map(|c| c["response"].as_str())
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -810,4 +838,173 @@ async fn test_v1_completions_unknown_model_returns_404() {
     .await;
 
     assert_eq!(resp.status(), 404);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Thinking suppression — ThinkingStubModel produces:
+//   prefill → "thought"  (inside thinking block)
+//   decode  → "</think>" → "answer" → EOS
+//
+// Expected behaviour per endpoint:
+//   OpenAI /v1/chat/completions  (any stream mode) : content = "answer"   (no <think> tags)
+//   Ollama /api/chat  stream=false                  : thinking = "thought", content = "answer"
+//   Ollama /api/chat  stream=true                   : content = "answer"   (no <think> tags)
+//   Ollama /api/generate (any stream mode)          : response = "answer"  (no <think> tags)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn thinking_openai_non_streaming_no_tags_in_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state_thinking("think", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "think",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": false,
+            "max_tokens": 16,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    let content = v["choices"][0]["message"]["content"].as_str().unwrap();
+    assert_eq!(content, "answer", "OpenAI non-stream: thinking must be suppressed");
+    assert!(!content.contains("<think>"), "OpenAI content must not contain <think>");
+    assert!(!content.contains("</think>"), "OpenAI content must not contain </think>");
+    assert!(!content.contains("thought"), "OpenAI content must not contain thinking text");
+}
+
+#[tokio::test]
+async fn thinking_openai_streaming_no_tags_in_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state_thinking("think", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "think",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": true,
+            "max_tokens": 16,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let bytes = body_bytes(resp).await;
+    let content = sse_content(&bytes);
+    assert_eq!(content, "answer", "OpenAI stream: thinking must be suppressed");
+    assert!(!content.contains("<think>"), "stream content must not contain <think>");
+    assert!(!content.contains("thought"), "stream content must not contain thinking text");
+}
+
+#[tokio::test]
+async fn thinking_ollama_chat_non_streaming_separates_thinking_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state_thinking("think", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/api/chat",
+        serde_json::json!({
+            "model": "think",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": false,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+
+    let content = v["message"]["content"].as_str().unwrap();
+    assert_eq!(content, "answer", "Ollama non-stream: visible content must be 'answer'");
+    assert!(!content.contains("<think>"), "content must not contain <think>");
+    assert!(!content.contains("thought"), "content must not contain thinking text");
+
+    let thinking = v["message"]["thinking"].as_str().unwrap_or("");
+    assert_eq!(thinking, "thought", "Ollama non-stream: thinking field must contain reasoning");
+}
+
+#[tokio::test]
+async fn thinking_ollama_chat_streaming_no_tags_in_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state_thinking("think", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/api/chat",
+        serde_json::json!({
+            "model": "think",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": true,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let bytes = body_bytes(resp).await;
+    let content = ndjson_chat_content(&bytes);
+    assert_eq!(content, "answer", "Ollama chat stream: thinking must be suppressed");
+    assert!(!content.contains("<think>"), "stream content must not contain <think>");
+    assert!(!content.contains("thought"), "stream content must not contain thinking text");
+}
+
+#[tokio::test]
+async fn thinking_ollama_generate_non_streaming_no_tags_in_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state_thinking("think", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/api/generate",
+        serde_json::json!({
+            "model": "think",
+            "prompt": "Hi",
+            "stream": false,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    let response = v["response"].as_str().unwrap();
+    assert_eq!(response, "answer", "Ollama generate non-stream: thinking must be suppressed");
+    assert!(!response.contains("<think>"), "response must not contain <think>");
+    assert!(!response.contains("thought"), "response must not contain thinking text");
+}
+
+#[tokio::test]
+async fn thinking_ollama_generate_streaming_no_tags_in_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state_thinking("think", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/api/generate",
+        serde_json::json!({
+            "model": "think",
+            "prompt": "Hi",
+            "stream": true,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let bytes = body_bytes(resp).await;
+    let response = ndjson_generate_response(&bytes);
+    assert_eq!(response, "answer", "Ollama generate stream: thinking must be suppressed");
+    assert!(!response.contains("<think>"), "stream response must not contain <think>");
+    assert!(!response.contains("thought"), "stream response must not contain thinking text");
 }

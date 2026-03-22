@@ -15,7 +15,7 @@ pub(crate) mod stub;
 
 pub use llama_cpp::LlamaCppModel;
 #[cfg(any(test, feature = "test-helpers"))]
-pub use stub::StubModel;
+pub use stub::{StubModel, ThinkingStubModel};
 
 // ---------------------------------------------------------------------------
 // Shared types

@@ -136,6 +136,10 @@ pub struct OllamaGenerateChunk {
 pub struct OllamaChatMessage {
     pub role: String,
     pub content: String,
+    /// Reasoning content from thinking models (Qwen3, DeepSeek-R1…).
+    /// Matches the field name used by Ollama ≥0.7 for client compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

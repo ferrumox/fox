@@ -1,11 +1,14 @@
 // POST /api/chat handler.
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::extract::State;
+
+use crate::api::shared::extractor::LenientJson;
 use bytes::Bytes;
 use std::time::Instant;
 
+use crate::api::error::load_model_or_respond;
 use crate::api::router::AppState;
-use crate::api::shared::inference::sampling_from_ollama;
+use crate::api::shared::inference::{extract_thinking, sampling_from_ollama};
 use crate::api::shared::streaming::{
     collect_tokens, ndjson_response, ndjson_stream, now_rfc3339, ollama_done_reason,
 };
@@ -14,15 +17,12 @@ use crate::scheduler::{InferenceRequest, Token};
 
 pub async fn ollama_chat(
     State(state): State<AppState>,
-    Json(req): Json<OllamaChatRequest>,
+    LenientJson(req): LenientJson<OllamaChatRequest>,
 ) -> axum::response::Response {
     let start = Instant::now();
-    let entry = match state.registry.get_or_load(&req.model).await {
+    let entry = match load_model_or_respond(&state.registry, &req.model).await {
         Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(model = %req.model, error = %e, "model not found");
-            return (StatusCode::NOT_FOUND, e.to_string()).into_response();
-        }
+        Err(r) => return r,
     };
 
     let messages: Vec<(String, String)> = req
@@ -31,7 +31,8 @@ pub async fn ollama_chat(
         .map(|m| (m.role.clone(), m.content.clone()))
         .collect();
 
-    let prompt = entry
+    let supports_thinking = entry.engine.supports_thinking();
+    let mut prompt = entry
         .engine
         .apply_chat_template(&messages)
         .unwrap_or_else(|_| {
@@ -41,6 +42,9 @@ pub async fn ollama_chat(
                 .collect::<Vec<_>>()
                 .join("\n")
         });
+    if supports_thinking {
+        prompt.push_str("<think>\n");
+    }
 
     let prompt_tokens: Vec<i32> = entry
         .engine
@@ -48,7 +52,15 @@ pub async fn ollama_chat(
         .unwrap_or_else(|_| prompt.bytes().map(|b| b as i32).take(4096).collect());
     let prompt_tokens_len = prompt_tokens.len();
 
-    let (sampling, max_tokens) = sampling_from_ollama(req.options.as_ref());
+    let stream_mode = req.stream.unwrap_or(true);
+
+    // Streaming: suppress thinking tags from content (Ollama streaming thinking field not yet supported).
+    // Non-streaming: collect thinking content so extract_thinking can separate it into message.thinking.
+    let show_thinking_in_output = supports_thinking && !stream_mode;
+    let (mut sampling, max_tokens) = sampling_from_ollama(req.options.as_ref(), show_thinking_in_output);
+    // <think>\n was injected into the prompt, so generation always starts inside a thinking block.
+    sampling.initial_in_thinking = supports_thinking;
+
     let req_id = entry.engine.next_request_id();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
     entry.engine.submit_request(InferenceRequest::new(
@@ -60,12 +72,12 @@ pub async fn ollama_chat(
     ));
 
     let model_name = req.model.clone();
-    let stream_mode = req.stream.unwrap_or(true);
 
     tracing::info!(
         model = %req.model,
         stream = stream_mode,
         prompt_tokens = prompt_tokens_len,
+        thinking = supports_thinking,
         "request"
     );
 
@@ -91,6 +103,7 @@ pub async fn ollama_chat(
                 message: OllamaChatMessage {
                     role: "assistant".to_string(),
                     content: token.text.clone(),
+                    thinking: None,
                 },
                 done: is_done,
                 done_reason: if is_done {
@@ -120,12 +133,14 @@ pub async fn ollama_chat(
             finish_reason = %ollama_done_reason(&stop_reason),
             "done"
         );
+        let (thinking, content) = extract_thinking(&full_content);
         let chunk = OllamaChatChunk {
             model: model_name,
             created_at: now_rfc3339(),
             message: OllamaChatMessage {
                 role: "assistant".to_string(),
-                content: full_content,
+                content,
+                thinking,
             },
             done: true,
             done_reason: Some(ollama_done_reason(&stop_reason)),

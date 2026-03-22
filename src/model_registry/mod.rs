@@ -149,7 +149,7 @@ impl ModelRegistry {
     /// 2. Exact stem match (case-insensitive)
     /// 3. Stem starts with the name
     /// 4. Stem contains the name
-    fn resolve_model_name(&self, name: &str) -> Result<(String, PathBuf)> {
+    pub(crate) fn resolve_model_name(&self, name: &str) -> Result<(String, PathBuf)> {
         let resolved = self.aliases.get(name).map(String::as_str).unwrap_or(name);
 
         let entries = list_models(&self.config.models_dir)?;

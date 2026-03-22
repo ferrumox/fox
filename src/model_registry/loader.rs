@@ -26,7 +26,7 @@ pub(super) async fn load_model(
     let metrics = cfg.metrics.clone();
     let type_kv = cfg.type_kv;
 
-    tracing::info!("loading model '{}' from {:?}", name, path);
+    tracing::info!(model = %name, path = ?path, "loading model");
 
     let model = tokio::task::spawn_blocking(move || {
         LlamaCppModel::load(
@@ -63,6 +63,13 @@ pub(super) async fn load_model(
             }
         })
     };
+
+    let supports_thinking = engine.supports_thinking();
+    tracing::info!(
+        model = %engine.model_name(),
+        thinking = supports_thinking,
+        "model ready"
+    );
 
     Ok(EngineEntry {
         engine,

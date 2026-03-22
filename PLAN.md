@@ -92,6 +92,46 @@ LLM inference engine in Rust, open source, with higher throughput than vLLM and 
 - Binary renamed to `fox`; default models dir `~/.cache/ferrumox/models`
 - All endpoints stable; production-grade error handling
 
+### v1.0.x — Post-release patches (2026-03-22)
+
+**Thinking auto-detection by model**
+- `show_thinking` was hardcoded (`false` in OpenAI, `true` in Ollama); now calls `engine.supports_thinking()` in all endpoints and the CLI
+- Logic: `<think>` tokenises to ≤2 tokens on reasoning models (Qwen3, DeepSeek-R1) → `show_thinking = true`; multi-token split on non-reasoning models → `false`
+- `sampling_from_ollama` now receives `show_thinking: bool` instead of hardcoding it
+- Files: `src/api/v1/chat.rs`, `src/api/ollama/chat.rs`, `src/api/ollama/generate.rs`, `src/api/shared/inference.rs`
+
+**LenientJson extractor — fix LiteLLM / Google ADK**
+- New `src/api/shared/extractor.rs`: `LenientJson<T>` parses request body as JSON without requiring `Content-Type: application/json`
+- All Ollama handlers (`/api/chat`, `/api/generate`, `/api/embed`, `/api/show`, `/api/delete`) now use `LenientJson`
+- OpenAI handlers (`/v1/*`) keep strict `Json` (correct per spec)
+- Root cause: LiteLLM and Google ADK omit or vary the Content-Type header, triggering Axum's JSON rejection
+
+**Improved serve logs**
+- On model load: `INFO model="…" thinking=true  model ready` — immediately visible if a model supports reasoning
+- On every request: `thinking=true/false` field added alongside `model`, `stream`, `prompt_tokens`
+- Allows instant diagnosis when Google ADK / LiteLLM doesn't show `<think>` output
+
+**Model load error differentiation**
+- Before: any `get_or_load` failure → HTTP 404 + `WARN "model not found"` (even OOM)
+- After: `src/api/error.rs` adds `load_model_or_respond()` helper that splits the two cases:
+  - Model not on disk → `WARN "model not found"` → HTTP 404
+  - Model exists but load failed (OOM, corrupt file…) → `ERROR "failed to load model"` → HTTP 503
+- `AppError::ModelLoadFailed` → 503 Service Unavailable
+- All handlers use the helper; `ModelRegistry::resolve_model_name` made `pub(crate)`
+
+**Thinking suppression in streaming mode**
+- OpenAI and Ollama streaming endpoints now suppress `<think>…</think>` from the output (`show_thinking=false`, `initial_in_thinking=supports_thinking`): the model still reasons but the client only receives the visible answer
+- Ollama non-streaming: `show_thinking=true` so `extract_thinking` can populate `message.thinking` separately
+- Ollama `/api/generate` (no `thinking` field): always suppressed
+- Integration tests added: `ThinkingStubModel` + 6 tests in `tests/integration.rs`; bash e2e script `scripts/e2e_thinking.sh`
+
+**Pending — Ollama streaming thinking (ticket for v1.1.0 or later)**
+- Currently: thinking is suppressed from Ollama chat streams (no `message.thinking` per chunk)
+- Real Ollama ≥0.7 sends per-chunk thinking: `{"message":{"content":"","thinking":"…"},"done":false}`
+- To implement: track in-thinking state across stream chunks via `Arc<Mutex<bool>>` shared into the `ndjson_stream` closure; when `in_thinking=true`, route token to `message.thinking` instead of `message.content`
+- Requires: `show_thinking=true` for Ollama streaming (not false as today), state machine in the stream callback
+- Impact: Google ADK and other Ollama-aware clients would see the reasoning in real time
+
 ---
 
 ## Phases (completed)
@@ -152,6 +192,26 @@ LLM inference engine in Rust, open source, with higher throughput than vLLM and 
 | Windows | CPU-only build | Default Windows binary uses CPU; `--features cuda` variant available separately for users with NVIDIA GPUs |
 | Linux | `.deb` / `.rpm` packages | Built in CI via `cargo-deb` and `cargo-generate-rpm`; systemd unit file included |
 | Linux | AppImage | Single-file portable binary; no root, no package manager required |
+
+#### OOM Recovery — automatic retry on GPU out-of-memory
+
+When llama.cpp fails with `cudaMalloc failed: out of memory` allocating the KV cache, Fox retries automatically instead of returning 503.
+
+**Implementation in `src/model_registry/loader.rs` — retry chain (first success wins):**
+
+| Attempt | context_len | type_kv | KV VRAM (approx.) |
+|---------|-------------|---------|-------------------|
+| 1 | model default | f16 | baseline |
+| 2 | 4096 | f16 | reduced |
+| 3 | 2048 | f16 | ~50% |
+| 4 | 2048 | q8_0 | ~25% |
+| 5 | 1024 | q8_0 | ~12% |
+
+- OOM detection: error string contains `"out of memory"` or `"failed to allocate"`
+- On degraded load: `WARN model="…" context=2048 type_kv="q8_0"  loaded with reduced settings (OOM recovery)`
+- Optional `degraded: Option<String>` field in `EngineEntry` to surface in request logs
+- **Phase 2** (lower priority): partial CPU offload — reduce `n_gpu_layers` progressively (all → 32 → 24 → 16) until the model fits; requires exposing `n_gpu_layers` in `LlamaCppModel::load`
+- **Phase 3** (lower priority): read free VRAM before attempting load (nvml / sysfs) and skip directly to a reduced config when the model clearly won't fit
 
 #### Developer Experience
 
