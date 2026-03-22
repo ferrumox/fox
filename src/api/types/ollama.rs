@@ -46,6 +46,8 @@ pub struct PsResponse {
 #[derive(Debug, Deserialize)]
 pub struct ShowRequest {
     pub name: String,
+    #[serde(default)]
+    pub verbose: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,6 +62,23 @@ pub struct ShowResponse {
 #[derive(Debug, Deserialize)]
 pub struct DeleteRequest {
     pub name: String,
+}
+
+/// POST /api/copy — copy a model to a new name.
+#[derive(Debug, Deserialize)]
+pub struct CopyRequest {
+    pub source: String,
+    pub destination: String,
+}
+
+/// POST /api/create — create a model from a Modelfile.
+#[derive(Debug, Deserialize)]
+pub struct CreateRequest {
+    pub model: String,
+    #[serde(default)]
+    pub modelfile: Option<String>,
+    #[serde(default)]
+    pub stream: Option<bool>,
 }
 
 // --- Ollama Embeddings ---
@@ -148,7 +167,11 @@ pub struct OllamaGenerateChunk {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_eval_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_eval_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub eval_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval_duration: Option<u64>,
 }
 
 // --- Ollama Chat (POST /api/chat) ---
@@ -161,10 +184,9 @@ pub struct OllamaChatMessage {
     #[serde(default)]
     pub content: String,
     /// Reasoning content from thinking models (Qwen3, DeepSeek-R1…).
-    /// Matches the field name used by Ollama ≥0.7 for client compatibility.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
-    /// Tool calls made by the assistant (present in response or in history).
+    /// Tool calls made by the assistant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<OllamaToolCall>>,
     /// For role=="tool" messages: id matching the assistant's prior tool_call.
@@ -186,9 +208,12 @@ pub struct OllamaChatRequest {
     /// "json" (string) or a JSON Schema object for structured output.
     #[serde(default)]
     pub format: Option<serde_json::Value>,
-    /// How long to keep the model loaded (e.g. "5m", "0" to unload immediately).
+    /// How long to keep the model loaded.
     #[serde(default)]
     pub keep_alive: Option<String>,
+    /// Enable thinking/reasoning. Can be bool or string ("high", "medium", "low").
+    #[serde(default)]
+    pub think: Option<serde_json::Value>,
 }
 
 /// A single message event in the /api/chat stream.
@@ -207,5 +232,9 @@ pub struct OllamaChatChunk {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_eval_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_eval_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub eval_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval_duration: Option<u64>,
 }

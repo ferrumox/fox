@@ -32,13 +32,21 @@ pub async fn models(State(state): State<AppState>) -> Json<ModelsResponse> {
     let entries = list_models(&state.models_dir).unwrap_or_default();
     let data = entries
         .iter()
-        .filter_map(|(path, _)| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .map(|stem| ModelInfo {
+        .filter_map(|(path, meta)| {
+            path.file_stem().and_then(|s| s.to_str()).map(|stem| {
+                let created = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                ModelInfo {
                     id: stem.to_string(),
                     object: "model".to_string(),
-                })
+                    created,
+                    owned_by: "fox".to_string(),
+                }
+            })
         })
         .collect();
     Json(ModelsResponse {

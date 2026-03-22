@@ -12,25 +12,16 @@ use crate::api::types::{OllamaOptions, ResponseFormat, Tool, ToolCall, ToolCallF
 // ---------------------------------------------------------------------------
 
 /// A chat message carrying all fields needed for prompt building.
-///
-/// This is an internal type — not part of the public API. Callers convert their
-/// own message types (OpenAI `ChatMessage`, Ollama `OllamaChatMessage`) into
-/// `MessageForTemplate` before calling [`prepare_prompt`].
+/// Content is already extracted to plain text (callers handle MessageContent → String).
 pub struct MessageForTemplate {
     pub role: String,
     pub content: Option<String>,
-    /// Tool calls made by the assistant (present in multi-turn assistant messages).
     pub tool_calls: Option<Vec<ToolCall>>,
-    /// For `role == "tool"` messages: id matching the prior assistant tool_call.
     pub tool_call_id: Option<String>,
 }
 
-/// Flatten a [`MessageForTemplate`] into a `(role, content)` tuple suitable
-/// for `apply_chat_template`, which speaks the llama.cpp FFI `(role, content)` format.
-///
-/// * `role == "tool"` → content is the tool's return value (passed through).
-/// * `role == "assistant"` with tool_calls → tool calls are serialised into content.
-/// * All other roles → content is used as-is (empty string when `None`).
+/// Flatten a [`MessageForTemplate`] into a `(role, content)` tuple for
+/// `apply_chat_template` (llama.cpp FFI boundary accepts only string pairs).
 fn flatten_message_for_template(msg: &MessageForTemplate) -> (String, String) {
     match msg.role.as_str() {
         "assistant" if msg.tool_calls.is_some() => {
@@ -54,13 +45,88 @@ fn flatten_message_for_template(msg: &MessageForTemplate) -> (String, String) {
 }
 
 // ---------------------------------------------------------------------------
+// Tool choice resolution
+// ---------------------------------------------------------------------------
+
+/// Resolved tool choice from the request's `tool_choice` field.
+pub struct ToolChoiceResult {
+    /// Effective tools to inject (None when tool_choice == "none").
+    pub tools: Option<Vec<Tool>>,
+    /// Whether the model is required to call a tool (tool_choice == "required" or specific).
+    pub required: bool,
+    /// Specific tool name the model must call (tool_choice == {"function": {"name": "X"}}).
+    pub specific: Option<String>,
+}
+
+/// Resolve `tools` + `tool_choice` into an effective configuration.
+///
+/// * `"none"` → no tools, model responds normally.
+/// * `"auto"` / absent → tools available, model decides.
+/// * `"required"` → tools available, model must call one.
+/// * `{"type":"function","function":{"name":"X"}}` → only tool X, model must call it.
+pub fn resolve_tool_choice(
+    tools: Option<&[Tool]>,
+    tool_choice: Option<&serde_json::Value>,
+) -> ToolChoiceResult {
+    let tools = match tools {
+        None | Some([]) => {
+            return ToolChoiceResult {
+                tools: None,
+                required: false,
+                specific: None,
+            }
+        }
+        Some(t) => t,
+    };
+
+    match tool_choice {
+        // "none" — no tool use this turn
+        Some(v) if v.as_str() == Some("none") => ToolChoiceResult {
+            tools: None,
+            required: false,
+            specific: None,
+        },
+        // "required" — model must call a tool
+        Some(v) if v.as_str() == Some("required") => ToolChoiceResult {
+            tools: Some(tools.to_vec()),
+            required: true,
+            specific: None,
+        },
+        // specific function: {"type":"function","function":{"name":"X"}}
+        Some(v) if v.is_object() => {
+            let name = v
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .map(String::from);
+            let filtered: Vec<Tool> = tools
+                .iter()
+                .filter(|t| name.as_deref().map(|n| t.function.name == n).unwrap_or(true))
+                .cloned()
+                .collect();
+            ToolChoiceResult {
+                tools: Some(if filtered.is_empty() {
+                    tools.to_vec()
+                } else {
+                    filtered
+                }),
+                required: true,
+                specific: name,
+            }
+        }
+        // "auto" / absent / unknown string — default behaviour
+        _ => ToolChoiceResult {
+            tools: Some(tools.to_vec()),
+            required: false,
+            specific: None,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sampling parameters
 // ---------------------------------------------------------------------------
 
-/// Build `SamplingParams` + `max_tokens` from Ollama-style options.
-///
-/// `show_thinking` should be set to `engine.supports_thinking()` by the caller
-/// so that thinking tokens are forwarded only when the model actually supports them.
 pub fn sampling_from_ollama(
     opts: Option<&OllamaOptions>,
     show_thinking: bool,
@@ -97,11 +163,6 @@ pub fn sampling_from_ollama(
 // Thinking extraction
 // ---------------------------------------------------------------------------
 
-/// Split a model response that may contain `<think>…</think>` into
-/// `(thinking_content, visible_content)`.
-///
-/// Used by Ollama-compatible endpoints to populate the separate `thinking`
-/// field that Ollama ≥0.7 exposes for reasoning models.
 pub fn extract_thinking(text: &str) -> (Option<String>, String) {
     let end_tag = "</think>";
     if let Some(end) = text.find(end_tag) {
@@ -118,20 +179,33 @@ pub fn extract_thinking(text: &str) -> (Option<String>, String) {
 // Tool call helpers
 // ---------------------------------------------------------------------------
 
-/// Build a system message that describes the available tools to the model.
-pub fn tools_system_message(tools: &[Tool]) -> String {
+/// Build a system message describing available tools.
+/// `required` and `specific` come from [`ToolChoiceResult`].
+pub fn tools_system_message(
+    tools: &[Tool],
+    required: bool,
+    specific: Option<&str>,
+) -> String {
     let json = serde_json::to_string_pretty(tools).unwrap_or_default();
-    format!(
-        "You have access to the following tools:\n{json}\n\n\
-         When you want to call a tool, respond ONLY with a JSON object:\n\
-         {{\"name\": \"<tool_name>\", \"arguments\": {{<key>: <value>}}}}\n\n\
-         If you don't need a tool, respond normally."
-    )
+    let usage = "When you want to call a tool, respond ONLY with a JSON object:\n\
+                 {\"name\": \"<tool_name>\", \"arguments\": {<key>: <value>}}";
+    let constraint = if let Some(name) = specific {
+        format!("You MUST call the tool '{name}'. Do not respond without calling it.")
+    } else if required {
+        "You MUST call one of the available tools. Do not respond without calling a tool."
+            .to_string()
+    } else {
+        "If you don't need a tool, respond normally.".to_string()
+    };
+    format!("You have access to the following tools:\n{json}\n\n{usage}\n\n{constraint}")
 }
 
 /// Try to parse `response` text as a JSON tool call.
-/// Returns `(content, tool_calls)` — when a tool call is detected, `content` is empty.
-pub fn try_parse_tool_call(response: &str) -> (String, Option<Vec<ToolCall>>) {
+/// Returns `(content, tool_calls)`.
+pub fn try_parse_tool_call(
+    response: &str,
+    known_tools: Option<&[Tool]>,
+) -> (String, Option<Vec<ToolCall>>) {
     let trimmed = response.trim();
     let value: serde_json::Value = match serde_json::from_str(trimmed) {
         Ok(v) => v,
@@ -143,6 +217,12 @@ pub fn try_parse_tool_call(response: &str) -> (String, Option<Vec<ToolCall>>) {
         value.get("name").and_then(|n| n.as_str()),
         value.get("arguments"),
     ) {
+        // Validate name against known tools when provided.
+        if let Some(tools) = known_tools {
+            if !tools.iter().any(|t| t.function.name == name) {
+                return (response.to_string(), None);
+            }
+        }
         let call = ToolCall {
             id: format!("call_{}", &Uuid::new_v4().to_string()[..8]),
             call_type: "function".to_string(),
@@ -160,6 +240,12 @@ pub fn try_parse_tool_call(response: &str) -> (String, Option<Vec<ToolCall>>) {
             .iter()
             .filter_map(|c| {
                 let name = c.get("name")?.as_str()?.to_string();
+                // Validate name if known_tools provided.
+                if let Some(tools) = known_tools {
+                    if !tools.iter().any(|t| t.function.name == name) {
+                        return None;
+                    }
+                }
                 let args = c.get("arguments")?.to_string();
                 Some(ToolCall {
                     id: format!("call_{}", &Uuid::new_v4().to_string()[..8]),
@@ -183,7 +269,6 @@ pub fn try_parse_tool_call(response: &str) -> (String, Option<Vec<ToolCall>>) {
 // Prompt preparation
 // ---------------------------------------------------------------------------
 
-/// Build the JSON mode system instruction string.
 fn json_mode_instruction(response_format: Option<&ResponseFormat>) -> Option<String> {
     let rf = response_format?;
     match rf.format_type.as_str() {
@@ -213,18 +298,17 @@ fn json_mode_instruction(response_format: Option<&ResponseFormat>) -> Option<Str
     }
 }
 
-/// Inject system messages (system prompt, tools, JSON mode), apply the chat
-/// template, and tokenise the result.
+/// Inject system messages, apply the chat template, and tokenise the result.
 ///
-/// When `show_thinking` is true the opening `<think>\n` tag is appended to the
-/// rendered prompt so the model enters reasoning mode immediately.
-///
-/// Returns `(tokens, token_count)`.
+/// * `tools` — already filtered by [`resolve_tool_choice`] (None = no tools).
+/// * `tool_required` / `specific_tool` — from [`ToolChoiceResult`].
 pub fn prepare_prompt(
     entry: &EngineEntry,
     mut messages: Vec<MessageForTemplate>,
     system_prompt: Option<&str>,
     tools: Option<&[Tool]>,
+    tool_required: bool,
+    specific_tool: Option<&str>,
     response_format: Option<&ResponseFormat>,
     show_thinking: bool,
 ) -> (Vec<i32>, usize) {
@@ -243,12 +327,12 @@ pub fn prepare_prompt(
         }
     }
 
-    // Append tool descriptions to the system message (or create one).
+    // Append tool descriptions.
     if let Some(tools) = tools {
-        let tool_msg = tools_system_message(tools);
+        let tool_msg = tools_system_message(tools, tool_required, specific_tool);
         if messages.first().map(|m| m.role.as_str()) == Some("system") {
-            let sys_content = messages[0].content.get_or_insert_with(String::new);
-            sys_content.push_str(&format!("\n\n{tool_msg}"));
+            let sys = messages[0].content.get_or_insert_with(String::new);
+            sys.push_str(&format!("\n\n{tool_msg}"));
         } else {
             messages.insert(
                 0,
@@ -265,8 +349,8 @@ pub fn prepare_prompt(
     // Inject JSON-mode instruction.
     if let Some(instr) = json_mode_instruction(response_format) {
         if messages.first().map(|m| m.role.as_str()) == Some("system") {
-            let sys_content = messages[0].content.get_or_insert_with(String::new);
-            sys_content.push_str(&format!("\n\n{instr}"));
+            let sys = messages[0].content.get_or_insert_with(String::new);
+            sys.push_str(&format!("\n\n{instr}"));
         } else {
             messages.insert(
                 0,
@@ -280,7 +364,6 @@ pub fn prepare_prompt(
         }
     }
 
-    // Flatten to (role, content) pairs for apply_chat_template (FFI boundary).
     let flat: Vec<(String, String)> = messages.iter().map(flatten_message_for_template).collect();
 
     let mut prompt = entry
@@ -293,8 +376,6 @@ pub fn prepare_prompt(
                 .join("\n")
         });
 
-    // For reasoning models (Qwen3, DeepSeek-R1…) append the opening <think> tag
-    // so the model enters reasoning mode. Mirrors the behaviour of `fox run --show-thinking`.
     if show_thinking {
         prompt.push_str("<think>\n");
     }
@@ -350,7 +431,7 @@ mod tests {
     #[test]
     fn test_try_parse_tool_call_valid_single() {
         let response = r#"{"name":"get_weather","arguments":{"city":"Madrid"}}"#;
-        let (content, calls) = try_parse_tool_call(response);
+        let (content, calls) = try_parse_tool_call(response, None);
         assert!(content.is_empty());
         let calls = calls.expect("should have tool calls");
         assert_eq!(calls.len(), 1);
@@ -363,7 +444,7 @@ mod tests {
     #[test]
     fn test_try_parse_tool_call_plain_text() {
         let response = "The sky is blue because of Rayleigh scattering.";
-        let (content, calls) = try_parse_tool_call(response);
+        let (content, calls) = try_parse_tool_call(response, None);
         assert_eq!(content, response);
         assert!(calls.is_none());
     }
@@ -371,7 +452,7 @@ mod tests {
     #[test]
     fn test_try_parse_tool_call_invalid_json() {
         let response = "not { json at all }";
-        let (content, calls) = try_parse_tool_call(response);
+        let (content, calls) = try_parse_tool_call(response, None);
         assert_eq!(content, response);
         assert!(calls.is_none());
     }
@@ -379,7 +460,7 @@ mod tests {
     #[test]
     fn test_try_parse_tool_call_json_no_name() {
         let response = r#"{"answer": "42"}"#;
-        let (content, calls) = try_parse_tool_call(response);
+        let (content, calls) = try_parse_tool_call(response, None);
         assert_eq!(content, response);
         assert!(calls.is_none());
     }
@@ -387,7 +468,7 @@ mod tests {
     #[test]
     fn test_try_parse_tool_call_tool_calls_array() {
         let response = r#"{"tool_calls":[{"name":"search","arguments":{"query":"rust"}}]}"#;
-        let (content, calls) = try_parse_tool_call(response);
+        let (content, calls) = try_parse_tool_call(response, None);
         assert!(content.is_empty());
         let calls = calls.expect("should detect tool_calls array");
         assert_eq!(calls[0].function.name, "search");
@@ -396,8 +477,35 @@ mod tests {
     #[test]
     fn test_try_parse_tool_call_whitespace_trimmed() {
         let response = "  \n{\"name\":\"foo\",\"arguments\":{}}\n  ";
-        let (_content, calls) = try_parse_tool_call(response);
+        let (_content, calls) = try_parse_tool_call(response, None);
         assert!(calls.is_some());
+    }
+
+    #[test]
+    fn test_try_parse_tool_call_validates_against_known_tools() {
+        use crate::api::types::{Tool, ToolFunction};
+        let tools = vec![Tool {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }];
+        // Known tool name → detected
+        let (_, calls) = try_parse_tool_call(
+            r#"{"name":"get_weather","arguments":{}}"#,
+            Some(&tools),
+        );
+        assert!(calls.is_some());
+
+        // Unknown tool name → rejected
+        let (content, calls) = try_parse_tool_call(
+            r#"{"name":"unknown_tool","arguments":{}}"#,
+            Some(&tools),
+        );
+        assert!(calls.is_none());
+        assert!(!content.is_empty());
     }
 
     #[test]
@@ -411,16 +519,97 @@ mod tests {
                 parameters: None,
             },
         }];
-        let msg = tools_system_message(&tools);
+        let msg = tools_system_message(&tools, false, None);
         assert!(msg.contains("get_weather"));
         assert!(msg.contains("tool"));
         assert!(msg.contains("JSON"));
     }
 
     #[test]
-    fn test_tools_system_message_empty_tools() {
-        let msg = tools_system_message(&[]);
-        assert!(msg.contains("JSON"));
+    fn test_tools_system_message_required() {
+        use crate::api::types::{Tool, ToolFunction};
+        let tools = vec![Tool {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: "search".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }];
+        let msg = tools_system_message(&tools, true, None);
+        assert!(msg.contains("MUST call"));
+    }
+
+    #[test]
+    fn test_tools_system_message_specific_tool() {
+        use crate::api::types::{Tool, ToolFunction};
+        let tools = vec![Tool {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: "search".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }];
+        let msg = tools_system_message(&tools, true, Some("search"));
+        assert!(msg.contains("'search'"));
+    }
+
+    #[test]
+    fn test_resolve_tool_choice_none_string() {
+        use crate::api::types::{Tool, ToolFunction};
+        let tools = vec![Tool {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: "f".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }];
+        let v = serde_json::json!("none");
+        let r = resolve_tool_choice(Some(&tools), Some(&v));
+        assert!(r.tools.is_none());
+        assert!(!r.required);
+    }
+
+    #[test]
+    fn test_resolve_tool_choice_required() {
+        use crate::api::types::{Tool, ToolFunction};
+        let tools = vec![Tool {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: "f".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }];
+        let v = serde_json::json!("required");
+        let r = resolve_tool_choice(Some(&tools), Some(&v));
+        assert!(r.tools.is_some());
+        assert!(r.required);
+        assert!(r.specific.is_none());
+    }
+
+    #[test]
+    fn test_resolve_tool_choice_specific() {
+        use crate::api::types::{Tool, ToolFunction};
+        let tools = vec![
+            Tool {
+                tool_type: "function".to_string(),
+                function: ToolFunction { name: "a".to_string(), description: None, parameters: None },
+            },
+            Tool {
+                tool_type: "function".to_string(),
+                function: ToolFunction { name: "b".to_string(), description: None, parameters: None },
+            },
+        ];
+        let v = serde_json::json!({"type": "function", "function": {"name": "a"}});
+        let r = resolve_tool_choice(Some(&tools), Some(&v));
+        let eff = r.tools.expect("should have tools");
+        assert_eq!(eff.len(), 1);
+        assert_eq!(eff[0].function.name, "a");
+        assert!(r.required);
+        assert_eq!(r.specific.as_deref(), Some("a"));
     }
 
     #[test]

@@ -21,7 +21,7 @@ mod tests {
         let json = r#"{"role":"user","content":"Hello"}"#;
         let msg: ChatMessage = serde_json::from_str(json).unwrap();
         assert_eq!(msg.role, "user");
-        assert_eq!(msg.content.as_deref(), Some("Hello"));
+        assert_eq!(msg.content.as_ref().map(|c| c.as_text()).as_deref(), Some("Hello"));
     }
 
     #[test]
@@ -38,7 +38,7 @@ mod tests {
         let msg: ChatMessage = serde_json::from_str(json).unwrap();
         assert_eq!(msg.role, "tool");
         assert_eq!(msg.tool_call_id.as_deref(), Some("call_abc"));
-        assert_eq!(msg.content.as_deref(), Some("Sunny, 22°C"));
+        assert_eq!(msg.content.as_ref().map(|c| c.as_text()).as_deref(), Some("Sunny, 22°C"));
     }
 
     #[test]

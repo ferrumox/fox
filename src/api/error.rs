@@ -22,13 +22,44 @@ pub enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, msg) = match self {
-            AppError::ModelNotFound(m) => (StatusCode::NOT_FOUND, m),
-            AppError::ModelLoadFailed(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
-            AppError::EmbeddingFailed(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
-            AppError::InternalError(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
+        let (status, msg, err_type, code) = match self {
+            AppError::ModelNotFound(m) => (
+                StatusCode::NOT_FOUND,
+                m,
+                "invalid_request_error",
+                "model_not_found",
+            ),
+            AppError::ModelLoadFailed(m) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                m,
+                "server_error",
+                "model_load_failed",
+            ),
+            AppError::EmbeddingFailed(m) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                m,
+                "server_error",
+                "embedding_failed",
+            ),
+            AppError::InternalError(m) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                m,
+                "server_error",
+                "internal_error",
+            ),
         };
-        (status, Json(json!({"error": msg}))).into_response()
+        (
+            status,
+            Json(json!({
+                "error": {
+                    "message": msg,
+                    "type": err_type,
+                    "param": null,
+                    "code": code
+                }
+            })),
+        )
+            .into_response()
     }
 }
 

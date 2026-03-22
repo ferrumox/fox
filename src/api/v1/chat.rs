@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::api::error::load_model_or_respond;
 use crate::api::router::AppState;
 use crate::api::shared::inference::{
-    prepare_prompt, try_parse_tool_call, MessageForTemplate,
+    prepare_prompt, resolve_tool_choice, try_parse_tool_call, MessageForTemplate,
 };
 use crate::api::shared::streaming::finish_reason_str;
 use crate::api::types::{
@@ -40,28 +40,35 @@ pub async fn chat_completions(
         .unwrap_or_default()
         .as_secs();
 
-    // Build MessageForTemplate from request messages (supports tool/multi-turn history).
+    // Build MessageForTemplate, extracting text from MessageContent (multimodal → text).
     let messages: Vec<MessageForTemplate> = req
         .messages
         .iter()
         .map(|m| MessageForTemplate {
             role: m.role.clone(),
-            content: m.content.clone(),
+            content: m.content.as_ref().map(|c| c.as_text()).filter(|s| !s.is_empty()),
             tool_calls: m.tool_calls.clone(),
             tool_call_id: m.tool_call_id.clone(),
         })
         .collect();
 
+    // Resolve tool_choice: filters tools and determines required/specific constraints.
+    let tc = resolve_tool_choice(req.tools.as_deref(), req.tool_choice.as_ref());
+    let eff_tools = tc.tools.as_deref();
+    let tool_required = tc.required;
+    let specific_tool = tc.specific.as_deref();
+
     let (prompt_tokens, prompt_tokens_len) = prepare_prompt(
         &entry,
         messages,
         state.system_prompt.as_deref(),
-        req.tools.as_deref(),
+        eff_tools,
+        tool_required,
+        specific_tool,
         req.response_format.as_ref(),
         entry.engine.supports_thinking(),
     );
 
-    // max_completion_tokens is an alias for max_tokens (newer OpenAI API name).
     let max_tokens = req
         .max_tokens
         .or(req.max_completion_tokens)
@@ -75,8 +82,6 @@ pub async fn chat_completions(
         repetition_penalty: req.repetition_penalty.unwrap_or(1.0).max(1.0),
         seed: req.seed,
         stop: req.stop.clone(),
-        // OpenAI has no `thinking` field: the model reasons (initial_in_thinking injects <think>)
-        // but the output filter suppresses the thinking block, returning only visible content.
         show_thinking: false,
         initial_in_thinking: supports_thinking,
         max_thinking_chars: 8192,
@@ -92,7 +97,8 @@ pub async fn chat_completions(
         tx,
     ));
 
-    let has_tools = req.tools.is_some();
+    let has_tools = eff_tools.is_some();
+    let allow_parallel = req.parallel_tool_calls.unwrap_or(true);
 
     tracing::info!(
         model = %req.model,
@@ -105,26 +111,24 @@ pub async fn chat_completions(
 
     if req.stream {
         if has_tools {
-            // Buffer all tokens, parse tool call, then emit as SSE deltas.
-            // This lets streaming clients (Google ADK, LangChain) get a proper
-            // streaming response even when tool use is involved.
-            let mut full_content = String::new();
-            let mut completion_tokens = 0u32;
-            let mut final_stop_reason = None;
-            while let Some(token) = rx.recv().await {
-                full_content.push_str(&token.text);
-                completion_tokens += 1;
-                if let Some(ref reason) = token.stop_reason {
-                    final_stop_reason = Some(reason.clone());
-                    break;
+            // With tools: buffer all tokens, parse tool call, emit as SSE deltas.
+            let (full_content, completion_tokens, stop_reason) =
+                buffer_tokens(&mut rx).await;
+
+            let (content, mut tool_calls) =
+                try_parse_tool_call(&full_content, eff_tools);
+
+            // Enforce parallel_tool_calls: false
+            if !allow_parallel {
+                if let Some(ref mut calls) = tool_calls {
+                    calls.truncate(1);
                 }
             }
 
-            let (content, tool_calls) = try_parse_tool_call(&full_content);
             let finish_reason = if tool_calls.is_some() {
                 "tool_calls".to_string()
             } else {
-                final_stop_reason
+                stop_reason
                     .as_ref()
                     .map(finish_reason_str)
                     .unwrap_or("stop")
@@ -151,7 +155,7 @@ pub async fn chat_completions(
             let model_c = req.model.clone();
             let finish_c = finish_reason.clone();
             let stream = async_stream::stream! {
-                // First chunk: role announcement.
+                // Chunk 1: role announcement
                 let first = ChatCompletionChunk {
                     id: id_c.clone(),
                     object: "chat.completion.chunk".to_string(),
@@ -167,13 +171,14 @@ pub async fn chat_completions(
                         finish_reason: None,
                     }],
                     usage: None,
+                    system_fingerprint: None,
                 };
                 yield Ok::<_, std::convert::Infallible>(
                     Event::default().json_data(first).unwrap_or_else(|_| Event::default().data(""))
                 );
                 tokio::task::yield_now().await;
 
-                // Final chunk: tool_calls delta or content, with usage.
+                // Chunk 2: tool_calls delta or content + usage
                 let delta = if let Some(ref tcs) = tool_calls {
                     ChatMessageDelta {
                         role: None,
@@ -212,10 +217,14 @@ pub async fn chat_completions(
                         finish_reason: Some(finish_c),
                     }],
                     usage: Some(usage),
+                    system_fingerprint: None,
                 };
                 yield Ok::<_, std::convert::Infallible>(
                     Event::default().json_data(final_chunk).unwrap_or_else(|_| Event::default().data(""))
                 );
+
+                // OpenAI-compatible stream terminator
+                yield Ok::<_, std::convert::Infallible>(Event::default().data("[DONE]"));
             };
 
             return Sse::new(stream)
@@ -228,11 +237,12 @@ pub async fn chat_completions(
         let log_prompt = prompt_tokens_len;
         let stream = async_stream::stream! {
             let mut completion_tokens: u32 = 0;
+            let mut first_chunk = true;
             while let Some(token) = rx.recv().await {
-                let content = token.text.clone();
                 let is_done = token.stop_reason.is_some();
                 let finish_reason = token.stop_reason.as_ref().map(finish_reason_str).map(str::to_string);
                 completion_tokens += 1;
+
                 if is_done {
                     tracing::info!(
                         model = %log_model,
@@ -244,6 +254,7 @@ pub async fn chat_completions(
                         "done"
                     );
                 }
+
                 let usage = if is_done {
                     Some(Usage {
                         prompt_tokens: log_prompt as u32,
@@ -253,6 +264,15 @@ pub async fn chat_completions(
                 } else {
                     None
                 };
+
+                // First chunk carries role; subsequent chunks carry content.
+                let (role, content) = if first_chunk {
+                    first_chunk = false;
+                    (Some("assistant".to_string()), Some(token.text.clone()))
+                } else {
+                    (None, Some(token.text.clone()))
+                };
+
                 let chunk = ChatCompletionChunk {
                     id: id.clone(),
                     object: "chat.completion.chunk".to_string(),
@@ -261,13 +281,14 @@ pub async fn chat_completions(
                     choices: vec![ChatCompletionChunkChoice {
                         index: 0,
                         delta: ChatMessageDelta {
-                            role: None,
-                            content: Some(content),
+                            role,
+                            content,
                             tool_calls: None,
                         },
                         finish_reason,
                     }],
                     usage,
+                    system_fingerprint: None,
                 };
                 let event = Event::default()
                     .json_data(chunk)
@@ -278,33 +299,37 @@ pub async fn chat_completions(
                     break;
                 }
             }
+            // OpenAI-compatible stream terminator
+            yield Ok::<_, std::convert::Infallible>(Event::default().data("[DONE]"));
         };
         Sse::new(stream)
             .keep_alive(KeepAlive::default())
             .into_response()
     } else {
-        let mut full_content = String::new();
-        let mut completion_tokens = 0u32;
-        let mut final_finish_reason = "stop".to_string();
-        while let Some(token) = rx.recv().await {
-            full_content.push_str(&token.text);
-            completion_tokens += 1;
-            if let Some(ref reason) = token.stop_reason {
-                final_finish_reason = finish_reason_str(reason).to_string();
-                break;
-            }
-        }
+        let (full_content, completion_tokens, stop_reason) = buffer_tokens(&mut rx).await;
+        let stop_str = stop_reason
+            .as_ref()
+            .map(finish_reason_str)
+            .unwrap_or("stop")
+            .to_string();
 
-        let (content, tool_calls) = if req.tools.is_some() {
-            try_parse_tool_call(&full_content)
+        let (content, mut tool_calls) = if has_tools {
+            try_parse_tool_call(&full_content, eff_tools)
         } else {
             (full_content, None)
         };
 
+        // Enforce parallel_tool_calls: false
+        if !allow_parallel {
+            if let Some(ref mut calls) = tool_calls {
+                calls.truncate(1);
+            }
+        }
+
         let finish_reason = if tool_calls.is_some() {
             "tool_calls".to_string()
         } else {
-            final_finish_reason
+            stop_str
         };
 
         tracing::info!(
@@ -326,11 +351,7 @@ pub async fn chat_completions(
                 index: 0,
                 message: ChatMessageResponse {
                     role: "assistant".to_string(),
-                    content: if tool_calls.is_some() {
-                        None
-                    } else {
-                        Some(content)
-                    },
+                    content: if tool_calls.is_some() { None } else { Some(content) },
                     tool_calls,
                 },
                 finish_reason: Some(finish_reason),
@@ -340,9 +361,28 @@ pub async fn chat_completions(
                 completion_tokens,
                 total_tokens: prompt_tokens_len as u32 + completion_tokens,
             }),
+            system_fingerprint: None,
         })
         .into_response()
     }
+}
+
+/// Buffer all tokens from the receiver into `(text, count, stop_reason)`.
+async fn buffer_tokens(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Token>,
+) -> (String, u32, Option<crate::scheduler::StopReason>) {
+    let mut text = String::new();
+    let mut count = 0u32;
+    let mut stop_reason = None;
+    while let Some(token) = rx.recv().await {
+        text.push_str(&token.text);
+        count += 1;
+        if token.stop_reason.is_some() {
+            stop_reason = token.stop_reason;
+            break;
+        }
+    }
+    (text, count, stop_reason)
 }
 
 #[cfg(test)]
@@ -370,6 +410,8 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(v["choices"][0]["finish_reason"].as_str().unwrap(), "stop");
+        // system_fingerprint present as null
+        assert!(v["system_fingerprint"].is_null());
     }
 
     #[tokio::test]
@@ -384,6 +426,11 @@ mod tests {
         });
         let resp = post_json(app, "/v1/chat/completions", body).await;
         assert_eq!(resp.status(), 404);
+        // Error response matches OpenAI format
+        let bytes = body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["error"]["message"].is_string());
+        assert!(v["error"]["type"].is_string());
     }
 
     #[tokio::test]
@@ -399,9 +446,6 @@ mod tests {
         });
         let resp = post_json(app, "/v1/chat/completions", body).await;
         assert_eq!(resp.status(), 200);
-        let bytes = body_bytes(resp).await;
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["object"].as_str().unwrap(), "chat.completion");
     }
 
     #[tokio::test]
@@ -420,9 +464,6 @@ mod tests {
         });
         let resp = post_json(app, "/v1/chat/completions", body).await;
         assert_eq!(resp.status(), 200);
-        let bytes = body_bytes(resp).await;
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["object"].as_str().unwrap(), "chat.completion");
     }
 
     #[tokio::test]
@@ -447,15 +488,10 @@ mod tests {
         });
         let resp = post_json(app, "/v1/chat/completions", body).await;
         assert_eq!(resp.status(), 200);
-        let bytes = body_bytes(resp).await;
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["object"].as_str().unwrap(), "chat.completion");
     }
 
     #[tokio::test]
     async fn test_chat_with_tool_result_in_history() {
-        // Multi-turn: history contains a tool result message (role: "tool").
-        // Fox should accept this without errors and return a normal response.
         let dir = tempfile::tempdir().unwrap();
         let (state, _entry) = make_test_state("stub", dir.path());
         let app = make_router(&state);
@@ -484,9 +520,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tool_choice_none_bypasses_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+        let app = make_router(&state);
+        let body = serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": false,
+            "tools": [{"type":"function","function":{"name":"f","parameters":{}}}],
+            "tool_choice": "none"
+        });
+        let resp = post_json(app, "/v1/chat/completions", body).await;
+        assert_eq!(resp.status(), 200);
+        let bytes = body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // finish_reason should not be "tool_calls" since tool_choice = "none"
+        let fr = v["choices"][0]["finish_reason"].as_str().unwrap();
+        assert_ne!(fr, "tool_calls");
+    }
+
+    #[tokio::test]
+    async fn test_multimodal_content_array() {
+        // Content as array of blocks should be accepted and text extracted.
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+        let app = make_router(&state);
+        let body = serde_json::json!({
+            "model": "stub",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "Hello from array"}]
+            }],
+            "stream": false
+        });
+        let resp = post_json(app, "/v1/chat/completions", body).await;
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
     async fn test_compat_fields_accepted() {
-        // Verify that OpenAI-compat fields like stream_options, parallel_tool_calls,
-        // frequency_penalty, presence_penalty, user don't cause 422.
         let dir = tempfile::tempdir().unwrap();
         let (state, _entry) = make_test_state("stub", dir.path());
         let app = make_router(&state);

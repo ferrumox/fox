@@ -3,7 +3,7 @@
 use axum::{extract::State, Json};
 
 use crate::api::router::AppState;
-use crate::api::types::{ChatCompletionRequest, ChatMessage, CompletionRequest};
+use crate::api::types::{ChatCompletionRequest, ChatMessage, CompletionRequest, MessageContent};
 
 use super::chat::chat_completions;
 
@@ -15,7 +15,7 @@ pub async fn completions(
         model: req.model,
         messages: vec![ChatMessage {
             role: "user".to_string(),
-            content: Some(req.prompt),
+            content: Some(MessageContent::Text(req.prompt)),
             tool_call_id: None,
             tool_calls: None,
             name: None,

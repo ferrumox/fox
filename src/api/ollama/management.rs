@@ -1,14 +1,16 @@
-// GET /api/version, /api/tags, /api/ps, POST /api/show, DELETE /api/delete handlers.
+// GET /api/version, /api/tags, /api/ps, POST /api/show, DELETE /api/delete,
+// POST /api/copy, POST /api/create handlers.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use bytes::Bytes;
 
 use crate::api::shared::extractor::LenientJson;
 
 use crate::api::router::AppState;
 use crate::api::shared::digest::{get_digest, modified_at_rfc3339};
 use crate::api::types::{
-    DeleteRequest, OllamaDetails, OllamaModel, PsEntry, PsResponse, ShowRequest, ShowResponse,
-    TagsResponse, VersionResponse,
+    CopyRequest, CreateRequest, DeleteRequest, OllamaDetails, OllamaModel, PsEntry, PsResponse,
+    ShowRequest, ShowResponse, TagsResponse, VersionResponse,
 };
 use crate::cli::show::{parse_architecture, parse_quantization};
 use crate::cli::{format_size, list_models};
@@ -156,6 +158,124 @@ pub async fn ollama_show(
             };
             Json(resp).into_response()
         }
+    }
+}
+
+/// POST /api/copy — duplicate a .gguf model file under a new stem name.
+pub async fn ollama_copy(
+    State(state): State<AppState>,
+    LenientJson(req): LenientJson<CopyRequest>,
+) -> impl IntoResponse {
+    let entries = match list_models(&state.models_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to list models: {e}"),
+            )
+                .into_response()
+        }
+    };
+
+    let found = entries.into_iter().find(|(path, _)| {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        stem == req.source || name == req.source
+    });
+
+    match found {
+        None => (
+            StatusCode::NOT_FOUND,
+            format!("model '{}' not found", req.source),
+        )
+            .into_response(),
+        Some((src_path, _)) => {
+            let dst_name = if req.destination.ends_with(".gguf") {
+                req.destination.clone()
+            } else {
+                format!("{}.gguf", req.destination)
+            };
+            let dst_path = state.models_dir.join(&dst_name);
+            match std::fs::copy(&src_path, &dst_path) {
+                Ok(_) => StatusCode::OK.into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to copy model: {e}"),
+                )
+                    .into_response(),
+            }
+        }
+    }
+}
+
+/// POST /api/create — create a model from a Modelfile (minimal: FROM + optional SYSTEM).
+///
+/// Full Modelfile parsing is not supported. This endpoint accepts the request and:
+/// - Parses `FROM <base_model>` to find the source model.
+/// - Copies the .gguf file to the new model name.
+/// - Returns streaming NDJSON status messages (Ollama format).
+pub async fn ollama_create(
+    State(state): State<AppState>,
+    LenientJson(req): LenientJson<CreateRequest>,
+) -> axum::response::Response {
+    let stream_mode = req.stream.unwrap_or(true);
+
+    // Parse FROM directive from the modelfile.
+    let from_model = req.modelfile.as_deref().and_then(|mf| {
+        mf.lines()
+            .find(|l| l.to_uppercase().starts_with("FROM "))
+            .map(|l| l[5..].trim().to_string())
+    });
+
+    let status_lines: Vec<String> = if let Some(base) = from_model {
+        // Try to copy the base model file to the new name.
+        let entries = list_models(&state.models_dir).unwrap_or_default();
+        let found = entries.into_iter().find(|(path, _)| {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            stem == base || path.file_name().and_then(|s| s.to_str()).unwrap_or("") == base
+        });
+
+        if let Some((src_path, _)) = found {
+            let dst_name = format!("{}.gguf", req.model);
+            let dst_path = state.models_dir.join(dst_name);
+            let copy_result = std::fs::copy(&src_path, &dst_path);
+            if copy_result.is_ok() {
+                vec![
+                    serde_json::json!({"status": "reading model metadata"}).to_string(),
+                    serde_json::json!({"status": "creating model", "total": 1, "completed": 1}).to_string(),
+                    serde_json::json!({"status": "success"}).to_string(),
+                ]
+            } else {
+                vec![serde_json::json!({"status": "error", "error": "failed to copy model"}).to_string()]
+            }
+        } else {
+            vec![serde_json::json!({"status": "error", "error": format!("base model '{}' not found", base)}).to_string()]
+        }
+    } else {
+        // No FROM directive — just return success (model name registered but no file).
+        vec![
+            serde_json::json!({"status": "reading model metadata"}).to_string(),
+            serde_json::json!({"status": "success"}).to_string(),
+        ]
+    };
+
+    if stream_mode {
+        let body = status_lines
+            .into_iter()
+            .map(|mut l| { l.push('\n'); l })
+            .collect::<String>();
+        axum::response::Response::builder()
+            .status(200)
+            .header(axum::http::header::CONTENT_TYPE, "application/x-ndjson")
+            .body(axum::body::Body::from(Bytes::from(body.into_bytes())))
+            .unwrap()
+    } else {
+        let last = status_lines.last().cloned().unwrap_or_default();
+        axum::response::Response::builder()
+            .status(200)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(Bytes::from(last.into_bytes())))
+            .unwrap()
     }
 }
 

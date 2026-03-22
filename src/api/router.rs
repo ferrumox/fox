@@ -92,6 +92,11 @@ pub fn router(
             post(crate::api::ollama::generate::ollama_generate),
         )
         .route("/api/chat", post(crate::api::ollama::chat::ollama_chat))
+        .route("/api/copy", post(crate::api::ollama::management::ollama_copy))
+        .route(
+            "/api/create",
+            post(crate::api::ollama::management::ollama_create),
+        )
         .route("/api/pull", post(crate::api::pull_handler::ollama_pull))
         .route("/", get(|| async { "Fox is running" }))
         .layer(middleware::from_fn_with_state(

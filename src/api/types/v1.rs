@@ -1,9 +1,78 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::shared::{default_max_tokens, deserialize_stop, Usage};
 use super::tools::{ResponseFormat, StreamOptions, Tool, ToolCall, ToolCallDelta};
 
-// --- Chat Completions ---
+// ---------------------------------------------------------------------------
+// Message content (string or array of content blocks — OpenAI multimodal spec)
+// ---------------------------------------------------------------------------
+
+/// A single content block inside a message content array.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ContentBlock {
+    /// "text" | "image_url" | "input_audio" etc.
+    #[serde(rename = "type")]
+    pub block_type: String,
+    /// Present when type == "text".
+    #[serde(default)]
+    pub text: Option<String>,
+    // image_url/audio blocks are accepted but not processed (no vision support).
+}
+
+/// OpenAI-compatible message content: either a plain string or an array of blocks.
+#[derive(Debug, Clone)]
+pub enum MessageContent {
+    Text(String),
+    Array(Vec<ContentBlock>),
+}
+
+impl MessageContent {
+    /// Extract all text from the content, joining text blocks with a newline.
+    pub fn as_text(&self) -> String {
+        match self {
+            MessageContent::Text(s) => s.clone(),
+            MessageContent::Array(blocks) => blocks
+                .iter()
+                .filter_map(|b| {
+                    if b.block_type == "text" {
+                        b.text.as_deref()
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageContent {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Text(String),
+            Array(Vec<ContentBlock>),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Text(s) => Ok(MessageContent::Text(s)),
+            Raw::Array(v) => Ok(MessageContent::Array(v)),
+        }
+    }
+}
+
+impl Serialize for MessageContent {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            MessageContent::Text(t) => s.serialize_str(t),
+            MessageContent::Array(v) => v.serialize(s),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Chat Completions
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
@@ -28,7 +97,6 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub seed: Option<u64>,
     /// Stop generation when output ends with any of these strings (OpenAI-compatible).
-    /// Accepts a single string or an array of strings.
     #[serde(default, deserialize_with = "deserialize_stop")]
     pub stop: Option<Vec<String>>,
     #[serde(default)]
@@ -36,22 +104,22 @@ pub struct ChatCompletionRequest {
     /// OpenAI function/tool definitions.
     #[serde(default)]
     pub tools: Option<Vec<Tool>>,
-    /// "auto" | "none" | specific tool selector.
+    /// "auto" | "none" | "required" | specific tool selector.
     #[serde(default)]
     pub tool_choice: Option<serde_json::Value>,
-    /// When false, the model must call at most one tool per turn.
+    /// When false, limit tool calls in a single turn to at most one.
     #[serde(default)]
     pub parallel_tool_calls: Option<bool>,
     /// Structured output format.
     #[serde(default)]
     pub response_format: Option<ResponseFormat>,
-    /// Options for the streaming response.
+    /// Options for the streaming response (include_usage etc.).
     #[serde(default)]
     pub stream_options: Option<StreamOptions>,
-    /// Penalty for token frequency in the output (-2.0–2.0). Accepted but not applied.
+    /// Frequency penalty — accepted, not applied (no llama.cpp equivalent).
     #[serde(default)]
     pub frequency_penalty: Option<f32>,
-    /// Penalty for token presence in the output (-2.0–2.0). Accepted but not applied.
+    /// Presence penalty — accepted, not applied.
     #[serde(default)]
     pub presence_penalty: Option<f32>,
     /// Caller identifier — accepted for API compatibility, not used.
@@ -60,7 +128,6 @@ pub struct ChatCompletionRequest {
 }
 
 impl ChatCompletionRequest {
-    /// Validate numeric fields. Called by request handlers before processing.
     pub fn validate(&self) -> Result<(), String> {
         if let Some(t) = self.temperature {
             if t < 0.0 {
@@ -84,16 +151,16 @@ impl ChatCompletionRequest {
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChatMessage {
     pub role: String,
-    /// The message content. May be absent/null when role=="assistant" and tool_calls is present.
+    /// May be absent/null when role=="assistant" and tool_calls is present.
     #[serde(default)]
-    pub content: Option<String>,
+    pub content: Option<MessageContent>,
     /// For role=="tool": identifies which tool_call this result responds to.
     #[serde(default)]
     pub tool_call_id: Option<String>,
-    /// For role=="assistant" in multi-turn history: tool calls made in a prior turn.
+    /// For role=="assistant" in multi-turn history: prior tool calls.
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCall>>,
-    /// Optional sender name (used by some frameworks for disambiguation).
+    /// Optional sender name.
     #[serde(default)]
     pub name: Option<String>,
 }
@@ -106,6 +173,8 @@ pub struct ChatCompletionResponse {
     pub model: String,
     pub choices: Vec<ChatCompletionChoice>,
     pub usage: Option<Usage>,
+    /// Always null — included for client compatibility.
+    pub system_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -133,9 +202,11 @@ pub struct ChatCompletionChunk {
     pub created: u64,
     pub model: String,
     pub choices: Vec<ChatCompletionChunkChoice>,
-    /// Token usage — only present in the final chunk (when finish_reason is set).
+    /// Token usage — only present in the final chunk.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// Always null — included for client compatibility.
+    pub system_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -153,7 +224,7 @@ pub struct ChatMessageDelta {
     pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
-// --- Completions ---
+// --- Completions (legacy) ---
 
 #[derive(Debug, Deserialize)]
 pub struct CompletionRequest {
@@ -196,4 +267,6 @@ pub struct ModelsResponse {
 pub struct ModelInfo {
     pub id: String,
     pub object: String,
+    pub created: u64,
+    pub owned_by: String,
 }

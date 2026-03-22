@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use crate::api::error::load_model_or_respond;
 use crate::api::router::AppState;
-use crate::api::shared::inference::sampling_from_ollama;
+use crate::api::shared::inference::{prepare_prompt, sampling_from_ollama, MessageForTemplate};
 use crate::api::shared::streaming::{
     collect_tokens, ndjson_response, ndjson_stream, now_rfc3339, ollama_done_reason,
 };
@@ -25,39 +25,56 @@ pub async fn ollama_generate(
         Err(r) => return r,
     };
 
-    let mut messages: Vec<(String, String)> = Vec::new();
+    // Build MessageForTemplate list (system prompt + user prompt).
+    let mut messages: Vec<MessageForTemplate> = Vec::new();
     if let Some(ref sys) = req.system {
-        messages.push(("system".to_string(), sys.clone()));
+        messages.push(MessageForTemplate {
+            role: "system".to_string(),
+            content: Some(sys.clone()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
     }
-    messages.push(("user".to_string(), req.prompt.clone()));
+    messages.push(MessageForTemplate {
+        role: "user".to_string(),
+        content: Some(req.prompt.clone()),
+        tool_calls: None,
+        tool_call_id: None,
+    });
+
+    // JSON mode from the `format` field.
+    let json_mode = req
+        .format
+        .as_ref()
+        .map(|f| f.as_str() == Some("json") || f.is_object())
+        .unwrap_or(false);
+    let response_format = if json_mode {
+        Some(crate::api::types::ResponseFormat {
+            format_type: "json_object".to_string(),
+            json_schema: None,
+        })
+    } else {
+        None
+    };
 
     let supports_thinking = entry.engine.supports_thinking();
-    let mut prompt = entry
-        .engine
-        .apply_chat_template(&messages)
-        .unwrap_or_else(|_| {
-            messages
-                .iter()
-                .map(|(r, c)| format!("{r}: {c}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        });
-    if supports_thinking {
-        prompt.push_str("<think>\n");
-    }
 
-    let prompt_tokens: Vec<i32> = entry
-        .engine
-        .tokenize(&prompt)
-        .unwrap_or_else(|_| prompt.bytes().map(|b| b as i32).take(4096).collect());
-    let prompt_tokens_len = prompt_tokens.len();
-
-    let stream_mode = req.stream.unwrap_or(true);
-
-    // /api/generate has no `thinking` field: always suppress thinking from output.
-    // The model still reasons because <think>\n was injected into the prompt.
+    // /api/generate always suppresses thinking from output (no `thinking` field in response).
     let (mut sampling, max_tokens) = sampling_from_ollama(req.options.as_ref(), false);
     sampling.initial_in_thinking = supports_thinking;
+
+    let (prompt_tokens, prompt_tokens_len) = prepare_prompt(
+        &entry,
+        messages,
+        state.system_prompt.as_deref(),
+        None,  // no tools on /api/generate
+        false,
+        None,
+        response_format.as_ref(),
+        false, // show_thinking always false for /api/generate
+    );
+
+    let stream_mode = req.stream.unwrap_or(true);
 
     let req_id = entry.engine.next_request_id();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
@@ -107,23 +124,22 @@ pub async fn ollama_generate(
                 },
                 total_duration: if is_done { Some(elapsed_ns) } else { None },
                 load_duration: if is_done { Some(0) } else { None },
-                prompt_eval_count: if is_done {
-                    Some(prompt_tokens_len as u32)
-                } else {
-                    None
-                },
+                prompt_eval_count: if is_done { Some(log_prompt as u32) } else { None },
+                prompt_eval_duration: if is_done { Some(0) } else { None },
                 eval_count: if is_done { Some(eval_count) } else { None },
+                eval_duration: if is_done { Some(elapsed_ns) } else { None },
             }
         });
         ndjson_response(stream)
     } else {
         let (full_response, eval_count, stop_reason) = collect_tokens(&mut rx).await;
+        let elapsed_ns = start.elapsed().as_nanos() as u64;
         tracing::info!(
             model = %model_name,
             stream = false,
             prompt_tokens = prompt_tokens_len as u32,
             completion_tokens = eval_count,
-            duration_ms = start.elapsed().as_millis() as u64,
+            duration_ms = elapsed_ns / 1_000_000,
             finish_reason = %ollama_done_reason(&stop_reason),
             "done"
         );
@@ -133,10 +149,12 @@ pub async fn ollama_generate(
             response: full_response,
             done: true,
             done_reason: Some(ollama_done_reason(&stop_reason)),
-            total_duration: Some(start.elapsed().as_nanos() as u64), // reuses handler-level start
+            total_duration: Some(elapsed_ns),
             load_duration: Some(0),
             prompt_eval_count: Some(prompt_tokens_len as u32),
+            prompt_eval_duration: Some(0),
             eval_count: Some(eval_count),
+            eval_duration: Some(elapsed_ns),
         };
         let mut line = serde_json::to_string(&chunk).unwrap_or_default();
         line.push('\n');
@@ -169,5 +187,37 @@ mod tests {
         assert!(v["done"].as_bool().unwrap());
         assert_eq!(v["model"].as_str().unwrap(), "stub");
         assert!(!v["response"].as_str().unwrap().is_empty());
+        assert!(v["prompt_eval_duration"].is_number());
+        assert!(v["eval_duration"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_ollama_generate_format_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+        let app = make_router(&state);
+        let body = serde_json::json!({
+            "model": "stub",
+            "prompt": "Return JSON",
+            "stream": false,
+            "format": "json"
+        });
+        let resp = post_json(app, "/api/generate", body).await;
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_ollama_generate_keep_alive_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+        let app = make_router(&state);
+        let body = serde_json::json!({
+            "model": "stub",
+            "prompt": "Hi",
+            "stream": false,
+            "keep_alive": "5m"
+        });
+        let resp = post_json(app, "/api/generate", body).await;
+        assert_eq!(resp.status(), 200);
     }
 }
