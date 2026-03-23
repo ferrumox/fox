@@ -28,19 +28,31 @@ impl Scheduler {
         //   running_batch → waiting_queue → seq_id_pool → prefix_cache
         let mut running = match self.running_batch.lock() {
             Ok(g) => g,
-            Err(e) => { tracing::error!("running_batch lock poisoned: {}", e); return ScheduledBatch::default(); }
+            Err(e) => {
+                tracing::error!("running_batch lock poisoned: {}", e);
+                return ScheduledBatch::default();
+            }
         };
         let mut waiting = match self.waiting_queue.lock() {
             Ok(g) => g,
-            Err(e) => { tracing::error!("waiting_queue lock poisoned: {}", e); return ScheduledBatch::default(); }
+            Err(e) => {
+                tracing::error!("waiting_queue lock poisoned: {}", e);
+                return ScheduledBatch::default();
+            }
         };
         let mut pool = match self.seq_id_pool.lock() {
             Ok(g) => g,
-            Err(e) => { tracing::error!("seq_id_pool lock poisoned: {}", e); return ScheduledBatch::default(); }
+            Err(e) => {
+                tracing::error!("seq_id_pool lock poisoned: {}", e);
+                return ScheduledBatch::default();
+            }
         };
         let mut pcache = match self.prefix_cache.lock() {
             Ok(g) => g,
-            Err(e) => { tracing::error!("prefix_cache lock poisoned: {}", e); return ScheduledBatch::default(); }
+            Err(e) => {
+                tracing::error!("prefix_cache lock poisoned: {}", e);
+                return ScheduledBatch::default();
+            }
         };
 
         // 1. Evict Finished and free blocks + return seq IDs.

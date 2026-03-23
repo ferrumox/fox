@@ -31,10 +31,7 @@ impl EngineEntry {
         Self::for_test_with_model(name, Arc::new(ThinkingStubModel::new()))
     }
 
-    fn for_test_with_model(
-        name: &str,
-        model: Arc<dyn crate::engine::model::Model>,
-    ) -> Arc<Self> {
+    fn for_test_with_model(name: &str, model: Arc<dyn crate::engine::model::Model>) -> Arc<Self> {
         use crate::kv_cache::KVCacheManager;
         use crate::scheduler::Scheduler;
 

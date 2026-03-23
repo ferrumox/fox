@@ -46,7 +46,11 @@ pub async fn chat_completions(
         .iter()
         .map(|m| MessageForTemplate {
             role: m.role.clone(),
-            content: m.content.as_ref().map(|c| c.as_text()).filter(|s| !s.is_empty()),
+            content: m
+                .content
+                .as_ref()
+                .map(|c| c.as_text())
+                .filter(|s| !s.is_empty()),
             tool_calls: m.tool_calls.clone(),
             tool_call_id: m.tool_call_id.clone(),
         })
@@ -69,10 +73,7 @@ pub async fn chat_completions(
         entry.engine.supports_thinking(),
     );
 
-    let max_tokens = req
-        .max_tokens
-        .or(req.max_completion_tokens)
-        .unwrap_or(256) as usize;
+    let max_tokens = req.max_tokens.or(req.max_completion_tokens).unwrap_or(256) as usize;
 
     let supports_thinking = entry.engine.supports_thinking();
     let sampling = SamplingParams {
@@ -112,11 +113,9 @@ pub async fn chat_completions(
     if req.stream {
         if has_tools {
             // With tools: buffer all tokens, parse tool call, emit as SSE deltas.
-            let (full_content, completion_tokens, stop_reason) =
-                buffer_tokens(&mut rx).await;
+            let (full_content, completion_tokens, stop_reason) = buffer_tokens(&mut rx).await;
 
-            let (content, mut tool_calls) =
-                try_parse_tool_call(&full_content, eff_tools);
+            let (content, mut tool_calls) = try_parse_tool_call(&full_content, eff_tools);
 
             // Enforce parallel_tool_calls: false
             if !allow_parallel {
@@ -351,7 +350,11 @@ pub async fn chat_completions(
                 index: 0,
                 message: ChatMessageResponse {
                     role: "assistant".to_string(),
-                    content: if tool_calls.is_some() { None } else { Some(content) },
+                    content: if tool_calls.is_some() {
+                        None
+                    } else {
+                        Some(content)
+                    },
                     tool_calls,
                 },
                 finish_reason: Some(finish_reason),

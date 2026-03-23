@@ -67,7 +67,7 @@ pub async fn ollama_generate(
         &entry,
         messages,
         state.system_prompt.as_deref(),
-        None,  // no tools on /api/generate
+        None, // no tools on /api/generate
         false,
         None,
         response_format.as_ref(),
@@ -124,7 +124,11 @@ pub async fn ollama_generate(
                 },
                 total_duration: if is_done { Some(elapsed_ns) } else { None },
                 load_duration: if is_done { Some(0) } else { None },
-                prompt_eval_count: if is_done { Some(log_prompt as u32) } else { None },
+                prompt_eval_count: if is_done {
+                    Some(log_prompt as u32)
+                } else {
+                    None
+                },
                 prompt_eval_duration: if is_done { Some(0) } else { None },
                 eval_count: if is_done { Some(eval_count) } else { None },
                 eval_duration: if is_done { Some(elapsed_ns) } else { None },

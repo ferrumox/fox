@@ -136,7 +136,7 @@ fn main() {
         //   .dylib → llama, ggml-base, ggml (linked at compile time)
         //   .so    → ggml-cpu, ggml-metal, ... (MODULE, dlopen-ed at runtime)
         // Both must be copied next to the binary.
-        let exts: &[&str] = if target_os == "macos" {
+        let _exts: &[&str] = if target_os == "macos" {
             &["dylib", "so"]
         } else {
             &["so"]

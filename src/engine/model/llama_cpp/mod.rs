@@ -8,13 +8,14 @@
 mod batch;
 #[cfg(not(fox_stub))]
 mod metadata;
+mod stub;
 #[cfg(not(fox_stub))]
 mod vocab;
-mod stub;
 
 #[cfg(fox_stub)]
 pub use stub::LlamaCppModel;
 
+#[cfg(not(fox_stub))]
 use anyhow::Result;
 
 // ---------------------------------------------------------------------------
@@ -60,11 +61,7 @@ fn available_ram_bytes() -> Option<usize> {
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;
     for line in text.lines() {
         if line.starts_with("MemAvailable:") {
-            let kb: usize = line
-                .split_whitespace()
-                .nth(1)?
-                .parse()
-                .ok()?;
+            let kb: usize = line.split_whitespace().nth(1)?.parse().ok()?;
             return Some(kb * 1024);
         }
     }
@@ -112,18 +109,29 @@ fn diagnose_load_failure(model_path: &std::path::Path) -> anyhow::Error {
     if memory_likely_cause || file_size > 0 {
         let mut msg = format!(
             "failed to load '{}' ({:.1} GB): not enough memory to fit the model.\n",
-            model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?"),
+            model_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?"),
             file_gb
         );
         if let Some(vram) = gpu_free {
-            msg.push_str(&format!("  GPU free:  {:.1} GB\n", vram as f64 / 1_073_741_824.0));
+            msg.push_str(&format!(
+                "  GPU free:  {:.1} GB\n",
+                vram as f64 / 1_073_741_824.0
+            ));
         }
         if let Some(ram) = ram_free {
-            msg.push_str(&format!("  RAM free:  {:.1} GB\n", ram as f64 / 1_073_741_824.0));
+            msg.push_str(&format!(
+                "  RAM free:  {:.1} GB\n",
+                ram as f64 / 1_073_741_824.0
+            ));
         }
         msg.push_str("\nSuggestions:\n");
         msg.push_str("  • Use a smaller quantization — pull a Q4_K_M or Q3_K_M variant instead of Q8_0/F16.\n");
-        msg.push_str("  • Reduce context length with --max-context-len (e.g. 2048 instead of 8192).\n");
+        msg.push_str(
+            "  • Reduce context length with --max-context-len (e.g. 2048 instead of 8192).\n",
+        );
         msg.push_str("  • Close other GPU processes (other models, browsers with WebGL, etc.).\n");
         msg.push_str("  • Unload other loaded models first (fox models or POST /api/delete).\n");
         if gpu_free.is_some() {
@@ -144,6 +152,7 @@ fn diagnose_load_failure(model_path: &std::path::Path) -> anyhow::Error {
 ///
 /// Returns `user_limit` when the user specified one explicitly, otherwise
 /// falls back to `model_train_ctx` (the context the model was trained with).
+#[cfg(not(fox_stub))]
 pub(crate) fn resolve_context_len(user_limit: Option<u32>, model_train_ctx: u32) -> u32 {
     user_limit.unwrap_or(model_train_ctx)
 }
@@ -201,8 +210,7 @@ impl LlamaCppModel {
         // Offload all layers to GPU (-1 = all). On CPU-only builds llama.cpp ignores this.
         model_params.n_gpu_layers = -1;
         let model = unsafe { ffi::llama_model_load_from_file(path_c.as_ptr(), model_params) };
-        let model = NonNull::new(model)
-            .ok_or_else(|| diagnose_load_failure(model_path))?;
+        let model = NonNull::new(model).ok_or_else(|| diagnose_load_failure(model_path))?;
 
         let vocab = unsafe { ffi::llama_model_get_vocab(model.as_ptr()) };
         if vocab.is_null() {
@@ -232,8 +240,7 @@ impl LlamaCppModel {
 
         // Resolve effective per-sequence context: use the user's explicit limit, or
         // auto-detect from the model's trained context length (llama_model_n_ctx_train).
-        let model_train_ctx =
-            unsafe { ffi::llama_model_n_ctx_train(model.as_ptr()) } as u32;
+        let model_train_ctx = unsafe { ffi::llama_model_n_ctx_train(model.as_ptr()) } as u32;
         let effective_max_ctx = resolve_context_len(max_context_len, model_train_ctx);
         if max_context_len.is_none() {
             tracing::info!(
@@ -456,7 +463,7 @@ impl Model for LlamaCppModel {
 // Unit tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, not(fox_stub)))]
 mod tests {
     use super::resolve_context_len;
 

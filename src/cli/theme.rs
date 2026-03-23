@@ -67,12 +67,7 @@ pub fn print_banner(model_name: &str, _context_len: u32, supports_thinking: bool
             "  /bye or Ctrl+D to exit · /think to toggle reasoning\n\n",
         );
     } else {
-        eprint_styled(
-            None,
-            false,
-            true,
-            "  /bye or Ctrl+D to exit\n\n",
-        );
+        eprint_styled(None, false, true, "  /bye or Ctrl+D to exit\n\n");
     }
 }
 

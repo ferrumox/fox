@@ -3,9 +3,11 @@ use tracing::debug;
 
 use crate::scheduler::{StopReason, Token};
 
-use super::output_filter::{apply_output_filter, check_stop_sequences, drain_valid_utf8, PerRequestState};
-use super::{InferenceEngine, SPM_SPACE};
 use super::model::Logits;
+use super::output_filter::{
+    apply_output_filter, check_stop_sequences, drain_valid_utf8, PerRequestState,
+};
+use super::{InferenceEngine, SPM_SPACE};
 
 impl InferenceEngine {
     pub(super) async fn handle_logits(
@@ -140,7 +142,9 @@ impl InferenceEngine {
                 }
                 self.scheduler.mark_finished(*req_id, StopReason::Preempt);
                 match self.per_request_state.lock() {
-                    Ok(mut state) => { state.remove(req_id); }
+                    Ok(mut state) => {
+                        state.remove(req_id);
+                    }
                     Err(e) => tracing::error!("per_request_state lock poisoned on cleanup: {}", e),
                 }
                 continue;

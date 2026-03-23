@@ -74,7 +74,10 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         keep_alive_secs: 0,
         type_kv: 1,
     };
-    let registry = Arc::new(crate::model_registry::ModelRegistry::new(cfg, HashMap::new()));
+    let registry = Arc::new(crate::model_registry::ModelRegistry::new(
+        cfg,
+        HashMap::new(),
+    ));
     let entry = EngineEntry::for_test_thinking(name);
     registry.preload_for_test(name, entry.clone());
     let state = AppState {

@@ -28,7 +28,12 @@ fn flatten_message_for_template(msg: &MessageForTemplate) -> (String, String) {
             let calls = msg.tool_calls.as_ref().unwrap();
             let serialized = calls
                 .iter()
-                .map(|tc| format!("[tool_call: {}({})]", tc.function.name, tc.function.arguments))
+                .map(|tc| {
+                    format!(
+                        "[tool_call: {}({})]",
+                        tc.function.name, tc.function.arguments
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
             let content = match &msg.content {
@@ -101,7 +106,11 @@ pub fn resolve_tool_choice(
                 .map(String::from);
             let filtered: Vec<Tool> = tools
                 .iter()
-                .filter(|t| name.as_deref().map(|n| t.function.name == n).unwrap_or(true))
+                .filter(|t| {
+                    name.as_deref()
+                        .map(|n| t.function.name == n)
+                        .unwrap_or(true)
+                })
                 .cloned()
                 .collect();
             ToolChoiceResult {
@@ -138,10 +147,19 @@ pub fn sampling_from_ollama(
             o.top_k.unwrap_or(40),
             o.repeat_penalty.unwrap_or(1.1),
             o.seed,
-            o.num_predict.unwrap_or(if show_thinking { 2048 } else { 512 }) as usize,
+            o.num_predict
+                .unwrap_or(if show_thinking { 2048 } else { 512 }) as usize,
             o.stop.clone(),
         ),
-        None => (0.8, 0.9, 40, 1.1, None, if show_thinking { 2048 } else { 512 }, None),
+        None => (
+            0.8,
+            0.9,
+            40,
+            1.1,
+            None,
+            if show_thinking { 2048 } else { 512 },
+            None,
+        ),
     };
     (
         SamplingParams {
@@ -168,17 +186,28 @@ pub fn extract_thinking(text: &str) -> (Option<String>, String) {
     let end_tag = "</think>";
     if let Some(end) = text.find(end_tag) {
         // Well-formed <think>...</think> block.
-        let think_start = text.find(start_tag).map(|i| i + start_tag.len()).unwrap_or(0);
+        let think_start = text
+            .find(start_tag)
+            .map(|i| i + start_tag.len())
+            .unwrap_or(0);
         let thinking = text[think_start..end].trim().to_string();
         let content = text[end + end_tag.len()..].trim().to_string();
-        let thinking = if thinking.is_empty() { None } else { Some(thinking) };
+        let thinking = if thinking.is_empty() {
+            None
+        } else {
+            Some(thinking)
+        };
         return (thinking, content);
     }
     if let Some(start) = text.find(start_tag) {
         // Unclosed <think> block — generation was cut off before </think>.
         // Treat everything after <think> as thinking; visible content is empty.
         let thinking = text[start + start_tag.len()..].trim().to_string();
-        let thinking = if thinking.is_empty() { None } else { Some(thinking) };
+        let thinking = if thinking.is_empty() {
+            None
+        } else {
+            Some(thinking)
+        };
         return (thinking, String::new());
     }
     (None, text.to_string())
@@ -190,11 +219,7 @@ pub fn extract_thinking(text: &str) -> (Option<String>, String) {
 
 /// Build a system message describing available tools.
 /// `required` and `specific` come from [`ToolChoiceResult`].
-pub fn tools_system_message(
-    tools: &[Tool],
-    required: bool,
-    specific: Option<&str>,
-) -> String {
+pub fn tools_system_message(tools: &[Tool], required: bool, specific: Option<&str>) -> String {
     let json = serde_json::to_string_pretty(tools).unwrap_or_default();
     let usage = "When you want to call a tool, respond ONLY with a JSON object:\n\
                  {\"name\": \"<tool_name>\", \"arguments\": {<key>: <value>}}";
@@ -311,6 +336,7 @@ fn json_mode_instruction(response_format: Option<&ResponseFormat>) -> Option<Str
 ///
 /// * `tools` — already filtered by [`resolve_tool_choice`] (None = no tools).
 /// * `tool_required` / `specific_tool` — from [`ToolChoiceResult`].
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_prompt(
     entry: &EngineEntry,
     mut messages: Vec<MessageForTemplate>,
@@ -375,15 +401,12 @@ pub fn prepare_prompt(
 
     let flat: Vec<(String, String)> = messages.iter().map(flatten_message_for_template).collect();
 
-    let mut prompt = entry
-        .engine
-        .apply_chat_template(&flat)
-        .unwrap_or_else(|_| {
-            flat.iter()
-                .map(|(r, c)| format!("{r}: {c}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        });
+    let mut prompt = entry.engine.apply_chat_template(&flat).unwrap_or_else(|_| {
+        flat.iter()
+            .map(|(r, c)| format!("{r}: {c}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
 
     if show_thinking {
         prompt.push_str("<think>\n");
@@ -502,17 +525,13 @@ mod tests {
             },
         }];
         // Known tool name → detected
-        let (_, calls) = try_parse_tool_call(
-            r#"{"name":"get_weather","arguments":{}}"#,
-            Some(&tools),
-        );
+        let (_, calls) =
+            try_parse_tool_call(r#"{"name":"get_weather","arguments":{}}"#, Some(&tools));
         assert!(calls.is_some());
 
         // Unknown tool name → rejected
-        let (content, calls) = try_parse_tool_call(
-            r#"{"name":"unknown_tool","arguments":{}}"#,
-            Some(&tools),
-        );
+        let (content, calls) =
+            try_parse_tool_call(r#"{"name":"unknown_tool","arguments":{}}"#, Some(&tools));
         assert!(calls.is_none());
         assert!(!content.is_empty());
     }
@@ -529,7 +548,10 @@ mod tests {
         // Generation cut off before </think> — thinking leaks into content without this fix.
         let (thinking, content) =
             extract_thinking("<think>\nI was still thinking when tokens ran out");
-        assert_eq!(thinking.as_deref(), Some("I was still thinking when tokens ran out"));
+        assert_eq!(
+            thinking.as_deref(),
+            Some("I was still thinking when tokens ran out")
+        );
         assert_eq!(content, "");
     }
 
@@ -628,11 +650,19 @@ mod tests {
         let tools = vec![
             Tool {
                 tool_type: "function".to_string(),
-                function: ToolFunction { name: "a".to_string(), description: None, parameters: None },
+                function: ToolFunction {
+                    name: "a".to_string(),
+                    description: None,
+                    parameters: None,
+                },
             },
             Tool {
                 tool_type: "function".to_string(),
-                function: ToolFunction { name: "b".to_string(), description: None, parameters: None },
+                function: ToolFunction {
+                    name: "b".to_string(),
+                    description: None,
+                    parameters: None,
+                },
             },
         ];
         let v = serde_json::json!({"type": "function", "function": {"name": "a"}});

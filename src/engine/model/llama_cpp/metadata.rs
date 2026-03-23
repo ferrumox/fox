@@ -88,6 +88,10 @@ impl LlamaCppModel {
             }
         }
 
-        RecommendedSampling { temperature, top_p, top_k }
+        RecommendedSampling {
+            temperature,
+            top_p,
+            top_k,
+        }
     }
 }

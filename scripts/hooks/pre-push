@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Pre-push hook — mirrors CI exactly so pushes never fail the pipeline.
+# Installed via: make setup  (or scripts/install-hooks.sh)
+#
+# Checks run:
+#   1. cargo fmt   — formatting
+#   2. cargo clippy -D warnings — lints
+#   3. cargo test  — unit tests
+#
+# To skip in an emergency: git push --no-verify
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+step() { echo -e "${YELLOW}▶ $*${NC}"; }
+ok()   { echo -e "${GREEN}✓ $*${NC}"; }
+fail() { echo -e "${RED}✗ $*${NC}"; exit 1; }
+
+export FOX_SKIP_LLAMA=1
+export CARGO_TERM_COLOR=always
+
+echo ""
+echo "╔══════════════════════════════════════╗"
+echo "║      fox pre-push checks (CI mirror) ║"
+echo "╚══════════════════════════════════════╝"
+echo ""
+
+# 1. Format
+step "cargo fmt --check"
+if cargo fmt --all -- --check; then
+    ok "fmt"
+else
+    echo ""
+    echo -e "${RED}Formatting issues found. Run:${NC}"
+    echo "  cargo fmt --all"
+    fail "fmt check failed"
+fi
+
+# 2. Clippy
+step "cargo clippy -D warnings"
+if cargo clippy --all-targets --features test-helpers -- -D warnings 2>&1; then
+    ok "clippy"
+else
+    fail "clippy check failed"
+fi
+
+# 3. Tests
+step "cargo test --features test-helpers"
+if cargo test --all --features test-helpers 2>&1; then
+    ok "tests"
+else
+    fail "tests failed"
+fi
+
+echo ""
+echo -e "${GREEN}All checks passed — pushing.${NC}"
+echo ""

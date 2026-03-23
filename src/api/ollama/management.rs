@@ -242,11 +242,15 @@ pub async fn ollama_create(
             if copy_result.is_ok() {
                 vec![
                     serde_json::json!({"status": "reading model metadata"}).to_string(),
-                    serde_json::json!({"status": "creating model", "total": 1, "completed": 1}).to_string(),
+                    serde_json::json!({"status": "creating model", "total": 1, "completed": 1})
+                        .to_string(),
                     serde_json::json!({"status": "success"}).to_string(),
                 ]
             } else {
-                vec![serde_json::json!({"status": "error", "error": "failed to copy model"}).to_string()]
+                vec![
+                    serde_json::json!({"status": "error", "error": "failed to copy model"})
+                        .to_string(),
+                ]
             }
         } else {
             vec![serde_json::json!({"status": "error", "error": format!("base model '{}' not found", base)}).to_string()]
@@ -262,7 +266,10 @@ pub async fn ollama_create(
     if stream_mode {
         let body = status_lines
             .into_iter()
-            .map(|mut l| { l.push('\n'); l })
+            .map(|mut l| {
+                l.push('\n');
+                l
+            })
             .collect::<String>();
         axum::response::Response::builder()
             .status(200)

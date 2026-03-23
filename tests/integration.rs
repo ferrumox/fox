@@ -552,26 +552,16 @@ async fn test_tool_calling_endpoint_accepts_tools() {
 
     assert_eq!(resp.status(), 200);
 
-    // With tools present, the handler forces non-streaming → response is a
-    // single JSON object (not SSE), regardless of stream: true in the request.
+    // With tools + stream: true, the handler buffers tokens, parses the tool
+    // call, and emits the result as SSE chunks followed by data: [DONE].
     let ct = resp
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert!(
-        ct.contains("application/json"),
-        "expected JSON (non-streaming) when tools present, got: {ct}"
-    );
-
-    let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
-    assert_eq!(v["object"], "chat.completion");
-    assert!(v["choices"][0]["finish_reason"].as_str().is_some());
-    // content or tool_calls must be present in the message
-    let msg = &v["choices"][0]["message"];
-    assert!(
-        msg["content"].as_str().is_some() || msg["tool_calls"].is_array(),
-        "expected content or tool_calls in message: {msg}"
+        ct.contains("text/event-stream"),
+        "expected SSE stream when tools present with stream:true, got: {ct}"
     );
 }
 
@@ -627,10 +617,14 @@ async fn test_ollama_embed() {
     assert_eq!(resp.status(), 200);
     let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
     assert_eq!(v["model"], "stub");
-    let embeddings = v["embeddings"].as_array().expect("embeddings must be array");
+    let embeddings = v["embeddings"]
+        .as_array()
+        .expect("embeddings must be array");
     assert!(!embeddings.is_empty());
     // Each embedding must be a non-empty float array.
-    let first = embeddings[0].as_array().expect("embedding[0] must be array");
+    let first = embeddings[0]
+        .as_array()
+        .expect("embedding[0] must be array");
     assert!(!first.is_empty());
 }
 
@@ -652,7 +646,9 @@ async fn test_ollama_embed_multiple_inputs() {
 
     assert_eq!(resp.status(), 200);
     let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
-    let embeddings = v["embeddings"].as_array().expect("embeddings must be array");
+    let embeddings = v["embeddings"]
+        .as_array()
+        .expect("embeddings must be array");
     assert_eq!(embeddings.len(), 2, "expected one embedding per input");
 }
 
@@ -694,10 +690,7 @@ async fn test_api_tags_lists_models_on_disk() {
     assert!(!models.is_empty(), "expected at least one model");
 
     // The stub model file was written to disk by make_test_state.
-    let names: Vec<&str> = models
-        .iter()
-        .map(|m| m["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = models.iter().map(|m| m["name"].as_str().unwrap()).collect();
     assert!(
         names.contains(&"stub"),
         "expected 'stub' in /api/tags, got: {names:?}"
@@ -739,12 +732,7 @@ async fn test_api_show_known_model() {
     let (state, _) = make_test_state("stub", dir.path());
     let app = make_router(&state);
 
-    let resp = post_json(
-        app,
-        "/api/show",
-        serde_json::json!({"name": "stub"}),
-    )
-    .await;
+    let resp = post_json(app, "/api/show", serde_json::json!({"name": "stub"})).await;
 
     assert_eq!(resp.status(), 200);
     let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
@@ -873,10 +861,22 @@ async fn thinking_openai_non_streaming_no_tags_in_content() {
     assert_eq!(resp.status(), 200);
     let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
     let content = v["choices"][0]["message"]["content"].as_str().unwrap();
-    assert_eq!(content, "answer", "OpenAI non-stream: thinking must be suppressed");
-    assert!(!content.contains("<think>"), "OpenAI content must not contain <think>");
-    assert!(!content.contains("</think>"), "OpenAI content must not contain </think>");
-    assert!(!content.contains("thought"), "OpenAI content must not contain thinking text");
+    assert_eq!(
+        content, "answer",
+        "OpenAI non-stream: thinking must be suppressed"
+    );
+    assert!(
+        !content.contains("<think>"),
+        "OpenAI content must not contain <think>"
+    );
+    assert!(
+        !content.contains("</think>"),
+        "OpenAI content must not contain </think>"
+    );
+    assert!(
+        !content.contains("thought"),
+        "OpenAI content must not contain thinking text"
+    );
 }
 
 #[tokio::test]
@@ -900,9 +900,18 @@ async fn thinking_openai_streaming_no_tags_in_content() {
     assert_eq!(resp.status(), 200);
     let bytes = body_bytes(resp).await;
     let content = sse_content(&bytes);
-    assert_eq!(content, "answer", "OpenAI stream: thinking must be suppressed");
-    assert!(!content.contains("<think>"), "stream content must not contain <think>");
-    assert!(!content.contains("thought"), "stream content must not contain thinking text");
+    assert_eq!(
+        content, "answer",
+        "OpenAI stream: thinking must be suppressed"
+    );
+    assert!(
+        !content.contains("<think>"),
+        "stream content must not contain <think>"
+    );
+    assert!(
+        !content.contains("thought"),
+        "stream content must not contain thinking text"
+    );
 }
 
 #[tokio::test]
@@ -926,12 +935,24 @@ async fn thinking_ollama_chat_non_streaming_separates_thinking_field() {
     let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
 
     let content = v["message"]["content"].as_str().unwrap();
-    assert_eq!(content, "answer", "Ollama non-stream: visible content must be 'answer'");
-    assert!(!content.contains("<think>"), "content must not contain <think>");
-    assert!(!content.contains("thought"), "content must not contain thinking text");
+    assert_eq!(
+        content, "answer",
+        "Ollama non-stream: visible content must be 'answer'"
+    );
+    assert!(
+        !content.contains("<think>"),
+        "content must not contain <think>"
+    );
+    assert!(
+        !content.contains("thought"),
+        "content must not contain thinking text"
+    );
 
     let thinking = v["message"]["thinking"].as_str().unwrap_or("");
-    assert_eq!(thinking, "thought", "Ollama non-stream: thinking field must contain reasoning");
+    assert_eq!(
+        thinking, "thought",
+        "Ollama non-stream: thinking field must contain reasoning"
+    );
 }
 
 #[tokio::test]
@@ -954,9 +975,18 @@ async fn thinking_ollama_chat_streaming_no_tags_in_content() {
     assert_eq!(resp.status(), 200);
     let bytes = body_bytes(resp).await;
     let content = ndjson_chat_content(&bytes);
-    assert_eq!(content, "answer", "Ollama chat stream: thinking must be suppressed");
-    assert!(!content.contains("<think>"), "stream content must not contain <think>");
-    assert!(!content.contains("thought"), "stream content must not contain thinking text");
+    assert_eq!(
+        content, "answer",
+        "Ollama chat stream: thinking must be suppressed"
+    );
+    assert!(
+        !content.contains("<think>"),
+        "stream content must not contain <think>"
+    );
+    assert!(
+        !content.contains("thought"),
+        "stream content must not contain thinking text"
+    );
 }
 
 #[tokio::test]
@@ -979,9 +1009,18 @@ async fn thinking_ollama_generate_non_streaming_no_tags_in_response() {
     assert_eq!(resp.status(), 200);
     let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
     let response = v["response"].as_str().unwrap();
-    assert_eq!(response, "answer", "Ollama generate non-stream: thinking must be suppressed");
-    assert!(!response.contains("<think>"), "response must not contain <think>");
-    assert!(!response.contains("thought"), "response must not contain thinking text");
+    assert_eq!(
+        response, "answer",
+        "Ollama generate non-stream: thinking must be suppressed"
+    );
+    assert!(
+        !response.contains("<think>"),
+        "response must not contain <think>"
+    );
+    assert!(
+        !response.contains("thought"),
+        "response must not contain thinking text"
+    );
 }
 
 #[tokio::test]
@@ -1004,7 +1043,16 @@ async fn thinking_ollama_generate_streaming_no_tags_in_response() {
     assert_eq!(resp.status(), 200);
     let bytes = body_bytes(resp).await;
     let response = ndjson_generate_response(&bytes);
-    assert_eq!(response, "answer", "Ollama generate stream: thinking must be suppressed");
-    assert!(!response.contains("<think>"), "stream response must not contain <think>");
-    assert!(!response.contains("thought"), "stream response must not contain thinking text");
+    assert_eq!(
+        response, "answer",
+        "Ollama generate stream: thinking must be suppressed"
+    );
+    assert!(
+        !response.contains("<think>"),
+        "stream response must not contain <think>"
+    );
+    assert!(
+        !response.contains("thought"),
+        "stream response must not contain thinking text"
+    );
 }

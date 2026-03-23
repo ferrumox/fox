@@ -1,9 +1,9 @@
 // Inference engine - main loop coordinating scheduler, model, and KV cache.
 
 mod ffi;
+mod logits;
 pub mod model;
 mod output_filter;
-mod logits;
 mod run;
 
 use output_filter::PerRequestState;

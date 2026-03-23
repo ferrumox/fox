@@ -494,7 +494,10 @@ mod tests {
         assert!(s.in_thinking);
         // 6 chars — exceeds budget of 5.
         assert_eq!(aof(&mut s, "123456"), "");
-        assert!(!s.in_thinking, "budget exceeded → in_thinking must be false");
+        assert!(
+            !s.in_thinking,
+            "budget exceeded → in_thinking must be false"
+        );
         // Next tokens flow through as normal response content.
         assert_eq!(aof(&mut s, "hello"), "hello");
     }

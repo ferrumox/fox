@@ -51,7 +51,11 @@ pub async fn ollama_chat(
             });
             MessageForTemplate {
                 role: m.role.clone(),
-                content: if m.content.is_empty() { None } else { Some(m.content.clone()) },
+                content: if m.content.is_empty() {
+                    None
+                } else {
+                    Some(m.content.clone())
+                },
                 tool_calls,
                 tool_call_id: m.tool_call_id.clone(),
             }
@@ -83,7 +87,9 @@ pub async fn ollama_chat(
     let supports_thinking = entry.engine.supports_thinking();
     let think_requested = req.think.as_ref().map(|v| {
         v.as_bool().unwrap_or(true)
-            || v.as_str().map(|s| !matches!(s, "false" | "none")).unwrap_or(false)
+            || v.as_str()
+                .map(|s| !matches!(s, "false" | "none"))
+                .unwrap_or(false)
     });
     let use_thinking = think_requested.unwrap_or(supports_thinking) && supports_thinking;
 
@@ -162,7 +168,11 @@ pub async fn ollama_chat(
                 },
                 total_duration: if is_done { Some(elapsed_ns) } else { None },
                 load_duration: if is_done { Some(0) } else { None },
-                prompt_eval_count: if is_done { Some(log_prompt as u32) } else { None },
+                prompt_eval_count: if is_done {
+                    Some(log_prompt as u32)
+                } else {
+                    None
+                },
                 prompt_eval_duration: if is_done { Some(0) } else { None },
                 eval_count: if is_done { Some(eval_count) } else { None },
                 eval_duration: if is_done { Some(elapsed_ns) } else { None },

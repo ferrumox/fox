@@ -28,9 +28,7 @@ where
     async fn from_request(req: Request<Body>, state: &S) -> Result<Self, Self::Rejection> {
         let bytes = axum::body::Bytes::from_request(req, state)
             .await
-            .map_err(|e| {
-                (StatusCode::BAD_REQUEST, e.to_string()).into_response()
-            })?;
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()).into_response())?;
 
         let value: T = serde_json::from_slice(&bytes).map_err(|e| {
             (

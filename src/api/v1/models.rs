@@ -1,6 +1,11 @@
 // GET /v1/models, GET /v1/models/:id, GET /health, GET /metrics handlers.
 
-use axum::{extract::{Path, State}, http::header, response::IntoResponse, Json};
+use axum::{
+    extract::{Path, State},
+    http::header,
+    response::IntoResponse,
+    Json,
+};
 
 use axum::http::StatusCode;
 

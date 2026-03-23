@@ -141,10 +141,7 @@ impl LlamaCppModel {
         }
     }
 
-    pub(super) fn apply_chat_template_impl(
-        &self,
-        messages: &[(String, String)],
-    ) -> Result<String> {
+    pub(super) fn apply_chat_template_impl(&self, messages: &[(String, String)]) -> Result<String> {
         if messages.is_empty() {
             return Ok(String::new());
         }

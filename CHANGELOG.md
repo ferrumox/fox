@@ -7,7 +7,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.0.0] - 2026-03-15
+## [1.0.0-beta.2] - 2026-03-23
+
+### Added
+
+- **Full multi-turn tool calling (OpenAI spec)** — `role: "assistant"` con `tool_calls` y
+  `role: "tool"` con `tool_call_id` se gestionan correctamente a través del chat template.
+  Conversaciones multi-turno con resultados de herramientas funcionan de extremo a extremo
+  con Google ADK, LangChain y cualquier SDK compatible con OpenAI.
+
+- **`MessageContent` type** — `ChatMessage.content` cambiado de `String` a
+  `Option<MessageContent>` donde `MessageContent` es `Text(String) | Array(Vec<ContentBlock>)`.
+  Soporta contenido nulo (assistant + tool_calls), arrays de contenido multimodal (bloques de
+  texto extraídos, bloques de imagen aceptados e ignorados) y mensajes de resultado de herramientas.
+
+- **Streaming con tools** — `POST /v1/chat/completions` con `stream: true` y tools ya no
+  fuerza modo no-streaming. Los tokens se buferizan, se parsea el tool call y se emite como
+  dos chunks SSE (anuncio de rol + delta tool_calls o contenido) seguido de `data: [DONE]`.
+
+- **`tool_choice` enforcement** — `"none"` desactiva la inyección de tools; `"required"` inyecta
+  una restricción en el system prompt; `{"type":"function","function":{"name":"…"}}` fuerza
+  una herramienta específica.
+
+- **`parallel_tool_calls: false`** — limita los tool calls a uno por turno.
+
+- **`response_format` json_schema** — `{"type":"json_schema","json_schema":{"name","strict","schema"}}`
+  aceptado. El schema se inyecta en el system prompt.
+
+- **`data: [DONE]` SSE terminator** — todos los paths de streaming en `/v1/chat/completions`
+  terminan con `data: [DONE]\n\n`. Requerido por LangChain, LiteLLM y otros clientes.
+
+- **`system_fingerprint`** — presente como `null` en todas las respuestas y chunks de chat.
+
+- **Nuevos campos en `ChatCompletionRequest`** — `max_completion_tokens` (alias de `max_tokens`),
+  `stream_options`, `parallel_tool_calls`, `frequency_penalty`, `presence_penalty`, `user` —
+  todos aceptados sin causar 422.
+
+- **Formato de error OpenAI** — todas las respuestas de error usan ahora
+  `{"error":{"message","type","param","code"}}` con códigos: `model_not_found`,
+  `model_load_failed`, `server_error`.
+
+- **Ollama `/api/chat` tools** — campo `tools: [...]` aceptado. `message.tool_calls` devuelto
+  con `arguments` como objeto JSON (convención Ollama, no string serializado como OpenAI).
+
+- **Ollama `think` field** — `/api/chat` acepta `think: true/false/"high"/"medium"/"low"`.
+  El contenido de razonamiento se devuelve en `message.thinking` para respuestas no-streaming.
+
+- **Ollama `format` field** — `/api/generate` y `/api/chat` aceptan `"json"` o un JSON Schema.
+
+- **Ollama `keep_alive` field** — aceptado en `/api/generate` y `/api/chat`.
+
+- **`POST /api/copy`** — duplica un fichero `.gguf` con un nuevo nombre.
+
+- **`POST /api/create`** — parsea `FROM <base_model>` de un Modelfile, copia el `.gguf` base
+  al nuevo nombre y devuelve eventos de estado NDJSON.
+
+- **`GET /v1/models/{model}`** — consulta de modelo individual (spec OpenAI). Devuelve
+  `ModelInfo` o 404 estructurado con `{"error":{"message","type","param","code"}}`.
+
+- **`images` field en `/api/generate` y `/api/chat`** — clientes multimodal que envían
+  `"images": [...]` ya no reciben 422. El campo se acepta e ignora silenciosamente.
+
+- **`prompt_eval_duration` / `eval_duration`** — campos de timing Ollama populados en todas
+  las respuestas de `/api/chat` y `/api/generate`.
+
+- **`ModelInfo.created` / `owned_by`** — `GET /v1/models` incluye tiempo de modificación del
+  fichero como `created` (segundos Unix) y `owned_by: "fox"`.
+
+- **`OllamaToolCall`** — nuevo tipo con `arguments: serde_json::Value` (objeto, no string).
+
+- **`StreamOptions`, `ToolCallDelta`, `ToolCallFunctionDelta`** — nuevos tipos para streaming
+  de tool call deltas.
+
+- **`MessageForTemplate` + `flatten_message_for_template`** — tipo interno que transporta
+  role + content + tool_calls + tool_call_id y aplana a tuples `(String, String)` para el
+  boundary FFI de `apply_chat_template`.
+
+- **Diagnóstico contextual de fallo de carga** — cuando `llama_model_load_from_file` devuelve
+  null, Fox inspecciona el fichero y la memoria disponible:
+  - *Fichero corrupto/no-GGUF*: reporta magic bytes inválidos y sugiere re-descargar.
+  - *Memoria insuficiente*: muestra tamaño del modelo, VRAM libre (`nvidia-smi`) y RAM libre
+    (`/proc/meminfo`), con sugerencias concretas (quant más pequeña, contexto menor, cerrar
+    otros procesos GPU, descargar otros modelos).
+
+### Changed
+
+- **División del módulo API** — `src/api/types.rs` separado en `types/v1.rs`, `types/ollama.rs`,
+  `types/tools.rs`, `types/shared.rs`, `types/embeddings.rs`, `types/pull.rs`.
+  `src/api/routes.rs` separado en `router.rs` y submódulos `v1/`, `ollama/`, `shared/`.
+
+- **`try_parse_tool_call`** valida ahora el nombre de la herramienta contra la lista de tools
+  conocidas, eliminando falsos positivos donde respuestas JSON simples eran detectadas como
+  tool calls.
+
+- **`prepare_prompt`** unificado: inyección de system prompt, tools, JSON-mode y thinking
+  pasan por una única función compartida para todos los endpoints.
+
+- **`max_context_len`** cambiado de `u32` a `Option<u32>` para permitir detección automática
+  del contexto nativo del modelo.
+
+- **`max_tokens` default en endpoints Ollama** elevado de 128 → **512** (sin thinking) y
+  **2048** (modelo con thinking). El default anterior causaba que los modelos de razonamiento
+  se cortaran en mitad del bloque `<think>` antes de producir respuesta visible.
+
+- **Content-Type en Ollama streaming+tools** — cuando `stream: true` y hay tools, la respuesta
+  bufferizada devuelve `application/x-ndjson` en lugar de `application/json`.
+
+### Fixed
+
+- **Bloque `<think>` sin cerrar filtrado al `content`** — si la generación se truncaba antes
+  de emitir `</think>`, el texto `<think>…` crudo se propagaba al contenido visible.
+  `extract_thinking` trata ahora un bloque sin cerrar como solo-pensamiento y devuelve
+  contenido visible vacío.
+
+- **Comprobaciones de tamaño de buffer en `LlamaCppModel`** — validación de límites antes de
+  escribir en los buffers de batch de llama.cpp.
+
+- **`POST /v1/completions`** — campo `content` actualizado a
+  `Some(MessageContent::Text(req.prompt))` tras el cambio de tipo de `ChatMessage.content`.
+
+---
+
+## [1.0.0-beta.1] - 2026-03-15
 
 ### Added
 

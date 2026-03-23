@@ -7,9 +7,9 @@
 
 use anyhow::Result;
 
+pub(crate) mod llama_cpp;
 #[cfg(not(fox_stub))]
 pub(crate) mod sampling;
-pub(crate) mod llama_cpp;
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod stub;
 

@@ -134,8 +134,8 @@ impl ServeArgs {
 }
 
 fn setup_logging(json: bool) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("ferrumox=info,warn"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("ferrumox=info,warn"));
 
     if json {
         tracing_subscriber::registry()

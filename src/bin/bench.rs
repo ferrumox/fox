@@ -407,10 +407,9 @@ async fn run_request(
                         .content
                         .as_deref()
                         .is_some_and(|c| !c.is_empty())
+                        && ttft.is_none()
                     {
-                        if ttft.is_none() {
-                            ttft = Some(start.elapsed());
-                        }
+                        ttft = Some(start.elapsed());
                     }
                     if choice.finish_reason.is_some() {
                         // Stop chunk: don't count it as a generated token.

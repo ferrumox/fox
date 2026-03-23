@@ -204,7 +204,13 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
     theme::print_banner(model_name, effective_ctx, supports_thinking);
     let startup_gpu = get_gpu_info();
     let startup_ram = get_ram_info();
-    theme::print_system_info(startup_gpu.as_ref(), &startup_ram, effective_ctx, supports_thinking, show_thinking);
+    theme::print_system_info(
+        startup_gpu.as_ref(),
+        &startup_ram,
+        effective_ctx,
+        supports_thinking,
+        show_thinking,
+    );
 
     // Keep the engine loop running for the lifetime of the session.
     let engine_loop = {
@@ -502,13 +508,16 @@ fn build_sampling_params(
     recommended: Option<&crate::engine::model::RecommendedSampling>,
 ) -> SamplingParams {
     // Priority: user flag > model metadata > hardcoded default.
-    let temperature = args.temperature
+    let temperature = args
+        .temperature
         .or_else(|| recommended.and_then(|r| r.temperature))
         .unwrap_or(0.8);
-    let top_p = args.top_p
+    let top_p = args
+        .top_p
         .or_else(|| recommended.and_then(|r| r.top_p))
         .unwrap_or(0.9);
-    let top_k = args.top_k
+    let top_k = args
+        .top_k
         .or_else(|| recommended.and_then(|r| r.top_k))
         .unwrap_or(0);
 
