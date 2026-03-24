@@ -80,9 +80,19 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn new(kv_cache: Arc<KVCacheManager>, max_batch_size: usize) -> Self {
-        let pool: Vec<i32> = (0..max_batch_size as i32).collect();
-        // Reserve up to 1/4 of the batch size for prefix cache entries (minimum 1).
-        let prefix_cache_max = (max_batch_size / 4).max(1);
+        // Fix: seq IDs must be < n_seq_max in the llama.cpp context (hardcoded to 8 in
+        // model.rs to avoid the n_ctx OOM). Cap the pool accordingly so we never hand
+        // out a seq_id that llama_decode will reject with "invalid seq_id >= n_seq_max".
+        const N_SEQ_MAX: usize = 8;
+        let effective_pool_size = max_batch_size.min(N_SEQ_MAX);
+        let pool: Vec<i32> = (0..effective_pool_size as i32).collect();
+        // Prefix cache entries hold reserved seq IDs outside the active pool. With the
+        // pool capped to N_SEQ_MAX, there are no spare slots for the prefix cache — every
+        // seq_id in the pool is needed for active requests. Setting prefix_cache_max to 0
+        // disables the prefix cache, preventing llama_memory_seq_cp from being called on
+        // a source slot that may not satisfy the "is_full" invariant llama.cpp asserts.
+        // TODO: restore prefix caching once n_seq_max is made configurable.
+        let prefix_cache_max = if effective_pool_size < max_batch_size { 0 } else { (effective_pool_size / 4).max(1) };
         Self {
             waiting_queue: std::sync::Mutex::new(VecDeque::new()),
             running_batch: std::sync::Mutex::new(Vec::new()),
@@ -90,7 +100,7 @@ impl Scheduler {
             work_notify: tokio::sync::Notify::new(),
             seq_id_pool: std::sync::Mutex::new(pool),
             prefix_cache: std::sync::Mutex::new(lru::LruCache::new(
-                NonZeroUsize::new(prefix_cache_max).expect("prefix_cache_max >= 1"),
+                NonZeroUsize::new(prefix_cache_max.max(1)).expect("prefix_cache_max >= 1"),
             )),
             prefix_cache_max,
             prefix_hits: AtomicU64::new(0),

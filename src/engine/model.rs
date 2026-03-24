@@ -321,10 +321,13 @@ impl LlamaCppModel {
 
         let mut ctx_params = unsafe { ffi::llama_context_default_params() };
         // n_seq_max controls how many concurrent sequences the KV cache tracks.
-        // Must be >= max_batch_size for serving, and large enough for prefix-cache
-        // seq_cp operations (needs at least 2 slots). Using max(max_batch_size, 4)
-        // ensures n_ctx_seq = n_ctx / n_seq_max gives reasonable per-seq context.
-        let n_seq = (max_batch_size as u32).max(4);
+        // Fix: decouple n_seq from max_batch_size. llama.cpp allocates
+        // n_ctx = max_context_len * n_seq tokens of KV memory upfront — using
+        // max_batch_size (32) here caused 4096*32=131072 token allocations that
+        // OOM'd on a 24GB GPU. 8 sequences is enough for concurrent batch + prefix
+        // cache seq_cp slots; the Fox KV block manager handles the logical
+        // multiplexing above this layer.
+        let n_seq: u32 = 8;
         ctx_params.n_ctx = max_context_len * n_seq;
         // n_batch must be at least as large as n_ctx to handle full prompts in one pass
         ctx_params.n_batch = max_context_len.max(max_batch_size as u32);

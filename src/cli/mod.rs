@@ -55,7 +55,9 @@ pub async fn run() -> anyhow::Result<()> {
     }
 }
 
-/// Query total GPU memory via nvidia-smi. Falls back to 8 GiB on CPU-only builds.
+/// Query GPU memory for the first GPU via nvidia-smi. Falls back to 8 GiB on CPU-only builds.
+/// Fix: with multiple GPUs nvidia-smi returns one line per GPU; only parse the first line so
+/// multi-GPU systems don't silently fall back to the 8GB default.
 pub(crate) fn get_gpu_memory_bytes() -> usize {
     #[cfg(feature = "cuda")]
     if let Ok(out) = std::process::Command::new("nvidia-smi")
@@ -64,8 +66,11 @@ pub(crate) fn get_gpu_memory_bytes() -> usize {
     {
         if out.status.success() {
             if let Ok(s) = std::str::from_utf8(&out.stdout) {
-                if let Ok(mib) = s.trim().parse::<usize>() {
-                    return mib * 1024 * 1024;
+                // Take only the first line — multi-GPU hosts produce one line per device.
+                if let Some(first_line) = s.lines().next() {
+                    if let Ok(mib) = first_line.trim().parse::<usize>() {
+                        return mib * 1024 * 1024;
+                    }
                 }
             }
         }
