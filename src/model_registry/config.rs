@@ -24,4 +24,7 @@ pub struct RegistryConfig {
     /// Normalized per-GPU VRAM proportions for tensor splitting (e.g. [0.75, 0.25]).
     /// Empty = llama.cpp decides proportionally to available VRAM.
     pub tensor_split: Vec<f32>,
+    /// When true, MoE expert tensors are pinned to CPU RAM (via `tensor_buft_overrides`).
+    /// Useful for MoE models (e.g. DeepSeek, Mixtral) where expert weights don't fit in VRAM.
+    pub moe_offload_cpu: bool,
 }

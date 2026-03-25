@@ -37,6 +37,7 @@ pub fn make_test_registry(
         main_gpu: 0,
         split_mode: 1,
         tensor_split: vec![],
+        moe_offload_cpu: false,
     };
     let registry = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
     let entry = EngineEntry::for_test(name);
@@ -79,6 +80,7 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         main_gpu: 0,
         split_mode: 1,
         tensor_split: vec![],
+        moe_offload_cpu: false,
     };
     let registry = Arc::new(crate::model_registry::ModelRegistry::new(
         cfg,

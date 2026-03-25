@@ -107,6 +107,10 @@ pub struct RunArgs {
     #[arg(long, env = "FOX_TENSOR_SPLIT")]
     pub tensor_split: Option<String>,
 
+    /// Offload MoE expert tensors to CPU RAM instead of VRAM.
+    #[arg(long, env = "FOX_MOE_CPU")]
+    pub moe_cpu: bool,
+
     /// Show the model's internal <think>…</think> reasoning block in the output.
     /// By default reasoning is suppressed; only the final answer is printed.
     #[arg(long)]
@@ -189,6 +193,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         args.main_gpu,
         split_mode,
         &tensor_split_parsed,
+        args.moe_cpu,
     )?;
     let model_config = model.model_config();
 

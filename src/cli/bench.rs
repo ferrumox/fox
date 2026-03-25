@@ -60,6 +60,10 @@ pub struct BenchArgs {
     /// Comma-separated VRAM proportions for tensor splitting (e.g. "3,1" for 75%/25%).
     #[arg(long, env = "FOX_TENSOR_SPLIT")]
     pub tensor_split: Option<String>,
+
+    /// Offload MoE expert tensors to CPU RAM instead of VRAM.
+    #[arg(long, env = "FOX_MOE_CPU")]
+    pub moe_cpu: bool,
 }
 
 pub async fn run_bench(args: BenchArgs) -> Result<()> {
@@ -113,6 +117,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         args.main_gpu,
         split_mode,
         &tensor_split_parsed,
+        args.moe_cpu,
     )?;
     let model_config = model.model_config();
     let load_elapsed = load_start.elapsed();

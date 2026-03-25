@@ -119,6 +119,12 @@ pub struct ServeArgs {
     /// When omitted, llama.cpp splits proportionally to available VRAM.
     #[arg(long, env = "FOX_TENSOR_SPLIT")]
     pub tensor_split: Option<String>,
+
+    /// Offload MoE expert tensors to CPU RAM instead of VRAM.
+    /// Useful for MoE models (DeepSeek, Mixtral) that don't fully fit in VRAM.
+    /// Attention layers remain on GPU; expert weights are read from RAM on demand.
+    #[arg(long, env = "FOX_MOE_CPU")]
+    pub moe_cpu: bool,
 }
 
 fn parse_type_kv(s: &str) -> u32 {
@@ -234,6 +240,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             .as_deref()
             .map(parse_tensor_split)
             .unwrap_or_default(),
+        moe_offload_cpu: args.moe_cpu,
     };
 
     let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));

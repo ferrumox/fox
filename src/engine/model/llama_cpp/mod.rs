@@ -182,6 +182,7 @@ impl LlamaCppModel {
         main_gpu: i32,
         split_mode: u32,
         tensor_split: &[f32],
+        moe_offload_cpu: bool,
     ) -> Result<Self> {
         // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
         // Fox shows its own clean progress spinner instead.
@@ -230,8 +231,47 @@ impl LlamaCppModel {
             ts_buf = vec![]; // kept to satisfy the borrow checker
         }
 
+        // MoE expert tensor CPU offload.
+        // When enabled, all MoE expert weight tensors are pinned to CPU RAM so they are not
+        // loaded into VRAM. This lets models like DeepSeek or Mixtral run on GPUs with limited
+        // VRAM — the attention layers stay on GPU while expert weights are read from RAM on demand.
+        //
+        // Pattern covers: blk.<N>.ffn_up_exps, ffn_down_exps, ffn_gate_exps and the
+        // chunked variants (ffn_up_chexps, …) used by some architectures.
+        //
+        // SAFETY: `moe_pattern_cstr` and `buft_overrides` must remain alive until
+        // `llama_model_load_from_file` returns — both are declared before the call and
+        // dropped explicitly afterwards.
+        let moe_pattern_cstr: std::ffi::CString;
+        let buft_overrides: Vec<ffi::llama_model_tensor_buft_override>;
+        if moe_offload_cpu {
+            let cpu_buft = unsafe { ffi::ggml_backend_cpu_buffer_type() };
+            moe_pattern_cstr = std::ffi::CString::new(
+                "blk\\.\\d+\\.ffn_(up|down|gate)_(ch|)exps",
+            )
+            .expect("MoE pattern is valid C string");
+            // NULL-terminated: one real entry + one sentinel with null pattern.
+            buft_overrides = vec![
+                ffi::llama_model_tensor_buft_override {
+                    pattern: moe_pattern_cstr.as_ptr(),
+                    buft: cpu_buft,
+                },
+                ffi::llama_model_tensor_buft_override {
+                    pattern: std::ptr::null(),
+                    buft: std::ptr::null_mut(),
+                },
+            ];
+            model_params.tensor_buft_overrides = buft_overrides.as_ptr();
+            tracing::info!("MoE CPU offload enabled — expert tensors will be allocated in RAM");
+        } else {
+            moe_pattern_cstr = std::ffi::CString::new("").expect("empty string is valid");
+            buft_overrides = vec![];
+        }
+
         let model = unsafe { ffi::llama_model_load_from_file(path_c.as_ptr(), model_params) };
         drop(ts_buf); // explicit: ts_buf outlives model_params usage above
+        drop(buft_overrides); // keep overrides alive until after the load call
+        drop(moe_pattern_cstr);
         let model = NonNull::new(model).ok_or_else(|| diagnose_load_failure(model_path))?;
 
         let vocab = unsafe { ffi::llama_model_get_vocab(model.as_ptr()) };

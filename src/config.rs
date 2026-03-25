@@ -26,6 +26,7 @@ struct ConfigFile {
     main_gpu: Option<i32>,
     split_mode: Option<String>,
     tensor_split: Option<String>,
+    moe_cpu: Option<bool>,
 }
 
 /// Load `~/.config/ferrumox/config.toml` (or `$FOX_CONFIG`) and set any
@@ -82,6 +83,7 @@ pub fn load_config_into_env() {
     set_if_unset("FOX_MAIN_GPU", cfg.main_gpu.map(|v| v.to_string()));
     set_if_unset("FOX_SPLIT_MODE", cfg.split_mode);
     set_if_unset("FOX_TENSOR_SPLIT", cfg.tensor_split);
+    set_if_unset("FOX_MOE_CPU", cfg.moe_cpu.map(|v| v.to_string()));
 }
 
 fn set_if_unset(var: &str, value: Option<String>) {

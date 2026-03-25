@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `main_gpu` and `tensor_split`. The KV cache VRAM budget automatically sums across all GPUs
   when `split_mode != none`.
 
+- **MoE CPU offload** — expert tensors in Mixture-of-Experts models (DeepSeek, Mixtral, etc.)
+  can be pinned to CPU RAM via `--moe-cpu` / `FOX_MOE_CPU`. Attention layers remain on GPU;
+  expert weight tensors are read from RAM on demand. Enables running large MoE models on GPUs
+  with limited VRAM. Persistable as `moe_cpu = true` in `config.toml`.
+
 - **CORS support** — all routes now respond with permissive CORS headers (`allow-origin: *`,
   `allow-methods: GET/POST/DELETE/OPTIONS`, `allow-headers: *`) via `tower-http`. Required
   for web apps making direct API calls to the server.

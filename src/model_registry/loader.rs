@@ -28,6 +28,7 @@ pub(super) async fn load_model(
     let main_gpu = cfg.main_gpu;
     let split_mode = cfg.split_mode;
     let tensor_split = cfg.tensor_split.clone();
+    let moe_offload_cpu = cfg.moe_offload_cpu;
 
     // Estimate VRAM requirement before attempting to load.
     // Heuristic: file_size × 1.8 covers weights + overhead. Warn early so the
@@ -61,6 +62,7 @@ pub(super) async fn load_model(
             main_gpu,
             split_mode,
             &tensor_split,
+            moe_offload_cpu,
         )
     })
     .await

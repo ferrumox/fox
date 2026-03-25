@@ -70,6 +70,7 @@ mod tests {
                     main_gpu: 0,
                     split_mode: 1,
                     tensor_split: vec![],
+                    moe_offload_cpu: false,
                 },
                 Default::default(),
             )),

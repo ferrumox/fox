@@ -14,3 +14,11 @@ extern "C" {
     /// Load a single backend from an explicit file path.
     pub fn ggml_backend_load(path: *const std::os::raw::c_char) -> *mut std::os::raw::c_void;
 }
+
+// ── GGML CPU backend ──────────────────────────────────────────────────────────
+// Not included in the auto-generated bindings (ggml-backend.h is not parsed by build.rs).
+extern "C" {
+    /// Returns the CPU backend buffer type. Used to force specific tensors (e.g. MoE experts)
+    /// to be allocated in RAM instead of VRAM.
+    pub fn ggml_backend_cpu_buffer_type() -> ggml_backend_buffer_type_t;
+}

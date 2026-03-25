@@ -24,6 +24,7 @@ impl LlamaCppModel {
         main_gpu: i32,
         split_mode: u32,
         tensor_split: &[f32],
+        moe_offload_cpu: bool,
     ) -> Result<Self> {
         let _ = (
             model_path,
@@ -35,6 +36,7 @@ impl LlamaCppModel {
             main_gpu,
             split_mode,
             tensor_split,
+            moe_offload_cpu,
         );
         let config = ModelConfig {
             num_layers: 32,
