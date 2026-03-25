@@ -17,6 +17,9 @@ extern "C" {
 
 // ── GGML CPU backend ──────────────────────────────────────────────────────────
 // Not included in the auto-generated bindings (ggml-backend.h is not parsed by build.rs).
+// Guard with cfg(not(fox_stub)) because the stub build emits empty bindings that
+// don't define ggml_backend_buffer_type_t.
+#[cfg(not(fox_stub))]
 extern "C" {
     /// Returns the CPU backend buffer type. Used to force specific tensors (e.g. MoE experts)
     /// to be allocated in RAM instead of VRAM.

@@ -14,6 +14,7 @@ pub struct LlamaCppModel {
 
 #[cfg(fox_stub)]
 impl LlamaCppModel {
+    #[allow(clippy::too_many_arguments)]
     pub fn load(
         model_path: &std::path::Path,
         max_batch_size: usize,

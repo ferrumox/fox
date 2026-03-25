@@ -172,6 +172,7 @@ pub struct LlamaCppModel {
 #[cfg(not(fox_stub))]
 impl LlamaCppModel {
     /// Load a GGUF model from path.
+    #[allow(clippy::too_many_arguments)]
     pub fn load(
         model_path: &std::path::Path,
         max_batch_size: usize,
@@ -246,10 +247,8 @@ impl LlamaCppModel {
         let buft_overrides: Vec<ffi::llama_model_tensor_buft_override>;
         if moe_offload_cpu {
             let cpu_buft = unsafe { ffi::ggml_backend_cpu_buffer_type() };
-            moe_pattern_cstr = std::ffi::CString::new(
-                "blk\\.\\d+\\.ffn_(up|down|gate)_(ch|)exps",
-            )
-            .expect("MoE pattern is valid C string");
+            moe_pattern_cstr = std::ffi::CString::new("blk\\.\\d+\\.ffn_(up|down|gate)_(ch|)exps")
+                .expect("MoE pattern is valid C string");
             // NULL-terminated: one real entry + one sentinel with null pattern.
             buft_overrides = vec![
                 ffi::llama_model_tensor_buft_override {
