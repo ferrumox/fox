@@ -8,9 +8,10 @@ mod run;
 
 use output_filter::PerRequestState;
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use dashmap::DashMap;
 
 use crate::kv_cache::KVCacheManager;
 use crate::metrics::Metrics;
@@ -28,7 +29,7 @@ pub struct InferenceEngine {
     kv_cache: Arc<KVCacheManager>,
     next_request_id: AtomicU64,
     /// Per-request mutable state for output filtering and stop sequence detection.
-    per_request_state: Arc<Mutex<HashMap<u64, PerRequestState>>>,
+    per_request_state: Arc<DashMap<u64, PerRequestState>>,
     /// Human-readable model identifier (basename of the loaded model file).
     model_name: String,
     /// Prometheus metrics (optional — None disables recording).
@@ -65,7 +66,7 @@ impl InferenceEngine {
             scheduler,
             kv_cache,
             next_request_id: AtomicU64::new(0),
-            per_request_state: Arc::new(Mutex::new(HashMap::new())),
+            per_request_state: Arc::new(DashMap::new()),
             model_name,
             metrics,
             supports_prefix_cache,

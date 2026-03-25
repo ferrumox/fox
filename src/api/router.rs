@@ -1,6 +1,7 @@
 // Router assembly and AppState definition.
 
 use axum::{
+    http::Method,
     middleware,
     routing::{delete, get, post},
     Router,
@@ -8,6 +9,7 @@ use axum::{
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::model_registry::ModelRegistry;
 
@@ -105,10 +107,29 @@ pub fn router(
             post(crate::api::ollama::management::ollama_create),
         )
         .route("/api/pull", post(crate::api::pull_handler::ollama_pull))
+        .route(
+            "/api/models/:name/load",
+            post(crate::api::ollama::management::api_model_load),
+        )
+        .route(
+            "/api/models/:name/unload",
+            post(crate::api::ollama::management::api_model_unload),
+        )
         .route("/", get(|| async { "Fox is running" }))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::api::auth::auth_middleware,
         ))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::DELETE,
+                    Method::OPTIONS,
+                ])
+                .allow_headers(Any),
+        )
         .with_state(state)
 }

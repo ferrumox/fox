@@ -327,6 +327,40 @@ pub async fn ollama_delete(
     }
 }
 
+/// POST /api/models/:name/load — load a model into memory on demand.
+pub async fn api_model_load(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    match state.registry.get_or_load(&name).await {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => {
+            let status = if e.to_string().contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+            (status, format!("failed to load model '{}': {}", name, e)).into_response()
+        }
+    }
+}
+
+/// POST /api/models/:name/unload — evict a loaded model from memory.
+pub async fn api_model_unload(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if state.registry.unload(&name) {
+        StatusCode::OK.into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            format!("model '{}' is not currently loaded", name),
+        )
+            .into_response()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::api::router::router;

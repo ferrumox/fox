@@ -43,49 +43,20 @@ impl InferenceEngine {
                 self.model.token_to_piece_bytes(token_id)
             };
 
-            // Apply output filtering AND stop sequence detection in a single lock scope.
+            // Apply output filtering AND stop sequence detection.
+            // DashMap gives us per-entry locking so concurrent requests don't block each other.
             let (text, is_stop_hit) = {
-                let mut state_map = match self.per_request_state.lock() {
-                    Ok(g) => g,
-                    Err(e) => {
-                        // Lock poisoned — a thread panicked while holding this lock.
-                        // This is a bug; log it and emit lossy text with no stop check as a
-                        // best-effort recovery so the client still receives a response.
-                        tracing::error!(
-                            request_id = req_id,
-                            "per_request_state lock poisoned: {}; emitting token without filtering",
-                            e
-                        );
-                        let raw_text = String::from_utf8_lossy(&token_bytes).into_owned();
-                        if req
-                            .response_tx
-                            .send(Token {
-                                id: *req_id,
-                                token_id,
-                                text: raw_text,
-                                is_eos,
-                                stop_reason: None,
-                            })
-                            .is_err()
-                        {
-                            // Client disconnected while lock was poisoned — cancel.
-                            if req.kv_seq_id >= 0 {
-                                self.model.clear_sequence(req.kv_seq_id);
-                            }
-                            self.scheduler.mark_finished(*req_id, StopReason::Preempt);
-                        }
-                        continue;
-                    }
-                };
                 // Clone stop tokens only on first token for this request (inside or_insert_with),
                 // not on every subsequent token.
-                let state = state_map.entry(*req_id).or_insert_with(|| PerRequestState {
-                    show_thinking: req.sampling.show_thinking,
-                    in_thinking: req.sampling.initial_in_thinking,
-                    emit_think_open_tag: req.sampling.initial_in_thinking,
-                    model_control_patterns: self.model_stop_tokens.clone(),
-                    max_thinking_chars: req.sampling.max_thinking_chars,
-                    ..Default::default()
+                let mut state = self.per_request_state.entry(*req_id).or_insert_with(|| {
+                    PerRequestState {
+                        show_thinking: req.sampling.show_thinking,
+                        in_thinking: req.sampling.initial_in_thinking,
+                        emit_think_open_tag: req.sampling.initial_in_thinking,
+                        model_control_patterns: self.model_stop_tokens.clone(),
+                        max_thinking_chars: req.sampling.max_thinking_chars,
+                        ..Default::default()
+                    }
                 });
 
                 // Accumulate raw token bytes and drain complete UTF-8 codepoints.
@@ -97,10 +68,11 @@ impl InferenceEngine {
                 // Stage 1: thinking-block suppression + control-token holdback.
                 // Returns (filtered_text, control_stop) where control_stop is true when a
                 // complete control-token pattern was detected (e.g. multi-token <|im_end|>).
-                let (filtered, control_stop) = apply_output_filter(state, &raw_text);
+                let (filtered, control_stop) = apply_output_filter(&mut state, &raw_text);
 
                 // Stage 2: user-supplied stop strings checked on the rolling buffer.
-                let (text, user_stop) = check_stop_sequences(state, filtered, &req.sampling.stop);
+                let (text, user_stop) =
+                    check_stop_sequences(&mut state, filtered, &req.sampling.stop);
 
                 (text, control_stop || user_stop)
             };
@@ -141,12 +113,7 @@ impl InferenceEngine {
                     self.model.clear_sequence(req.kv_seq_id);
                 }
                 self.scheduler.mark_finished(*req_id, StopReason::Preempt);
-                match self.per_request_state.lock() {
-                    Ok(mut state) => {
-                        state.remove(req_id);
-                    }
-                    Err(e) => tracing::error!("per_request_state lock poisoned on cleanup: {}", e),
-                }
+                self.per_request_state.remove(req_id);
                 continue;
             }
 
@@ -190,9 +157,7 @@ impl InferenceEngine {
 
                 self.scheduler.mark_finished(*req_id, stop_reason.unwrap());
 
-                if let Ok(mut state) = self.per_request_state.lock() {
-                    state.remove(req_id);
-                }
+                self.per_request_state.remove(req_id);
             } else {
                 self.scheduler
                     .update_after_token(*req_id, token_id, from_prefill);

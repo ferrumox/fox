@@ -14,6 +14,7 @@ use crate::model_registry::{EngineEntry, ModelRegistry};
 /// All failure modes that HTTP handlers can produce.
 #[allow(dead_code)]
 pub enum AppError {
+    BadRequest(String),
     ModelNotFound(String),
     ModelLoadFailed(String),
     EmbeddingFailed(String),
@@ -23,6 +24,12 @@ pub enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, msg, err_type, code) = match self {
+            AppError::BadRequest(m) => (
+                StatusCode::BAD_REQUEST,
+                m,
+                "invalid_request_error",
+                "invalid_request",
+            ),
             AppError::ModelNotFound(m) => (
                 StatusCode::NOT_FOUND,
                 m,

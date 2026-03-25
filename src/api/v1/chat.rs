@@ -11,7 +11,7 @@ use axum::{
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use crate::api::error::load_model_or_respond;
+use crate::api::error::{load_model_or_respond, AppError};
 use crate::api::router::AppState;
 use crate::api::shared::inference::{
     prepare_prompt, resolve_tool_choice, try_parse_tool_call, MessageForTemplate,
@@ -28,6 +28,9 @@ pub async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> axum::response::Response {
+    if let Err(msg) = req.validate() {
+        return AppError::BadRequest(msg).into_response();
+    }
     let start = Instant::now();
     let entry = match load_model_or_respond(&state.registry, &req.model).await {
         Ok(e) => e,

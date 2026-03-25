@@ -29,6 +29,25 @@ pub(super) async fn load_model(
     let split_mode = cfg.split_mode;
     let tensor_split = cfg.tensor_split.clone();
 
+    // Estimate VRAM requirement before attempting to load.
+    // Heuristic: file_size × 1.8 covers weights + overhead. Warn early so the
+    // user gets actionable advice instead of a cryptic load failure.
+    if let Ok(meta) = std::fs::metadata(&path) {
+        let estimated_bytes = (meta.len() as f64 * 1.8) as usize;
+        let available_bytes = gpu_memory_bytes;
+        if estimated_bytes > available_bytes {
+            let est_gib = estimated_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            let avail_gib = available_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            tracing::warn!(
+                model = %name,
+                estimated_gib = format!("{est_gib:.1}"),
+                available_gib = format!("{avail_gib:.1}"),
+                "model may not fit in VRAM — consider a smaller quantization, \
+                 --max-context-len to reduce KV cache, or closing other GPU processes"
+            );
+        }
+    }
+
     tracing::info!(model = %name, path = ?path, "loading model");
 
     let model = tokio::task::spawn_blocking(move || {
