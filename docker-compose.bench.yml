@@ -30,6 +30,29 @@ services:
       timeout: 3s
       retries: 12
 
+  vllm:
+    image: vllm/vllm-openai:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - vllm-models:/root/.cache/huggingface
+    environment:
+      HUGGING_FACE_HUB_TOKEN: "${HF_TOKEN:-}"
+    command: ["--model", "${VLLM_MODEL:-meta-llama/Llama-3.2-3B-Instruct}", "--dtype", "auto"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
 volumes:
   ferrumox-models:
   ollama-models:
+  vllm-models:

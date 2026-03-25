@@ -15,8 +15,9 @@ pub mod theme;
 pub mod utils;
 
 pub use utils::{
-    expand_tilde, format_age, format_size, get_gpu_info, get_gpu_memory_bytes, get_ram_info,
-    list_models, load_aliases, models_dir, resolve_model_path, GpuInfo, RamInfo,
+    expand_tilde, format_age, format_size, get_all_gpu_memory_bytes, get_gpu_info,
+    get_gpu_memory_bytes, get_ram_info, get_total_gpu_memory_bytes, list_models, load_aliases,
+    models_dir, resolve_model_path, GpuInfo, RamInfo,
 };
 
 use clap::{Parser, Subcommand};

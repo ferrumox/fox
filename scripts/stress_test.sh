@@ -16,11 +16,14 @@ set -euo pipefail
 BENCH="${BENCH:-./target/release/fox-bench}"
 FOX_URL="http://localhost:8080"
 OLLAMA_URL="http://localhost:11434"
+VLLM_URL="http://localhost:8000"
 FOX_MODEL="Llama-3.2"
 OLLAMA_MODEL="llama32"
+VLLM_MODEL="meta-llama/Llama-3.2-3B-Instruct"
 SECOND_MODEL="qwen"          # second model for multi-model scenario
 DOCKER_CONTAINER="fox-stress"
 NO_OLLAMA=0
+NO_VLLM=0
 NO_DOCKER=0
 
 PROMPT_SHORT="What is Rust in one sentence?"
@@ -31,7 +34,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --fox-model)    FOX_MODEL="$2";    shift 2 ;;
         --ollama-model) OLLAMA_MODEL="$2"; shift 2 ;;
+        --vllm-url)     VLLM_URL="$2";    shift 2 ;;
+        --vllm-model)   VLLM_MODEL="$2";  shift 2 ;;
         --no-ollama)    NO_OLLAMA=1;       shift ;;
+        --no-vllm)      NO_VLLM=1;        shift ;;
         --no-docker)    NO_DOCKER=1;       shift ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
@@ -103,7 +109,16 @@ if [[ $NO_OLLAMA -eq 0 ]] && curl -sf "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; 
     HAVE_OLLAMA=1
     echo "  Ollama available at ${OLLAMA_URL} (model: ${OLLAMA_MODEL})"
 else
-    echo "  Ollama not available — comparison scenarios will be skipped"
+    echo "  Ollama not available — Ollama comparison skipped"
+fi
+
+# ── Check vLLM ────────────────────────────────────────────────────────────────
+HAVE_VLLM=0
+if [[ $NO_VLLM -eq 0 ]] && curl -sf "${VLLM_URL}/health" >/dev/null 2>&1; then
+    HAVE_VLLM=1
+    echo "  vLLM available at ${VLLM_URL} (model: ${VLLM_MODEL})"
+else
+    echo "  vLLM not available — vLLM comparison skipped"
 fi
 
 # ── GPU / hardware info ───────────────────────────────────────────────────────
@@ -151,6 +166,12 @@ run_scenario() {
             --compare-url "$OLLAMA_URL"
             --compare-model "$OLLAMA_MODEL"
             --compare-label ollama
+        )
+    elif [[ $compare -eq 1 && $HAVE_VLLM -eq 1 ]]; then
+        args+=(
+            --compare-url "$VLLM_URL"
+            --compare-model "$VLLM_MODEL"
+            --compare-label vllm
         )
     fi
 
@@ -219,13 +240,20 @@ SCENARIO_RESULTS["S5: multi-model"]="$(jq -n \
     --argjson a "$json_a" --argjson b "$json_b" --argjson c "$json_c" \
     '{model_a_first: $a.primary, model_b: $b.primary, model_a_reload: $c.primary}')"
 
-# S6: Fox vs Ollama comparison
+# S6: Fox vs comparator (Ollama preferred, vLLM fallback)
 echo ""
+S6_COMP_LABEL="none"
 if [[ $HAVE_OLLAMA -eq 1 ]]; then
+    S6_COMP_LABEL="ollama"
     run_scenario "S6: fox vs ollama (4 workers)" 4 50 128 "$PROMPT_SHORT" 1
+    SCENARIO_RESULTS["S6: fox vs comp"]="${SCENARIO_RESULTS["S6: fox vs ollama (4 workers)"]}"
+elif [[ $HAVE_VLLM -eq 1 ]]; then
+    S6_COMP_LABEL="vllm"
+    run_scenario "S6: fox vs vllm (4 workers)" 4 50 128 "$PROMPT_SHORT" 1
+    SCENARIO_RESULTS["S6: fox vs comp"]="${SCENARIO_RESULTS["S6: fox vs vllm (4 workers)"]}"
 else
-    echo "  S6: fox vs ollama — SKIPPED (Ollama not available)"
-    SCENARIO_RESULTS["S6: fox vs ollama"]='{"skipped":true}'
+    echo "  S6: fox vs comparator — SKIPPED (no Ollama or vLLM available)"
+    SCENARIO_RESULTS["S6: fox vs comp"]='{"skipped":true}'
 fi
 
 echo ""
@@ -246,7 +274,7 @@ hr
                 "S3: high load (8 workers)" \
                 "S4: long responses (4 workers)" \
                 "S5: multi-model" \
-                "S6: fox vs ollama"; do
+                "S6: fox vs comp"; do
         [[ $first -eq 0 ]] && echo ","
         local_json="${SCENARIO_RESULTS[$name]:-{}}"
         printf '    %s: %s' "$(echo "$name" | jq -Rs .)" "$local_json"
@@ -337,14 +365,15 @@ Three sequential runs: model A → model B → model A (reload from eviction).
 
 ---
 
-## S6: Fox vs Ollama (4 workers, 50 requests, 128 tok)
+## S6: Fox vs ${S6_COMP_LABEL:-comparator} (4 workers, 50 requests, 128 tok)
 
 EOF
 
-if [[ $HAVE_OLLAMA -eq 1 ]]; then
-    S6="${SCENARIO_RESULTS["S6: fox vs ollama"]}"
+if [[ $HAVE_OLLAMA -eq 1 || $HAVE_VLLM -eq 1 ]]; then
+    S6="${SCENARIO_RESULTS["S6: fox vs comp"]}"
+    S6_CL="${S6_COMP_LABEL}"
 cat <<EOF
-| Metric | fox | ollama | Δ |
+| Metric | fox | $S6_CL | Δ |
 |--------|-----|--------|---|
 | TTFT P50 | $(extract "$S6" '.primary.ttft_p50_ms')ms | $(extract "$S6" '.comparison.ttft_p50_ms')ms | $(extract "$S6" '.improvement.ttft_p50_pct | round')% |
 | TTFT P95 | $(extract "$S6" '.primary.ttft_p95_ms')ms | $(extract "$S6" '.comparison.ttft_p95_ms')ms | — |
@@ -356,7 +385,7 @@ cat <<EOF
 
 EOF
 else
-    echo "_Ollama not available — skipped._"
+    echo "_No comparator available (Ollama or vLLM) — skipped._"
     echo ""
 fi
 
@@ -392,11 +421,11 @@ check_threshold "TTFT P50 < 500ms (c=4, n=50)" "$TTFT_P50" 500
 check_threshold "TTFT P95 < 1000ms (c=4, n=50)" "$TTFT_P95" 1000
 check_threshold "Zero 5xx errors (c=8, n=100)" "$S3_ERRORS" 0
 
-if [[ $HAVE_OLLAMA -eq 1 ]]; then
-    S6="${SCENARIO_RESULTS["S6: fox vs ollama"]}"
+if [[ $HAVE_OLLAMA -eq 1 || $HAVE_VLLM -eq 1 ]]; then
+    S6="${SCENARIO_RESULTS["S6: fox vs comp"]}"
     FOX_THRPT=$(extract "$S6" '.primary.throughput_tokens_per_sec | round')
-    OLL_THRPT=$(extract "$S6" '.comparison.throughput_tokens_per_sec | round')
-    check_threshold "fox throughput ≥ ollama (tok/s)" "$FOX_THRPT" "$OLL_THRPT" 0
+    CMP_THRPT=$(extract "$S6" '.comparison.throughput_tokens_per_sec | round')
+    check_threshold "fox throughput ≥ ${S6_COMP_LABEL} (tok/s)" "$FOX_THRPT" "$CMP_THRPT" 0
 fi
 
 cat <<EOF

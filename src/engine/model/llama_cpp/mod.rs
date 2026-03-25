@@ -179,6 +179,9 @@ impl LlamaCppModel {
         gpu_memory_bytes: usize,
         gpu_memory_fraction: f32,
         type_kv: u32,
+        main_gpu: i32,
+        split_mode: u32,
+        tensor_split: &[f32],
     ) -> Result<Self> {
         // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
         // Fox shows its own clean progress spinner instead.
@@ -209,7 +212,26 @@ impl LlamaCppModel {
         let mut model_params = unsafe { ffi::llama_model_default_params() };
         // Offload all layers to GPU (-1 = all). On CPU-only builds llama.cpp ignores this.
         model_params.n_gpu_layers = -1;
+        model_params.main_gpu = main_gpu;
+        model_params.split_mode = split_mode as ffi::llama_split_mode;
+
+        // tensor_split: raw pointer must stay valid until llama_model_load_from_file returns.
+        // ts_buf is kept alive on the stack for the duration of the call.
+        let ts_buf: Vec<f32>;
+        if !tensor_split.is_empty() {
+            let max_devs = unsafe { ffi::llama_max_devices() };
+            let mut buf = vec![0.0f32; max_devs];
+            for (i, &v) in tensor_split.iter().enumerate().take(max_devs) {
+                buf[i] = v;
+            }
+            ts_buf = buf;
+            model_params.tensor_split = ts_buf.as_ptr();
+        } else {
+            ts_buf = vec![]; // kept to satisfy the borrow checker
+        }
+
         let model = unsafe { ffi::llama_model_load_from_file(path_c.as_ptr(), model_params) };
+        drop(ts_buf); // explicit: ts_buf outlives model_params usage above
         let model = NonNull::new(model).ok_or_else(|| diagnose_load_failure(model_path))?;
 
         let vocab = unsafe { ffi::llama_model_get_vocab(model.as_ptr()) };

@@ -17,4 +17,11 @@ pub struct RegistryConfig {
     pub keep_alive_secs: u64,
     /// KV cache element type: 1=F16 (default), 8=Q8_0, 2=Q4_0
     pub type_kv: u32,
+    /// Primary GPU index (0-based). Used when split_mode=NONE, or as the main GPU for splits.
+    pub main_gpu: i32,
+    /// How to distribute the model across GPUs: 0=none, 1=layer (default), 2=row.
+    pub split_mode: u32,
+    /// Normalized per-GPU VRAM proportions for tensor splitting (e.g. [0.75, 0.25]).
+    /// Empty = llama.cpp decides proportionally to available VRAM.
+    pub tensor_split: Vec<f32>,
 }

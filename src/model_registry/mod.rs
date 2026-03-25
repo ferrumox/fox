@@ -225,6 +225,9 @@ mod tests {
             metrics: None,
             keep_alive_secs,
             type_kv: 1,
+            main_gpu: 0,
+            split_mode: 1,
+            tensor_split: vec![],
         }
     }
 

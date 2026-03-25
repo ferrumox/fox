@@ -18,7 +18,7 @@ use crate::engine::InferenceEngine;
 use crate::kv_cache::KVCacheManager;
 use crate::scheduler::{InferenceRequest, SamplingParams};
 
-use super::{get_gpu_memory_bytes, resolve_model_path, theme};
+use super::{get_gpu_memory_bytes, get_total_gpu_memory_bytes, resolve_model_path, theme};
 
 const DEFAULT_PROMPT: &str = "Explain what a large language model is in two sentences.";
 
@@ -48,6 +48,18 @@ pub struct BenchArgs {
     /// Number of runs to average results over
     #[arg(long, default_value = "1")]
     pub runs: usize,
+
+    /// Primary GPU index (0-based). Used when split_mode=none, or as main GPU for splits.
+    #[arg(long, default_value = "0", env = "FOX_MAIN_GPU")]
+    pub main_gpu: i32,
+
+    /// How to split the model across multiple GPUs: none, layer (default), row.
+    #[arg(long, default_value = "layer", env = "FOX_SPLIT_MODE")]
+    pub split_mode: String,
+
+    /// Comma-separated VRAM proportions for tensor splitting (e.g. "3,1" for 75%/25%).
+    #[arg(long, env = "FOX_TENSOR_SPLIT")]
+    pub tensor_split: Option<String>,
 }
 
 pub async fn run_bench(args: BenchArgs) -> Result<()> {
@@ -63,8 +75,34 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
     spinner.set_message("Loading model…");
     spinner.enable_steady_tick(Duration::from_millis(80));
 
+    let split_mode = match args.split_mode.as_str() {
+        "row" => 2u32,
+        "none" => 0u32,
+        _ => 1u32, // layer
+    };
+    let tensor_split_parsed: Vec<f32> = args
+        .tensor_split
+        .as_deref()
+        .map(|s| {
+            let raw: Vec<f32> = s
+                .split(',')
+                .filter_map(|p| p.trim().parse::<f32>().ok())
+                .collect();
+            let sum: f32 = raw.iter().sum();
+            if sum > 0.0 {
+                raw.iter().map(|&v| v / sum).collect()
+            } else {
+                vec![]
+            }
+        })
+        .unwrap_or_default();
+
     let load_start = Instant::now();
-    let gpu_memory_bytes_load = get_gpu_memory_bytes();
+    let gpu_memory_bytes_load = if split_mode != 0 {
+        get_total_gpu_memory_bytes()
+    } else {
+        get_gpu_memory_bytes()
+    };
     let model = LlamaCppModel::load(
         &model_path,
         1,
@@ -72,6 +110,9 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         gpu_memory_bytes_load,
         0.85,
         1,
+        args.main_gpu,
+        split_mode,
+        &tensor_split_parsed,
     )?;
     let model_config = model.model_config();
     let load_elapsed = load_start.elapsed();
@@ -79,7 +120,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
     spinner.finish_and_clear();
 
     // ── Engine setup ─────────────────────────────────────────────────────────
-    let gpu_memory_bytes = get_gpu_memory_bytes();
+    let gpu_memory_bytes = gpu_memory_bytes_load;
     let kv_cache = Arc::new(KVCacheManager::new(
         &model_config,
         gpu_memory_bytes,

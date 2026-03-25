@@ -130,7 +130,17 @@ pub fn get_ram_info() -> RamInfo {
 }
 
 /// Query total GPU memory via nvidia-smi. Falls back to 8 GiB if no GPU is found.
+/// Returns only the first GPU's memory (used for single-GPU budget calculations).
 pub fn get_gpu_memory_bytes() -> usize {
+    get_all_gpu_memory_bytes()
+        .into_iter()
+        .next()
+        .unwrap_or(8 * 1024 * 1024 * 1024)
+}
+
+/// Query memory for all available GPUs via nvidia-smi.
+/// Returns a Vec with one entry per GPU (in bytes). Empty if nvidia-smi is unavailable.
+pub fn get_all_gpu_memory_bytes() -> Vec<usize> {
     let nvidia_smi = if cfg!(target_os = "windows") {
         "nvidia-smi.exe"
     } else {
@@ -142,11 +152,26 @@ pub fn get_gpu_memory_bytes() -> usize {
     {
         if out.status.success() {
             if let Ok(s) = std::str::from_utf8(&out.stdout) {
-                if let Ok(mib) = s.trim().parse::<usize>() {
-                    return mib * 1024 * 1024;
+                let gpus: Vec<usize> = s
+                    .lines()
+                    .filter_map(|line| line.trim().parse::<usize>().ok())
+                    .map(|mib| mib * 1024 * 1024)
+                    .collect();
+                if !gpus.is_empty() {
+                    return gpus;
                 }
             }
         }
     }
-    8 * 1024 * 1024 * 1024
+    vec![]
+}
+
+/// Sum of memory across all GPUs. Falls back to 8 GiB if no GPU is found.
+pub fn get_total_gpu_memory_bytes() -> usize {
+    let gpus = get_all_gpu_memory_bytes();
+    if gpus.is_empty() {
+        8 * 1024 * 1024 * 1024
+    } else {
+        gpus.iter().sum()
+    }
 }

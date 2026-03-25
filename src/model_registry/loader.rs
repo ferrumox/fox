@@ -25,6 +25,9 @@ pub(super) async fn load_model(
     let block_size = cfg.block_size;
     let metrics = cfg.metrics.clone();
     let type_kv = cfg.type_kv;
+    let main_gpu = cfg.main_gpu;
+    let split_mode = cfg.split_mode;
+    let tensor_split = cfg.tensor_split.clone();
 
     tracing::info!(model = %name, path = ?path, "loading model");
 
@@ -36,6 +39,9 @@ pub(super) async fn load_model(
             gpu_memory_bytes,
             gpu_memory_fraction,
             type_kv,
+            main_gpu,
+            split_mode,
+            &tensor_split,
         )
     })
     .await

@@ -21,6 +21,9 @@ impl LlamaCppModel {
         gpu_memory_bytes: usize,
         gpu_memory_fraction: f32,
         type_kv: u32,
+        main_gpu: i32,
+        split_mode: u32,
+        tensor_split: &[f32],
     ) -> Result<Self> {
         let _ = (
             model_path,
@@ -29,6 +32,9 @@ impl LlamaCppModel {
             gpu_memory_bytes,
             gpu_memory_fraction,
             type_kv,
+            main_gpu,
+            split_mode,
+            tensor_split,
         );
         let config = ModelConfig {
             num_layers: 32,

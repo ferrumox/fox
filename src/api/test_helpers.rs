@@ -34,6 +34,9 @@ pub fn make_test_registry(
         metrics: None,
         keep_alive_secs: 0,
         type_kv: 1,
+        main_gpu: 0,
+        split_mode: 1,
+        tensor_split: vec![],
     };
     let registry = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
     let entry = EngineEntry::for_test(name);
@@ -73,6 +76,9 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         metrics: None,
         keep_alive_secs: 0,
         type_kv: 1,
+        main_gpu: 0,
+        split_mode: 1,
+        tensor_split: vec![],
     };
     let registry = Arc::new(crate::model_registry::ModelRegistry::new(
         cfg,

@@ -24,6 +24,7 @@ use crate::metrics::Metrics;
 use crate::model_registry::{ModelRegistry, RegistryConfig};
 
 use super::get_gpu_memory_bytes;
+use super::get_total_gpu_memory_bytes;
 use super::list_models;
 use super::load_aliases;
 use super::models_dir as default_models_dir;
@@ -102,6 +103,22 @@ pub struct ServeArgs {
     /// Omit to run without authentication.
     #[arg(long, env = "FOX_API_KEY")]
     pub api_key: Option<String>,
+
+    /// Primary GPU index (0-based) used when split_mode=none, or as the main GPU for splits.
+    #[arg(long, default_value = "0", env = "FOX_MAIN_GPU")]
+    pub main_gpu: i32,
+
+    /// How to split the model across multiple GPUs: none, layer (default), row.
+    /// - none:  single GPU (main_gpu)
+    /// - layer: distribute transformer layers across GPUs (most common)
+    /// - row:   tensor-parallel row split (requires model support)
+    #[arg(long, default_value = "layer", env = "FOX_SPLIT_MODE")]
+    pub split_mode: String,
+
+    /// Comma-separated VRAM proportions for tensor splitting (e.g. "3,1" for 75%/25%).
+    /// When omitted, llama.cpp splits proportionally to available VRAM.
+    #[arg(long, env = "FOX_TENSOR_SPLIT")]
+    pub tensor_split: Option<String>,
 }
 
 fn parse_type_kv(s: &str) -> u32 {
@@ -110,6 +127,27 @@ fn parse_type_kv(s: &str) -> u32 {
         "q4_0" => 2,
         _ => 1, // f16
     }
+}
+
+fn parse_split_mode(s: &str) -> u32 {
+    match s {
+        "row" => 2,
+        "none" => 0,
+        _ => 1, // layer (default)
+    }
+}
+
+/// Parse "3,1" → [0.75, 0.25] (normalizes so values sum to 1.0).
+fn parse_tensor_split(s: &str) -> Vec<f32> {
+    let raw: Vec<f32> = s
+        .split(',')
+        .filter_map(|p| p.trim().parse::<f32>().ok())
+        .collect();
+    let sum: f32 = raw.iter().sum();
+    if sum <= 0.0 {
+        return vec![];
+    }
+    raw.iter().map(|&v| v / sum).collect()
 }
 
 impl ServeArgs {
@@ -154,7 +192,13 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     args.validate()?;
     setup_logging(args.json_logs);
 
-    let gpu_memory_bytes = get_gpu_memory_bytes();
+    let split_mode = parse_split_mode(&args.split_mode);
+    // Use total VRAM across all GPUs when splitting across multiple GPUs.
+    let gpu_memory_bytes = if split_mode != 0 {
+        get_total_gpu_memory_bytes()
+    } else {
+        get_gpu_memory_bytes()
+    };
 
     let metrics = match Metrics::new() {
         Ok(m) => {
@@ -183,6 +227,13 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         metrics,
         keep_alive_secs: args.keep_alive_secs,
         type_kv: parse_type_kv(&args.type_kv),
+        main_gpu: args.main_gpu,
+        split_mode,
+        tensor_split: args
+            .tensor_split
+            .as_deref()
+            .map(parse_tensor_split)
+            .unwrap_or_default(),
     };
 
     let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));
