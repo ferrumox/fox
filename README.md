@@ -136,17 +136,17 @@ See [`examples/`](examples/) for more integration guides.
 
 ## GPU support
 
-Fox detects CUDA, Metal, and Vulkan at runtime — **one binary runs on any hardware**.
+Fox detects CUDA, ROCm, Metal, and Vulkan at runtime — **one binary runs on any hardware**.
 
 | Platform | GPU backends | Auto-detects |
 |----------|-------------|--------------|
-| Linux x86_64 | CUDA + Vulkan | ✅ |
+| Linux x86_64 | CUDA + ROCm + Vulkan | ✅ |
 | Windows x86_64 | CUDA + Vulkan | ✅ |
 | macOS Apple Silicon | Metal | ✅ |
 | macOS Intel | CPU only | — |
 | Linux ARM64 | CPU only | — |
 
-Auto-detection priority: **CUDA → Vulkan → Metal → CPU**. Override with `--gpu-backend cuda|vulkan|cpu`.
+Auto-detection priority: **CUDA → ROCm → Vulkan → Metal → CPU**.
 
 ---
 
@@ -436,9 +436,10 @@ make download-model  Download default model (Llama-3.2-3B Q4_K_M)
 | Backend | Requirement |
 |---------|-------------|
 | CPU | x86_64 or arm64, AVX2 |
-| CUDA | CUDA 12.x |
+| CUDA | CUDA 12.x, Linux/Windows x86_64 |
+| ROCm | ROCm 6.1+, Linux x86_64 |
 | Metal | macOS 13+, Apple Silicon |
-| Vulkan | Windows x86_64, Vulkan SDK 1.3+ |
+| Vulkan | Vulkan SDK 1.3+, Linux or Windows x86_64 |
 
 No runtime dependencies beyond GPU drivers — single static binary.
 

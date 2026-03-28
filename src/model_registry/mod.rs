@@ -145,11 +145,25 @@ impl ModelRegistry {
     }
 
     /// Resolve a user-supplied name to `(stem, PathBuf)` using the following priority:
+    /// 0. Direct file path (absolute or relative) that exists on disk
     /// 1. Alias lookup
     /// 2. Exact stem match (case-insensitive)
     /// 3. Stem starts with the name
     /// 4. Stem contains the name
     pub(crate) fn resolve_model_name(&self, name: &str) -> Result<(String, PathBuf)> {
+        // Step 0: if `name` is already a path to an existing file, use it directly.
+        // This handles FOX_MODEL_PATH pointing to a model in a subdirectory or
+        // outside of models_dir entirely.
+        let as_path = std::path::PathBuf::from(name);
+        if as_path.is_file() {
+            let stem = as_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(name)
+                .to_string();
+            return Ok((stem, as_path));
+        }
+
         let resolved = self.aliases.get(name).map(String::as_str).unwrap_or(name);
 
         let entries = list_models(&self.config.models_dir)?;

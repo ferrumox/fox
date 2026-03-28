@@ -254,7 +254,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
                 .unwrap_or("default")
                 .to_string();
             tracing::info!("pre-loading model from {:?}", path);
-            registry.get_or_load(&name).await?;
+            registry.get_or_load(path.to_string_lossy().as_ref()).await?;
             name
         }
         None => {

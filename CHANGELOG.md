@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ROCm/HIP backend** — AMD GPU support on Linux via the ROCm HIP runtime. Detected
+  automatically at build time when `hipcc` is found in `PATH` or via the `HIPCC` environment
+  variable. Produces `libggml-hip.so` alongside the binary; no recompilation needed at runtime.
+  A dedicated release tarball (`fox-*-linux-x86_64-rocm.tar.gz`) is published for each release.
+  Priority order: CUDA → ROCm → Vulkan → CPU.
+
+- **Vulkan backend on Linux** — Vulkan GPU support is now built on Linux when the Vulkan
+  toolchain is available (`glslc` in `PATH`, `VULKAN_SDK` env var, or system headers at
+  `/usr/include/vulkan/vulkan.h`). Previously Vulkan was only compiled for Windows releases.
+  Install prerequisites: `sudo apt install libvulkan-dev glslc`. The Linux release tarball now
+  includes `libggml-vulkan.so`.
+
 - **Multi-GPU support** — the model is automatically distributed across all available GPUs
   using `LLAMA_SPLIT_MODE_LAYER` (layer splitting proportional to each GPU's free VRAM).
   No configuration required — works transparently with one or multiple GPUs.
@@ -44,6 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **VRAM pre-load estimation** — before loading a model, fox estimates the required VRAM
   (`file_size × 1.8`) and logs a warning with actionable suggestions when it may not fit.
+
+### Fixed
+
+- **`FOX_MODEL_PATH` with model in subdirectory** — fox now correctly loads a model when
+  `FOX_MODEL_PATH` points to a `.gguf` file inside a subdirectory of `models_dir` (e.g.
+  `models/glm-4.7-flash-distill/glm-4.7-flash.gguf`). Previously, `resolve_model_name`
+  only performed a flat scan of `models_dir` and failed with *"model not found"* for any
+  path in a nested directory. `resolve_model_name` now detects direct file paths (step 0)
+  and bypasses the directory scan entirely.
 
 ### Changed
 

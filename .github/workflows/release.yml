@@ -26,18 +26,29 @@ jobs:
             features: ""
             ext: ""
             archive: tar
+            artifact_suffix: ""
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            use_cross: false
+            features: ""
+            ext: ""
+            archive: tar
+            artifact_suffix: "-rocm"
+            gpu_backend: rocm
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04
             use_cross: true
             features: ""
             ext: ""
             archive: tar
+            artifact_suffix: ""
           - target: aarch64-apple-darwin
             runner: macos-latest
             use_cross: false
             features: ""
             ext: ""
             archive: tar
+            artifact_suffix: ""
             libclang_path: /opt/homebrew/opt/llvm/lib
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
@@ -45,6 +56,7 @@ jobs:
             features: ""
             ext: ".exe"
             archive: zip
+            artifact_suffix: ""
 
     steps:
       - uses: actions/checkout@v5
@@ -70,7 +82,7 @@ jobs:
         if: runner.os == 'Linux' && !matrix.use_cross
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y cmake clang libclang-dev ninja-build
+          sudo apt-get install -y cmake clang libclang-dev ninja-build libvulkan-dev glslc
 
       - name: Install build dependencies (macOS)
         if: runner.os == 'macOS'
@@ -104,6 +116,19 @@ jobs:
           "VULKAN_SDK=C:\VulkanSDK\$version" | Out-File -FilePath $env:GITHUB_ENV -Append
           "C:\VulkanSDK\$version\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
+      - name: Install ROCm/HIP SDK (Linux ROCm)
+        if: matrix.gpu_backend == 'rocm'
+        run: |
+          wget -q -O - https://repo.radeon.com/rocm/rocm.gpg.key \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/rocm.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] \
+            https://repo.radeon.com/rocm/apt/6.2 jammy main" \
+            | sudo tee /etc/apt/sources.list.d/rocm.list
+          sudo apt-get update -q
+          sudo apt-get install -y rocm-hip-sdk
+          echo "/opt/rocm/bin" >> "$GITHUB_PATH"
+          echo "HIPCC=/opt/rocm/bin/hipcc" >> "$GITHUB_ENV"
+
       - name: Install cross
         if: matrix.use_cross
         run: cargo install cross --git https://github.com/cross-rs/cross
@@ -126,7 +151,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           TARGET="${{ matrix.target }}"
-          TARBALL="fox-${VERSION}-${TARGET}.tar.gz"
+          TARBALL="fox-${VERSION}-${TARGET}${{ matrix.artifact_suffix }}.tar.gz"
           RELEASE_DIR="target/$TARGET/release"
           # Include binaries + all backend shared libraries so the tarball is self-contained.
           # The fox binary has RPATH=$ORIGIN, so it finds .so files in the same directory.

@@ -1,17 +1,32 @@
 // Build llama.cpp and generate Rust FFI bindings.
 //
-// Strategy: GGML_BACKEND_DL=ON → GPU backends (CUDA, Metal) are compiled as
-// shared libraries (.so/.dylib) and loaded at runtime via dlopen. The fox binary
-// itself has zero hard dependency on CUDA runtime libraries — it works on any
-// system and auto-detects the GPU at startup.
+// Strategy: GGML_BACKEND_DL=ON → GPU backends (CUDA, Metal, Vulkan, ROCm) are
+// compiled as shared libraries (.so/.dylib/.dll) and loaded at runtime via dlopen.
+// The fox binary itself has zero hard dependency on GPU runtime libraries — it
+// works on any system and auto-detects the GPU at startup.
 //
 // GPU detection is automatic at build time:
 //   - CUDA:  nvcc found in PATH or CUDACXX env var → builds libggml-cuda.so
-//   - Metal: macOS target → builds libggml-metal.dylib
+//   - ROCm:  hipcc found in PATH or HIPCC env var  → builds libggml-hip.so
+//   - Metal: macOS target                          → builds libggml-metal.dylib
+//   - Vulkan (Linux): glslc/VULKAN_SDK/vulkan.h    → builds libggml-vulkan.so
+//   - Vulkan (Windows): VULKAN_SDK env var          → builds ggml-vulkan.dll
 //   No Cargo features needed; users just run `cargo build --release`.
 
 use std::env;
 use std::path::PathBuf;
+
+/// Returns the absolute path to a command found in PATH, or None.
+/// Used to detect GPU toolchains (nvcc, hipcc, glslc) at build time.
+fn which_cmd(cmd: &str) -> Option<String> {
+    std::process::Command::new("which")
+        .arg(cmd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+}
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(fox_stub)");
@@ -59,35 +74,76 @@ fn main() {
 
     // ── CUDA auto-detection ───────────────────────────────────────────────────
     // Check CUDACXX env var first, then PATH.
-    let nvcc = env::var("CUDACXX").ok().or_else(|| {
-        std::process::Command::new("which")
-            .arg("nvcc")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-    });
+    let nvcc = env::var("CUDACXX").ok().or_else(|| which_cmd("nvcc"));
 
-    if let Some(ref nvcc_path) = nvcc {
+    let cuda_enabled = if let Some(ref nvcc_path) = nvcc {
         if std::path::Path::new(nvcc_path).exists() {
             println!("cargo:warning=CUDA found at {nvcc_path} — building libggml-cuda.so");
             cmake_config.define("GGML_CUDA", "ON");
             cmake_config.define("CMAKE_CUDA_COMPILER", nvcc_path);
+            true
+        } else {
+            false
         }
-    } else if target_os == "macos" {
-        // Metal is always available on macOS — no tool detection needed.
-        cmake_config.define("GGML_METAL", "ON");
-    } else if target_os == "windows" {
-        // Use Ninja to avoid MSBuild's FileTracker MAX_PATH limit.
-        cmake_config.generator("Ninja");
+    } else {
+        false
+    };
 
-        // Vulkan works on any modern GPU (NVIDIA, AMD, Intel) via DirectX 12 drivers.
-        // Requires CARGO_TARGET_DIR=C:\t (or similarly short) in the workflow to keep
-        // the vulkan-shaders-gen ExternalProject paths under Windows MAX_PATH.
-        if let Ok(vulkan_sdk) = env::var("VULKAN_SDK") {
-            println!("cargo:warning=Vulkan SDK found at {vulkan_sdk} — building ggml-vulkan.dll");
-            cmake_config.define("GGML_VULKAN", "ON");
+    if !cuda_enabled {
+        match target_os.as_str() {
+            "macos" => {
+                // Metal is always available on macOS — no tool detection needed.
+                cmake_config.define("GGML_METAL", "ON");
+            }
+            "linux" => {
+                // ── ROCm/HIP auto-detection ────────────────────────────────────
+                // Check HIPCC env var first, then PATH. Mutually exclusive with CUDA.
+                let hipcc = env::var("HIPCC").ok().or_else(|| which_cmd("hipcc"));
+                let rocm_enabled = if let Some(ref hipcc_path) = hipcc {
+                    if std::path::Path::new(hipcc_path).exists() {
+                        println!(
+                            "cargo:warning=ROCm/HIP found at {hipcc_path} — building libggml-hip.so"
+                        );
+                        cmake_config.define("GGML_HIP", "ON");
+                        cmake_config.define("CMAKE_HIP_COMPILER", hipcc_path);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                // ── Vulkan auto-detection (Linux) ──────────────────────────────
+                // Enable when ROCm is unavailable and the Vulkan toolchain is present.
+                // glslc (shader compiler) is required: apt install glslc libvulkan-dev
+                if !rocm_enabled {
+                    let has_vulkan = env::var("VULKAN_SDK").is_ok()
+                        || which_cmd("glslc").is_some()
+                        || std::path::Path::new("/usr/include/vulkan/vulkan.h").exists();
+                    if has_vulkan {
+                        println!(
+                            "cargo:warning=Vulkan toolchain detected — building libggml-vulkan.so"
+                        );
+                        cmake_config.define("GGML_VULKAN", "ON");
+                    }
+                }
+            }
+            "windows" => {
+                // Use Ninja to avoid MSBuild's FileTracker MAX_PATH limit.
+                cmake_config.generator("Ninja");
+
+                // Vulkan works on any modern GPU (NVIDIA, AMD, Intel) via DirectX 12 drivers.
+                // Requires CARGO_TARGET_DIR=C:\t (or similarly short) in the workflow to keep
+                // the vulkan-shaders-gen ExternalProject paths under Windows MAX_PATH.
+                if let Ok(vulkan_sdk) = env::var("VULKAN_SDK") {
+                    println!(
+                        "cargo:warning=Vulkan SDK found at {vulkan_sdk} — building ggml-vulkan.dll"
+                    );
+                    cmake_config.define("GGML_VULKAN", "ON");
+                }
+            }
+            _ => {}
         }
     }
 

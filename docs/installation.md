@@ -74,17 +74,36 @@ See the [Deployment guide](./deployment.md) for Docker Compose examples and prod
 
 ## Build from source
 
-Building from source gives you full control over compile-time flags and lets you enable optional backends (CUDA, Metal, CPU-only).
+Building from source gives you full control over compile-time flags and lets you enable optional backends (CUDA, ROCm, Metal, Vulkan, CPU-only).
 
 ### Prerequisites
 
-| Tool | Minimum version |
-|------|----------------|
-| Rust | 1.80 |
-| CMake | 3.14 |
-| C++17 compiler (GCC/Clang/MSVC) | — |
-| CUDA Toolkit (optional, for NVIDIA GPU) | 11.8 |
-| Xcode Command Line Tools (optional, for Metal) | — |
+| Tool | Minimum version | Required for |
+|------|----------------|-------------|
+| Rust | 1.80 | Always |
+| CMake | 3.14 | Always |
+| C++17 compiler (GCC/Clang/MSVC) | — | Always |
+| CUDA Toolkit | 11.8 | NVIDIA GPU on Linux/Windows |
+| ROCm / HIP SDK | 6.1 | AMD GPU on Linux |
+| Vulkan SDK (`libvulkan-dev` + `glslc`) | 1.3 | Vulkan on Linux |
+| Xcode Command Line Tools | — | Metal on macOS |
+
+Install Vulkan toolchain on Linux (Debian/Ubuntu):
+
+```bash
+sudo apt install libvulkan-dev glslc
+```
+
+Install ROCm on Linux (Debian/Ubuntu):
+
+```bash
+wget -q -O - https://repo.radeon.com/rocm/rocm.gpg.key \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/rocm.gpg
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] \
+  https://repo.radeon.com/rocm/apt/6.2 jammy main" \
+  | sudo tee /etc/apt/sources.list.d/rocm.list
+sudo apt-get update && sudo apt-get install -y rocm-hip-sdk
+```
 
 ### Clone and build
 
@@ -105,7 +124,7 @@ target/release/fox-bench    # standalone benchmark tool
 
 ### GPU backend detection
 
-fox detects GPU backends **at runtime** — no compile-time feature flags are required. A single `cargo build --release` produces a binary that automatically uses CUDA on Linux/Windows, Metal on macOS, or Vulkan on Windows if the respective SDK is installed:
+fox detects GPU backends **at runtime** — no compile-time feature flags are required. A single `cargo build --release` produces a binary that automatically uses the best available backend:
 
 ```bash
 cargo build --release   # runs on CPU, CUDA, Metal, or Vulkan — same binary
