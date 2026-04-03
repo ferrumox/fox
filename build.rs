@@ -68,6 +68,7 @@ fn main() {
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
         .define("LLAMA_BUILD_SERVER", "OFF")
         .define("LLAMA_BUILD_COMMON", "OFF")
+        .define("LLAMA_BUILD_WEBUI", "OFF")
         .profile("Release");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
