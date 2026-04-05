@@ -116,6 +116,7 @@ pub fn kv_type_bytes(t: u32) -> (u64, u64) {
 /// Configuration for KV cache sizing.
 /// Blocks = gpu_memory_bytes * fraction / bytes_per_block
 /// bytes_per_block = block_size × num_layers × num_heads_kv × head_dim × (bytes_K + bytes_V)
+#[allow(clippy::too_many_arguments)]
 fn compute_total_blocks(
     gpu_memory_bytes: usize,
     gpu_memory_fraction: f32,
@@ -130,8 +131,8 @@ fn compute_total_blocks(
     let (k_num, k_den) = kv_type_bytes(type_k);
     let (v_num, v_den) = kv_type_bytes(type_v);
     // Compute bytes for K and V tensors separately, ceiling to avoid underestimating.
-    let k_bytes = (elements * k_num + k_den - 1) / k_den;
-    let v_bytes = (elements * v_num + v_den - 1) / v_den;
+    let k_bytes = (elements * k_num).div_ceil(k_den);
+    let v_bytes = (elements * v_num).div_ceil(v_den);
     let bytes_per_block = (k_bytes + v_bytes) as usize;
     let available = (gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize;
     (available / bytes_per_block).max(1)

@@ -412,8 +412,8 @@ impl LlamaCppModel {
         let (v_num, v_den) = crate::kv_cache::kv_type_bytes(type_v);
         let elems_per_token = (n_head_kv * head_dim * n_layer) as u64;
         let bytes_per_token_u64 =
-            (elems_per_token * k_num + k_den - 1) / k_den
-            + (elems_per_token * v_num + v_den - 1) / v_den;
+            (elems_per_token * k_num).div_ceil(k_den)
+            + (elems_per_token * v_num).div_ceil(v_den);
         let max_tokens_by_mem = if bytes_per_token_u64 > 0 && budget_bytes > 0 {
             (budget_bytes as u64 / bytes_per_token_u64) as u32
         } else {
