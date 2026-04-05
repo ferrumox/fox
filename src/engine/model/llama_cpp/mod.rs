@@ -397,8 +397,7 @@ impl LlamaCppModel {
         let mut ctx_params = unsafe { ffi::llama_context_default_params() };
         let n_seq = (max_batch_size as u32).max(4);
 
-        let model_train_ctx =
-            unsafe { ffi::llama_model_n_ctx_train(model.as_ptr()) } as u32;
+        let model_train_ctx = unsafe { ffi::llama_model_n_ctx_train(model.as_ptr()) } as u32;
         let effective_max_ctx = resolve_context_len(max_context_len, model_train_ctx);
 
         let free_bytes = query_gpu_free_bytes()
@@ -412,8 +411,7 @@ impl LlamaCppModel {
         let (v_num, v_den) = crate::kv_cache::kv_type_bytes(type_v);
         let elems_per_token = (n_head_kv * head_dim * n_layer) as u64;
         let bytes_per_token_u64 =
-            (elems_per_token * k_num).div_ceil(k_den)
-            + (elems_per_token * v_num).div_ceil(v_den);
+            (elems_per_token * k_num).div_ceil(k_den) + (elems_per_token * v_num).div_ceil(v_den);
         let max_tokens_by_mem = if bytes_per_token_u64 > 0 && budget_bytes > 0 {
             (budget_bytes as u64 / bytes_per_token_u64) as u32
         } else {

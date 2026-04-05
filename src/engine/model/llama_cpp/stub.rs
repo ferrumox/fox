@@ -50,6 +50,29 @@ impl LlamaCppModel {
         };
         Ok(Self { config })
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_context(
+        &self,
+        max_batch_size: usize,
+        max_context_len: Option<u32>,
+        gpu_memory_bytes: usize,
+        gpu_memory_fraction: f32,
+        type_k: u32,
+        type_v: u32,
+    ) -> Result<Self> {
+        let _ = (
+            max_batch_size,
+            max_context_len,
+            gpu_memory_bytes,
+            gpu_memory_fraction,
+            type_k,
+            type_v,
+        );
+        Ok(Self {
+            config: self.config.clone(),
+        })
+    }
 }
 
 #[cfg(fox_stub)]

@@ -143,12 +143,12 @@ pub struct ServeArgs {
 fn parse_kv_type(s: &str) -> u32 {
     use crate::model_registry::kv_type;
     match s {
-        "q8_0"   => kv_type::Q8_0,
-        "q4_0"   => kv_type::Q4_0,
+        "q8_0" => kv_type::Q8_0,
+        "q4_0" => kv_type::Q4_0,
         "turbo3" => kv_type::TURBO3,
         "turbo4" => kv_type::TURBO4,
         "turbo2" => kv_type::TURBO2,
-        _        => kv_type::F16,
+        _ => kv_type::F16,
     }
 }
 

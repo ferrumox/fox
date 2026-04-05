@@ -22,8 +22,7 @@ use crate::kv_cache::KVCacheManager;
 use crate::model_registry::kv_type;
 use crate::scheduler::{InferenceRequest, SamplingParams};
 
-const DEFAULT_PROMPT: &str =
-    "Explain what a large language model is in two sentences.";
+const DEFAULT_PROMPT: &str = "Explain what a large language model is in two sentences.";
 const DEFAULT_TYPES: &str = "f16,q8_0,turbo3,turbo4,turbo2";
 const BLOCK_SIZE: usize = 16;
 const GPU_FRACTION: f32 = 0.85;
@@ -86,9 +85,9 @@ struct RunResult {
 
 fn parse_kv_type_label(s: &str) -> Option<(&'static str, u32)> {
     match s.trim() {
-        "f16"    => Some(("f16",    kv_type::F16)),
-        "q8_0"   => Some(("q8_0",   kv_type::Q8_0)),
-        "q4_0"   => Some(("q4_0",   kv_type::Q4_0)),
+        "f16" => Some(("f16", kv_type::F16)),
+        "q8_0" => Some(("q8_0", kv_type::Q8_0)),
+        "q4_0" => Some(("q4_0", kv_type::Q4_0)),
         "turbo3" => Some(("turbo3", kv_type::TURBO3)),
         "turbo4" => Some(("turbo4", kv_type::TURBO4)),
         "turbo2" => Some(("turbo2", kv_type::TURBO2)),
@@ -138,7 +137,10 @@ async fn run_one_type(
     ));
 
     let messages = vec![
-        ("system".to_string(), "You are a helpful assistant.".to_string()),
+        (
+            "system".to_string(),
+            "You are a helpful assistant.".to_string(),
+        ),
         ("user".to_string(), args.prompt.clone()),
     ];
     let prompt_text = engine
@@ -150,7 +152,9 @@ async fn run_one_type(
 
     let engine_loop = {
         let e = engine.clone();
-        tokio::spawn(async move { let _ = e.run_loop().await; })
+        tokio::spawn(async move {
+            let _ = e.run_loop().await;
+        })
     };
 
     let runs = args.runs.max(1);
@@ -221,7 +225,11 @@ async fn run_one_type(
     let avg_ttft = ttft_sum / runs as f64;
     let avg_gen_toks = gen_toks_sum as f64 / runs as f64;
     let avg_gen_secs = gen_secs_sum / runs as f64;
-    let toks_per_sec = if avg_gen_secs > 0.0 { avg_gen_toks / avg_gen_secs } else { 0.0 };
+    let toks_per_sec = if avg_gen_secs > 0.0 {
+        avg_gen_toks / avg_gen_secs
+    } else {
+        0.0
+    };
 
     Ok(RunResult {
         label,
@@ -249,7 +257,11 @@ pub async fn run_bench_kv(args: BenchKvArgs) -> Result<()> {
                 .filter_map(|p| p.trim().parse::<f32>().ok())
                 .collect();
             let sum: f32 = raw.iter().sum();
-            if sum > 0.0 { raw.iter().map(|&v| v / sum).collect() } else { vec![] }
+            if sum > 0.0 {
+                raw.iter().map(|&v| v / sum).collect()
+            } else {
+                vec![]
+            }
         })
         .unwrap_or_default();
 
@@ -331,7 +343,12 @@ pub async fn run_bench_kv(args: BenchKvArgs) -> Result<()> {
     // ── Print table ──────────────────────────────────────────────────────────
     eprintln!();
     theme::eprint_styled(None, false, false, "  🦊  ");
-    theme::eprint_styled(Some(crossterm::style::Color::White), true, false, &model_name);
+    theme::eprint_styled(
+        Some(crossterm::style::Color::White),
+        true,
+        false,
+        &model_name,
+    );
     theme::eprint_styled(None, false, false, "  ·  KV cache benchmark");
     eprintln!();
     theme::eprint_styled(None, false, true, &format!("  {}\n\n", "─".repeat(62)));
@@ -371,12 +388,7 @@ pub async fn run_bench_kv(args: BenchKvArgs) -> Result<()> {
 
         eprintln!(
             "  {:<8}  {:>8}  {:>10}  {:>9}  {:>7}  {:>7}",
-            label_display,
-            r.kv_blocks,
-            r.max_context_tokens,
-            tps_str,
-            ttft_str,
-            ratio_str,
+            label_display, r.kv_blocks, r.max_context_tokens, tps_str, ttft_str, ratio_str,
         );
     }
 

@@ -62,8 +62,8 @@ pub enum Command {
 
 /// Known subcommand names — anything else is treated as `fox run <arg>`.
 const SUBCOMMANDS: &[&str] = &[
-    "serve", "run", "bench", "bench-kv", "pull", "list", "rm", "show", "ps", "models", "search", "alias",
-    "help",
+    "serve", "run", "bench", "bench-kv", "pull", "list", "rm", "show", "ps", "models", "search",
+    "alias", "help",
 ];
 
 pub async fn run() -> anyhow::Result<()> {
