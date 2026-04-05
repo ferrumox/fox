@@ -4,7 +4,7 @@ mod config;
 mod entry;
 mod loader;
 
-pub use config::RegistryConfig;
+pub use config::{kv_type, RegistryConfig};
 pub use entry::EngineEntry;
 
 use dashmap::DashMap;
@@ -238,7 +238,8 @@ mod tests {
             gpu_memory_fraction: 0.9,
             metrics: None,
             keep_alive_secs,
-            type_kv: 1,
+            type_k: 1,
+            type_v: 1,
             main_gpu: 0,
             split_mode: 1,
             tensor_split: vec![],

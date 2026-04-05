@@ -24,7 +24,8 @@ pub(super) async fn load_model(
     let gpu_memory_fraction = cfg.gpu_memory_fraction;
     let block_size = cfg.block_size;
     let metrics = cfg.metrics.clone();
-    let type_kv = cfg.type_kv;
+    let type_k = cfg.type_k;
+    let type_v = cfg.type_v;
     let main_gpu = cfg.main_gpu;
     let split_mode = cfg.split_mode;
     let tensor_split = cfg.tensor_split.clone();
@@ -58,7 +59,8 @@ pub(super) async fn load_model(
             max_context_len,
             gpu_memory_bytes,
             gpu_memory_fraction,
-            type_kv,
+            type_k,
+            type_v,
             main_gpu,
             split_mode,
             &tensor_split,
@@ -75,8 +77,10 @@ pub(super) async fn load_model(
         gpu_memory_bytes,
         gpu_memory_fraction,
         block_size,
-        type_kv,
+        type_k,
+        type_v,
     ));
+
     let scheduler = Arc::new(Scheduler::new(kv_cache.clone(), max_batch_size));
     let engine = Arc::new(InferenceEngine::new(
         model, scheduler, kv_cache, name, metrics,

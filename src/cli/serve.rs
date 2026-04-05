@@ -95,9 +95,22 @@ pub struct ServeArgs {
     #[arg(long, default_value = DEFAULT_KEEP_ALIVE_SECS, env = "FOX_KEEP_ALIVE_SECS")]
     pub keep_alive_secs: u64,
 
-    /// KV cache quantization: f16 (default), q8_0, q4_0
+    /// KV cache quantization for both K and V: f16 (default), q8_0, q4_0, turbo3, turbo4, turbo2.
+    /// Use --type-k / --type-v to set K and V independently (asymmetric configs).
+    /// turbo3 (3.1 bpw, ~4.9x compression) is the recommended TurboQuant sweet spot.
+    /// TurboQuant requires Flash Attention and head_dim divisible by 128.
     #[arg(long, default_value = DEFAULT_TYPE_KV, env = "FOX_TYPE_KV")]
     pub type_kv: String,
+
+    /// Key cache element type (overrides --type-kv for K).
+    /// Values: f16, q8_0, q4_0, turbo3, turbo4, turbo2.
+    #[arg(long, env = "FOX_TYPE_K")]
+    pub type_k: Option<String>,
+
+    /// Value cache element type (overrides --type-kv for V).
+    /// Values: f16, q8_0, q4_0, turbo3, turbo4, turbo2.
+    #[arg(long, env = "FOX_TYPE_V")]
+    pub type_v: Option<String>,
 
     /// Require `Authorization: Bearer <key>` on every API request.
     /// Omit to run without authentication.
@@ -127,11 +140,15 @@ pub struct ServeArgs {
     pub moe_cpu: bool,
 }
 
-fn parse_type_kv(s: &str) -> u32 {
+fn parse_kv_type(s: &str) -> u32 {
+    use crate::model_registry::kv_type;
     match s {
-        "q8_0" => 8,
-        "q4_0" => 2,
-        _ => 1, // f16
+        "q8_0"   => kv_type::Q8_0,
+        "q4_0"   => kv_type::Q4_0,
+        "turbo3" => kv_type::TURBO3,
+        "turbo4" => kv_type::TURBO4,
+        "turbo2" => kv_type::TURBO2,
+        _        => kv_type::F16,
     }
 }
 
@@ -232,7 +249,8 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         gpu_memory_fraction: args.gpu_memory_fraction,
         metrics,
         keep_alive_secs: args.keep_alive_secs,
-        type_kv: parse_type_kv(&args.type_kv),
+        type_k: parse_kv_type(args.type_k.as_deref().unwrap_or(&args.type_kv)),
+        type_v: parse_kv_type(args.type_v.as_deref().unwrap_or(&args.type_kv)),
         main_gpu: args.main_gpu,
         split_mode,
         tensor_split: args

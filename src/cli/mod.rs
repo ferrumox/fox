@@ -2,6 +2,7 @@
 
 pub mod alias;
 pub mod bench;
+pub mod bench_kv;
 pub mod list;
 pub mod models;
 pub mod ps;
@@ -39,6 +40,8 @@ pub enum Command {
     Run(run::RunArgs),
     /// Benchmark model load time and inference throughput
     Bench(bench::BenchArgs),
+    /// Compare KV cache quantization types (F16, Q8_0, TurboQuant) side-by-side
+    BenchKv(bench_kv::BenchKvArgs),
     /// Download a GGUF model from HuggingFace Hub
     Pull(pull::PullArgs),
     /// List downloaded models
@@ -59,7 +62,7 @@ pub enum Command {
 
 /// Known subcommand names — anything else is treated as `fox run <arg>`.
 const SUBCOMMANDS: &[&str] = &[
-    "serve", "run", "bench", "pull", "list", "rm", "show", "ps", "models", "search", "alias",
+    "serve", "run", "bench", "bench-kv", "pull", "list", "rm", "show", "ps", "models", "search", "alias",
     "help",
 ];
 
@@ -85,6 +88,7 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Serve(args) => serve::run_serve(args).await,
         Command::Run(args) => run::run_run(args).await,
         Command::Bench(args) => bench::run_bench(args).await,
+        Command::BenchKv(args) => bench_kv::run_bench_kv(args).await,
         Command::Pull(args) => pull::run_pull(args).await,
         Command::List(args) => list::run_list(args).await,
         Command::Rm(args) => rm::run_rm(args).await,

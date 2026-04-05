@@ -167,6 +167,22 @@ pub struct LlamaCppModel {
     pub(super) eos_token: i32,
     /// Effective per-sequence context length (tokens) used when creating the llama.cpp context.
     pub(super) effective_ctx: u32,
+    /// Whether this instance owns the model pointer and should free it on drop.
+    /// `false` when sharing weights with another `LlamaCppModel` (e.g. bench-kv).
+    owns_model: bool,
+}
+
+#[cfg(not(fox_stub))]
+impl Drop for LlamaCppModel {
+    fn drop(&mut self) {
+        // Free the context first (must happen before model is freed).
+        if let Ok(ctx) = self._ctx.lock() {
+            unsafe { ffi::llama_free(ctx.as_ptr()) };
+        }
+        if self.owns_model {
+            unsafe { ffi::llama_model_free(self._model.as_ptr()) };
+        }
+    }
 }
 
 #[cfg(not(fox_stub))]
@@ -179,7 +195,8 @@ impl LlamaCppModel {
         max_context_len: Option<u32>,
         gpu_memory_bytes: usize,
         gpu_memory_fraction: f32,
-        type_kv: u32,
+        type_k: u32,
+        type_v: u32,
         main_gpu: i32,
         split_mode: u32,
         tensor_split: &[f32],
@@ -334,8 +351,8 @@ impl LlamaCppModel {
         ctx_params.n_seq_max = n_seq;
         ctx_params.flash_attn_type = 1; // LLAMA_FLASH_ATTN_TYPE_ENABLED
         ctx_params.offload_kqv = true;
-        ctx_params.type_k = type_kv as _;
-        ctx_params.type_v = type_kv as _;
+        ctx_params.type_k = type_k as _;
+        ctx_params.type_v = type_v as _;
 
         let ctx = unsafe { ffi::llama_init_from_model(model.as_ptr(), ctx_params) };
         let ctx = NonNull::new(ctx).ok_or_else(|| {
@@ -355,6 +372,79 @@ impl LlamaCppModel {
             config,
             eos_token,
             effective_ctx: effective_max_ctx,
+            owns_model: true,
+        })
+    }
+
+    /// Create a new context from this model's weights with different KV cache types.
+    ///
+    /// The returned instance shares the underlying model pointer but owns a fresh
+    /// llama.cpp context. Use this to compare KV types without reloading weights.
+    ///
+    /// # Safety
+    /// The original model must outlive all instances returned by this method.
+    pub fn new_context(
+        &self,
+        max_batch_size: usize,
+        max_context_len: Option<u32>,
+        gpu_memory_bytes: usize,
+        gpu_memory_fraction: f32,
+        type_k: u32,
+        type_v: u32,
+    ) -> Result<Self> {
+        let model = self._model;
+
+        let mut ctx_params = unsafe { ffi::llama_context_default_params() };
+        let n_seq = (max_batch_size as u32).max(4);
+
+        let model_train_ctx =
+            unsafe { ffi::llama_model_n_ctx_train(model.as_ptr()) } as u32;
+        let effective_max_ctx = resolve_context_len(max_context_len, model_train_ctx);
+
+        let free_bytes = query_gpu_free_bytes()
+            .unwrap_or((gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize);
+        let budget_bytes = (free_bytes as f64 * gpu_memory_fraction as f64) as usize;
+        let n_head_kv = self.config.num_heads_kv;
+        let head_dim = self.config.head_dim;
+        let n_layer = self.config.num_layers;
+        // Use the actual KV type byte ratios rather than assuming F16.
+        let (k_num, k_den) = crate::kv_cache::kv_type_bytes(type_k);
+        let (v_num, v_den) = crate::kv_cache::kv_type_bytes(type_v);
+        let elems_per_token = (n_head_kv * head_dim * n_layer) as u64;
+        let bytes_per_token_u64 =
+            (elems_per_token * k_num + k_den - 1) / k_den
+            + (elems_per_token * v_num + v_den - 1) / v_den;
+        let max_tokens_by_mem = if bytes_per_token_u64 > 0 && budget_bytes > 0 {
+            (budget_bytes as u64 / bytes_per_token_u64) as u32
+        } else {
+            effective_max_ctx * n_seq
+        };
+        let n_ctx = (effective_max_ctx * n_seq)
+            .min(max_tokens_by_mem)
+            .max(effective_max_ctx);
+
+        ctx_params.n_ctx = n_ctx;
+        ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
+        ctx_params.n_seq_max = n_seq;
+        ctx_params.flash_attn_type = 1;
+        ctx_params.offload_kqv = true;
+        ctx_params.type_k = type_k as _;
+        ctx_params.type_v = type_v as _;
+
+        let ctx = unsafe { ffi::llama_init_from_model(model.as_ptr(), ctx_params) };
+        let ctx = NonNull::new(ctx)
+            .ok_or_else(|| anyhow!("llama_init_from_model failed for new_context"))?;
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let ctx_arc = Arc::new(std::sync::Mutex::new(ctx));
+        Ok(Self {
+            _model: model,
+            _ctx: ctx_arc,
+            vocab: self.vocab,
+            config: self.config.clone(),
+            eos_token: self.eos_token,
+            effective_ctx: effective_max_ctx,
+            owns_model: false, // weights are owned by the original LlamaCppModel
         })
     }
 }

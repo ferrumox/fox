@@ -3,6 +3,20 @@ use std::sync::Arc;
 
 use crate::metrics::Metrics;
 
+/// GGML type IDs for KV cache element types.
+pub mod kv_type {
+    pub const F16: u32 = 1;
+    pub const Q4_0: u32 = 2;
+    pub const Q8_0: u32 = 8;
+    /// TurboQuant 3-bit KV (3.1 bpw, ~4.9x compression). Recommended sweet spot.
+    /// Requires Flash Attention and head_dim divisible by 128.
+    pub const TURBO3: u32 = 41;
+    /// TurboQuant 4-bit KV (4.25 bpw, ~3.8x compression).
+    pub const TURBO4: u32 = 42;
+    /// TurboQuant 2-bit KV (2.1 bpw, ~6.4x compression).
+    pub const TURBO2: u32 = 43;
+}
+
 pub struct RegistryConfig {
     pub models_dir: PathBuf,
     pub max_models: usize,
@@ -15,8 +29,10 @@ pub struct RegistryConfig {
     pub metrics: Option<Arc<Metrics>>,
     /// Seconds since last use before a model is evicted. 0 = never evict by time.
     pub keep_alive_secs: u64,
-    /// KV cache element type: 1=F16 (default), 8=Q8_0, 2=Q4_0
-    pub type_kv: u32,
+    /// Key cache element type. See `kv_type` constants.
+    pub type_k: u32,
+    /// Value cache element type. See `kv_type` constants.
+    pub type_v: u32,
     /// Primary GPU index (0-based). Used when split_mode=NONE, or as the main GPU for splits.
     pub main_gpu: i32,
     /// How to distribute the model across GPUs: 0=none, 1=layer (default), 2=row.

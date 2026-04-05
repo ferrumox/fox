@@ -98,10 +98,24 @@ impl PageTable {
     }
 }
 
+/// Returns (numerator, denominator) for bytes-per-element of a KV cache type.
+/// bytes/element = num/den (exact rational representation).
+/// bytes/element = num/den (exact rational representation).
+pub fn kv_type_bytes(t: u32) -> (u64, u64) {
+    use crate::model_registry::kv_type;
+    match t {
+        kv_type::Q8_0 => (1, 1),   // 8 bits
+        kv_type::Q4_0 => (1, 2),   // 4 bits
+        kv_type::TURBO3 => (50, 128), // 3.125 bpw: 14 bits/elem × 128-block = 50 bytes
+        kv_type::TURBO4 => (68, 128), // 4.25 bpw:  68 bytes / 128 elements
+        kv_type::TURBO2 => (34, 128), // 2.125 bpw: 34 bytes / 128 elements
+        _ => (2, 1), // F16 = 2 bytes
+    }
+}
+
 /// Configuration for KV cache sizing.
 /// Blocks = gpu_memory_bytes * fraction / bytes_per_block
-/// bytes_per_block = block_size × num_layers × num_heads_kv × head_dim × 2 × bytes_per_element
-/// (×2 for K+V; bytes_per_element: F16=2, Q8_0=1, Q4_0=1)
+/// bytes_per_block = block_size × num_layers × num_heads_kv × head_dim × (bytes_K + bytes_V)
 fn compute_total_blocks(
     gpu_memory_bytes: usize,
     gpu_memory_fraction: f32,
@@ -109,18 +123,16 @@ fn compute_total_blocks(
     num_layers: usize,
     num_heads_kv: usize,
     head_dim: usize,
-    type_kv: u32,
+    type_k: u32,
+    type_v: u32,
 ) -> usize {
-    let bytes_per_element: usize = match type_kv {
-        8 | 2 => 1, // Q8_0 or Q4_0 ≈ 1 byte/element
-        _ => 2,     // F16 = 2 bytes
-    };
-    let bytes_per_block = block_size
-        * num_layers
-        * num_heads_kv
-        * head_dim
-        * 2 // K + V
-        * bytes_per_element;
+    let elements = (block_size * num_layers * num_heads_kv * head_dim) as u64;
+    let (k_num, k_den) = kv_type_bytes(type_k);
+    let (v_num, v_den) = kv_type_bytes(type_v);
+    // Compute bytes for K and V tensors separately, ceiling to avoid underestimating.
+    let k_bytes = (elements * k_num + k_den - 1) / k_den;
+    let v_bytes = (elements * v_num + v_den - 1) / v_den;
+    let bytes_per_block = (k_bytes + v_bytes) as usize;
     let available = (gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize;
     (available / bytes_per_block).max(1)
 }
@@ -155,13 +167,15 @@ impl KVCacheManager {
     /// * `gpu_memory_bytes` - Total GPU memory in bytes (or fallback for CPU)
     /// * `gpu_memory_fraction` - Fraction to use for KV cache (0.0-1.0)
     /// * `block_size` - Tokens per block
-    /// * `type_kv` - KV cache element type: 1=F16, 8=Q8_0, 2=Q4_0
+    /// * `type_k` - Key cache element type (see `kv_type` constants)
+    /// * `type_v` - Value cache element type (see `kv_type` constants)
     pub fn new(
         model_config: &ModelConfig,
         gpu_memory_bytes: usize,
         gpu_memory_fraction: f32,
         block_size: usize,
-        type_kv: u32,
+        type_k: u32,
+        type_v: u32,
     ) -> Self {
         let total_blocks = compute_total_blocks(
             gpu_memory_bytes,
@@ -170,7 +184,8 @@ impl KVCacheManager {
             model_config.num_layers,
             model_config.num_heads_kv,
             model_config.head_dim,
-            type_kv,
+            type_k,
+            type_v,
         );
 
         let free_list: Vec<BlockId> = (0..total_blocks).collect();
@@ -344,7 +359,7 @@ mod tests {
     fn test_allocate_free() {
         let config = test_model_config();
         let gpu_bytes = 8 * 1024 * 1024 * 1024; // 8 GB
-        let mgr = KVCacheManager::new(&config, gpu_bytes, 0.85, 16, 1);
+        let mgr = KVCacheManager::new(&config, gpu_bytes, 0.85, 16, 1, 1);
 
         assert!(mgr.can_allocate(10));
         let ids = mgr.allocate(10).unwrap();
@@ -357,7 +372,7 @@ mod tests {
     #[test]
     fn test_memory_usage() {
         let config = test_model_config();
-        let mgr = KVCacheManager::new(&config, 1_000_000_000, 0.5, 16, 1);
+        let mgr = KVCacheManager::new(&config, 1_000_000_000, 0.5, 16, 1, 1);
 
         let ids = mgr.allocate(1).unwrap();
         let usage = mgr.memory_usage();
@@ -368,7 +383,7 @@ mod tests {
     #[test]
     fn test_ref_count_sharing() {
         let config = test_model_config();
-        let mgr = KVCacheManager::new(&config, 1_000_000_000, 0.5, 16, 1);
+        let mgr = KVCacheManager::new(&config, 1_000_000_000, 0.5, 16, 1, 1);
 
         let ids = mgr.allocate(1).unwrap();
         let id = ids[0];
@@ -390,7 +405,7 @@ mod tests {
     #[test]
     fn test_copy_on_write() {
         let config = test_model_config();
-        let mgr = KVCacheManager::new(&config, 1_000_000_000, 0.5, 16, 1);
+        let mgr = KVCacheManager::new(&config, 1_000_000_000, 0.5, 16, 1, 1);
 
         let ids = mgr.allocate(1).unwrap();
         let id = ids[0];

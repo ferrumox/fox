@@ -114,6 +114,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         gpu_memory_bytes_load,
         0.85,
         1,
+        1,
         args.main_gpu,
         split_mode,
         &tensor_split_parsed,
@@ -131,6 +132,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         gpu_memory_bytes,
         0.85,
         16,
+        1,
         1,
     ));
     let scheduler = Arc::new(crate::scheduler::Scheduler::new(kv_cache.clone(), 1));

@@ -190,6 +190,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         gpu_memory_bytes_load,
         args.gpu_memory_fraction,
         1,
+        1,
         args.main_gpu,
         split_mode,
         &tensor_split_parsed,
@@ -206,6 +207,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         gpu_memory_bytes,
         args.gpu_memory_fraction,
         args.block_size,
+        1,
         1,
     ));
     let scheduler = std::sync::Arc::new(crate::scheduler::Scheduler::new(kv_cache.clone(), 1));

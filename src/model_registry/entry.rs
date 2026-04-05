@@ -37,7 +37,7 @@ impl EngineEntry {
 
         let cfg = model.model_config();
         // Small KV cache: 4 MiB, fraction 0.9, block_size 16
-        let kv = Arc::new(KVCacheManager::new(&cfg, 4 * 1024 * 1024, 0.9, 16, 1));
+        let kv = Arc::new(KVCacheManager::new(&cfg, 4 * 1024 * 1024, 0.9, 16, 1, 1));
         let sched = Arc::new(Scheduler::new(kv.clone(), 4));
         let engine = Arc::new(crate::engine::InferenceEngine::new(
             model,
