@@ -3,7 +3,8 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc*'
 
 env:
   CARGO_TERM_COLOR: always
@@ -82,7 +83,10 @@ jobs:
         if: runner.os == 'Linux' && !matrix.use_cross
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y cmake clang libclang-dev ninja-build libvulkan-dev glslang-tools
+          # No libvulkan-dev: CI runners have no GPU so Vulkan is not useful,
+          # and build.rs auto-enables GGML_VULKAN when vulkan.h is present,
+          # which then requires glslc (not easily available on Ubuntu 22.04).
+          sudo apt-get install -y cmake clang libclang-dev ninja-build
 
       - name: Install build dependencies (macOS)
         if: runner.os == 'macOS'
@@ -124,6 +128,10 @@ jobs:
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] \
             https://repo.radeon.com/rocm/apt/6.2 jammy main" \
             | sudo tee /etc/apt/sources.list.d/rocm.list
+          # Exclude Ubuntu's stub ROCm packages from the default repos so they
+          # don't conflict with the versions ROCm 6.2 requires.
+          printf 'Package: rocminfo rocm-cmake rocm-device-libs\nPin: release o=Ubuntu\nPin-Priority: -1\n' \
+            | sudo tee /etc/apt/preferences.d/block-ubuntu-rocm
           sudo apt-get update -q
           sudo apt-get install -y rocm-hip-sdk
           echo "/opt/rocm/bin" >> "$GITHUB_PATH"
