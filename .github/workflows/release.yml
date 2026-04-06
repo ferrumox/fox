@@ -82,7 +82,7 @@ jobs:
         if: runner.os == 'Linux' && !matrix.use_cross
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y cmake clang libclang-dev ninja-build libvulkan-dev glslc
+          sudo apt-get install -y cmake clang libclang-dev ninja-build libvulkan-dev glslang-tools
 
       - name: Install build dependencies (macOS)
         if: runner.os == 'macOS'
