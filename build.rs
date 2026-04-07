@@ -52,6 +52,25 @@ fn main() {
         return;
     }
 
+    // ── patch vendor sources ──────────────────────────────────────────────────
+    // ROCm 6.2.x ships with HIP_VERSION >= 60200000 but does NOT include
+    // hip/hip_fp8.h or __hip_fp8_e4m3. The guard in llama.cpp's vendors/hip.h
+    // incorrectly assumes 6.2 has FP8 support. Patch the file in-place before
+    // invoking cmake so we don't need to maintain a fork of llama.cpp.
+    let hip_compat_h = llama_root.join("ggml/src/ggml-cuda/vendors/hip.h");
+    if hip_compat_h.exists() {
+        if let Ok(src) = std::fs::read_to_string(&hip_compat_h) {
+            let patched = src.replace(
+                "#if HIP_VERSION >= 60200000\n#include <hip/hip_fp8.h>\ntypedef __hip_fp8_e4m3 __nv_fp8_e4m3;\n#define FP8_AVAILABLE\n#endif // HIP_VERSION >= 60200000",
+                "#if HIP_VERSION >= 60300000\n#include <hip/hip_fp8.h>\ntypedef __hip_fp8_e4m3 __nv_fp8_e4m3;\n#define FP8_AVAILABLE\n#endif // HIP_VERSION >= 60300000",
+            );
+            if patched != src {
+                let _ = std::fs::write(&hip_compat_h, &patched);
+                println!("cargo:warning=Patched vendors/hip.h: FP8 guard raised to ROCm 6.3 (HIP_VERSION >= 60300000)");
+            }
+        }
+    }
+
     // ── cmake configuration ───────────────────────────────────────────────────
     let mut cmake_config = cmake::Config::new(&llama_root);
     cmake_config
@@ -102,12 +121,55 @@ fn main() {
                 let hipcc = env::var("HIPCC").ok().or_else(|| which_cmd("hipcc"));
                 let rocm_enabled = if let Some(ref hipcc_path) = hipcc {
                     if std::path::Path::new(hipcc_path).exists() {
-                        println!(
-                            "cargo:warning=ROCm/HIP found at {hipcc_path} — building libggml-hip.so"
-                        );
-                        cmake_config.define("GGML_HIP", "ON");
-                        cmake_config.define("CMAKE_HIP_COMPILER", hipcc_path);
-                        true
+                        // CMake >= 3.21 requires a real Clang, not the hipcc wrapper.
+                        // Try several candidate paths in order of preference:
+                        //   1. Derived from hipcc's location (works for old and new ROCm layouts)
+                        //   2. /opt/rocm/lib/llvm/bin/clang  (ROCm 6.x)
+                        //   3. /opt/rocm/llvm/bin/clang      (ROCm 5.x)
+                        //   4. amdclang in PATH              (ROCm 6.x alias)
+                        let hipcc_p = std::path::Path::new(hipcc_path);
+                        let derived_clang = hipcc_p.parent().and_then(|bin| {
+                            // bin/../llvm/bin/clang   →  /opt/rocm/llvm/bin/clang
+                            // bin/../lib/llvm/bin/clang → /opt/rocm/lib/llvm/bin/clang
+                            for rel in &["../llvm/bin/clang", "../lib/llvm/bin/clang"] {
+                                let candidate = bin.join(rel);
+                                if let Ok(p) = candidate.canonicalize() {
+                                    if p.exists() {
+                                        return Some(p.to_string_lossy().into_owned());
+                                    }
+                                }
+                            }
+                            None
+                        });
+                        let rocm_clang = derived_clang
+                            .or_else(|| {
+                                let p = std::path::Path::new("/opt/rocm/lib/llvm/bin/clang");
+                                p.exists().then(|| p.to_string_lossy().into_owned())
+                            })
+                            .or_else(|| {
+                                let p = std::path::Path::new("/opt/rocm/llvm/bin/clang");
+                                p.exists().then(|| p.to_string_lossy().into_owned())
+                            })
+                            .or_else(|| which_cmd("amdclang"));
+
+                        match rocm_clang {
+                            Some(ref clang_path) => {
+                                println!(
+                                    "cargo:warning=ROCm/HIP found at {hipcc_path} — building libggml-hip.so (HIP compiler: {clang_path})"
+                                );
+                                cmake_config.define("GGML_HIP", "ON");
+                                cmake_config.define("CMAKE_HIP_COMPILER", clang_path);
+                                true
+                            }
+                            None => {
+                                println!(
+                                    "cargo:warning=ROCm/HIP found at {hipcc_path} but no Clang compiler located \
+                                     (CMake 3.21+ requires Clang, not hipcc). Skipping ROCm backend. \
+                                     Set AMDCLANG or ensure /opt/rocm/lib/llvm/bin/clang exists."
+                                );
+                                false
+                            }
+                        }
                     } else {
                         false
                     }
