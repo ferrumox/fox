@@ -39,6 +39,10 @@ Note: fox uses the same model names as the files on disk (e.g., `Llama-3.2-3B-In
 | `POST` | `/api/show` | Show model details |
 | `DELETE` | `/api/delete` | Delete a model from disk |
 | `POST` | `/api/pull` | Pull a model from HuggingFace (SSE) |
+| `POST` | `/api/copy` | Duplicate a model under a new name |
+| `POST` | `/api/create` | Create a model from a Modelfile |
+| `POST` | `/api/models/:name/load` | Load a model into memory on demand |
+| `POST` | `/api/models/:name/unload` | Evict a loaded model from memory |
 | `GET` | `/api/version` | Server version |
 
 ---

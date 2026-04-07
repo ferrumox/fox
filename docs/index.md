@@ -37,9 +37,12 @@ curl http://localhost:8080/v1/chat/completions \
 ### CLI reference
 - [fox serve](./cli/serve.md) — start the inference server
 - [fox run](./cli/run.md) — one-shot inference and interactive REPL
-- [fox pull / list / show / rm / search / models](./cli/pull.md) — model management
+- [fox pull / list / show / search](./cli/pull.md) — download and discover models
+- [fox rm](./cli/rm.md) — remove a downloaded model
+- [fox models](./cli/models.md) — browse the curated model catalogue
 - [fox alias](./cli/alias.md) — manage model name aliases
 - [fox bench](./cli/bench.md) — measure load time and throughput
+- [fox bench-kv](./cli/bench-kv.md) — compare KV cache quantization types side by side
 
 ### Configuration
 - [Configuration](./configuration.md) — config file, environment variables, model aliases
@@ -67,10 +70,14 @@ curl http://localhost:8080/v1/chat/completions \
 | Continuous batching | ✓ | — |
 | Prefix caching | Block-level (vLLM-style) | — |
 | Multi-model LRU | ✓ | ✓ |
+| Multi-GPU | ✓ (layer / row / tensor split) | — |
+| TurboQuant KV cache | ✓ (4–6× more context) | — |
+| MoE CPU offload | ✓ | — |
 | OpenAI API | ✓ | ✓ |
 | Ollama API | ✓ | ✓ |
 | Function calling | ✓ | ✓ |
 | Prometheus metrics | ✓ | — |
+| CORS | ✓ | — |
 | TTFT P50 (3B, 4 workers) | **87ms** | 310ms |
 | Throughput (3B, 4 workers) | **312 tok/s** | 148 tok/s |
 

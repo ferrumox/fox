@@ -84,7 +84,7 @@ Building from source gives you full control over compile-time flags and lets you
 | CMake | 3.14 | Always |
 | C++17 compiler (GCC/Clang/MSVC) | — | Always |
 | CUDA Toolkit | 11.8 | NVIDIA GPU on Linux/Windows |
-| ROCm / HIP SDK | 6.1 | AMD GPU on Linux |
+| ROCm / HIP SDK | 6.2+ | AMD GPU on Linux |
 | Vulkan SDK (`libvulkan-dev` + `glslc`) | 1.3 | Vulkan on Linux |
 | Xcode Command Line Tools | — | Metal on macOS |
 

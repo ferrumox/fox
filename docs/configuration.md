@@ -35,12 +35,20 @@ max_models = 1
 keep_alive_secs = 300
 
 # Engine
-max_context_len = 4096
 max_batch_size = 32
 gpu_memory_fraction = 0.85
 block_size = 16
 swap_fraction = 0.0
-type_kv = "f16"   # f16 | q8_0 | q4_0
+type_kv = "f16"   # f16 | q8_0 | q4_0 | turbo3 | turbo4 | turbo2
+# type_k = "f16"          # override K cache type independently
+# type_v = "turbo3"       # override V cache type independently
+# max_context_len = 8192  # auto-detected from model if omitted
+
+# Multi-GPU
+# split_mode = "layer"    # none | layer | row  (default: layer)
+# main_gpu = 0
+# tensor_split = "3,1"    # manual VRAM weights (omit = auto-balance)
+# moe_cpu = false         # offload MoE expert layers to CPU RAM
 
 # System prompt
 system_prompt = "You are a helpful assistant."
@@ -103,10 +111,16 @@ Every `fox serve` option can be set via an environment variable. Environment var
 | `FOX_MODEL_PATH` | `--model-path` | — |
 | `FOX_MAX_MODELS` | `--max-models` | `1` |
 | `FOX_KEEP_ALIVE_SECS` | `--keep-alive-secs` | `300` |
-| `FOX_MAX_CONTEXT_LEN` | `--max-context-len` | `4096` |
+| `FOX_MAX_CONTEXT_LEN` | `--max-context-len` | auto |
 | `FOX_MAX_BATCH_SIZE` | `--max-batch-size` | `32` |
 | `FOX_GPU_MEMORY_FRACTION` | `--gpu-memory-fraction` | `0.85` |
 | `FOX_TYPE_KV` | `--type-kv` | `f16` |
+| `FOX_TYPE_K` | `--type-k` | — |
+| `FOX_TYPE_V` | `--type-v` | — |
+| `FOX_MAIN_GPU` | `--main-gpu` | `0` |
+| `FOX_SPLIT_MODE` | `--split-mode` | `layer` |
+| `FOX_TENSOR_SPLIT` | `--tensor-split` | — |
+| `FOX_MOE_CPU` | `--moe-cpu` | `false` |
 | `FOX_BLOCK_SIZE` | `--block-size` | `16` |
 | `FOX_SWAP_FRACTION` | `--swap-fraction` | `0.0` |
 | `FOX_SYSTEM_PROMPT` | `--system-prompt` | `"You are a helpful assistant."` |

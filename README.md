@@ -227,6 +227,8 @@ fox run "Explain ownership in Rust"  # single-shot
 fox list                     # list downloaded models
 fox show llama3.2            # model info: architecture, quantization, size
 fox ps                       # list currently loaded models
+fox models                   # browse curated model catalogue
+fox rm llama3.2              # remove a downloaded model
 
 # Manage aliases
 fox alias set llama3 Llama-3.2-3B-Instruct-Q4_K_M
@@ -235,6 +237,10 @@ fox alias list
 # Benchmark
 fox bench llama3.2
 fox bench llama3.2 --runs 10
+
+# Benchmark KV cache quantization types side by side
+fox bench-kv llama3.2
+fox bench-kv llama3.2 --types f16,q8_0,turbo3,turbo4,turbo2 --runs 3
 ```
 
 ---
@@ -246,15 +252,20 @@ fox bench llama3.2 --runs 10
 | POST | `/v1/chat/completions` | Chat completions — streaming + non-streaming (OpenAI) |
 | POST | `/v1/completions` | Text completions (OpenAI) |
 | POST | `/v1/embeddings` | Embeddings (OpenAI) |
-| GET | `/v1/models` | List all models on disk |
+| GET | `/v1/models` | List all models on disk (OpenAI) |
+| GET | `/v1/models/:model` | Single model info (OpenAI) |
 | POST | `/api/chat` | Chat — NDJSON streaming (Ollama) |
 | POST | `/api/generate` | Generate — NDJSON streaming (Ollama) |
 | POST | `/api/embed` | Embeddings (Ollama) |
-| GET | `/api/tags` | List models (Ollama) |
+| GET | `/api/tags` | List models on disk (Ollama) |
 | GET | `/api/ps` | List loaded models (Ollama) |
 | POST | `/api/show` | Model metadata (Ollama) |
-| DELETE | `/api/delete` | Remove a model (Ollama) |
+| DELETE | `/api/delete` | Remove a model file (Ollama) |
 | POST | `/api/pull` | Pull a model from HuggingFace (SSE) |
+| POST | `/api/copy` | Duplicate a model under a new name (Ollama) |
+| POST | `/api/create` | Create a model from a Modelfile (Ollama) |
+| POST | `/api/models/:name/load` | Load a model into memory on demand |
+| POST | `/api/models/:name/unload` | Evict a loaded model from memory |
 | GET | `/api/version` | Server version — for Ollama client detection |
 | GET | `/health` | Health + KV cache metrics |
 | GET | `/metrics` | Prometheus scrape endpoint |
@@ -270,9 +281,13 @@ fox bench llama3.2 --runs 10
 - **Lazy loading** — no need to specify a model upfront; fox loads it on first request
 - **Prefix caching** — shared system prompts are processed once and reused across requests
 - **Continuous batching** — multiple concurrent users processed in parallel, not serialized
+- **Multi-GPU support** — automatic layer-split distribution across all GPUs; configurable via `--split-mode`, `--tensor-split`, `--main-gpu`
+- **TurboQuant KV cache** — `turbo3` (3.1 bpw, ~4.9× context), `turbo4`, `turbo2`; extends context by 4–6× with minimal quality loss
+- **MoE CPU offload** — run DeepSeek, Mixtral and other MoE models with expert layers in RAM via `--moe-cpu`
 - **Function calling** and **structured JSON output** (OpenAI spec)
 - **Request cancellation** — closing the connection immediately frees GPU memory
-- **KV cache quantization** — `--type-kv q8_0` or `q4_0` cuts VRAM usage with minimal quality loss
+- **KV cache quantization** — `f16`, `q8_0`, `q4_0`, `turbo3`, `turbo4`, `turbo2`
+- **CORS** — permissive headers on all routes; web apps can call the API directly
 - **API key authentication** — optional `FOX_API_KEY` for access control
 - **Prometheus metrics** — latency, throughput, KV cache usage out of the box
 - **Config file** at `~/.config/ferrumox/config.toml`
@@ -287,22 +302,28 @@ All flags can also be set via environment variable or `~/.config/ferrumox/config
 
 | Flag | Env | Default | Description |
 |------|-----|---------|-------------|
-| `--model-path` | `FOX_MODEL_PATH` | — | GGUF model to pre-load (optional) |
-| `--port` | `FOX_PORT` | 8080 | Bind port |
-| `--host` | `FOX_HOST` | 0.0.0.0 | Bind host |
-| `--max-models` | `FOX_MAX_MODELS` | 1 | Max models in memory simultaneously |
-| `--keep-alive-secs` | `FOX_KEEP_ALIVE_SECS` | 300 | Evict idle models after N seconds |
-| `--max-context-len` | `FOX_MAX_CONTEXT_LEN` | 4096 | Context window size |
-| `--gpu-memory-fraction` | `FOX_GPU_MEMORY_FRACTION` | 0.85 | Fraction of GPU RAM for KV cache |
-| `--type-kv` | `FOX_TYPE_KV` | `f16` | KV cache precision: `f16`, `q8_0`, or `q4_0` |
-| `--max-batch-size` | `FOX_MAX_BATCH_SIZE` | 32 | Continuous batch size |
-| `--swap-fraction` | `FOX_SWAP_FRACTION` | 0.0 | GPU↔CPU KV-cache swap space fraction |
-| `--block-size` | `FOX_BLOCK_SIZE` | 16 | Tokens per KV block |
-| `--system-prompt` | `FOX_SYSTEM_PROMPT` | — | System prompt injected in every request |
+| `--model-path` | `FOX_MODEL_PATH` | — | GGUF model to pre-load (optional; supports nested paths) |
+| `--port` | `FOX_PORT` | `8080` | Bind port |
+| `--host` | `FOX_HOST` | `0.0.0.0` | Bind host |
+| `--max-models` | `FOX_MAX_MODELS` | `1` | Max models in memory simultaneously (LRU eviction) |
+| `--keep-alive-secs` | `FOX_KEEP_ALIVE_SECS` | `300` | Evict idle models after N seconds (0 = never) |
+| `--max-context-len` | `FOX_MAX_CONTEXT_LEN` | auto | Context window size (auto-detects from model if omitted) |
+| `--gpu-memory-fraction` | `FOX_GPU_MEMORY_FRACTION` | `0.85` | Fraction of GPU RAM allocated to the KV cache |
+| `--type-kv` | `FOX_TYPE_KV` | `f16` | KV cache type for both K and V: `f16`, `q8_0`, `q4_0`, `turbo3`, `turbo4`, `turbo2` |
+| `--type-k` | `FOX_TYPE_K` | — | Override K cache type independently (same values as `--type-kv`) |
+| `--type-v` | `FOX_TYPE_V` | — | Override V cache type independently (same values as `--type-kv`) |
+| `--main-gpu` | `FOX_MAIN_GPU` | `0` | Primary GPU index (0-based) |
+| `--split-mode` | `FOX_SPLIT_MODE` | `layer` | Multi-GPU split: `none`, `layer` (layer distribution), `row` (tensor-parallel) |
+| `--tensor-split` | `FOX_TENSOR_SPLIT` | auto | Comma-separated VRAM proportions, e.g. `"3,1"` for 75%/25% (omit for auto-balance) |
+| `--moe-cpu` | `FOX_MOE_CPU` | `false` | Offload MoE expert layers to CPU RAM (DeepSeek, Mixtral) |
+| `--max-batch-size` | `FOX_MAX_BATCH_SIZE` | `32` | Continuous batch size |
+| `--swap-fraction` | `FOX_SWAP_FRACTION` | `0.0` | GPU↔CPU KV-cache swap space fraction |
+| `--block-size` | `FOX_BLOCK_SIZE` | `16` | Tokens per KV block |
+| `--system-prompt` | `FOX_SYSTEM_PROMPT` | `"You are a helpful assistant."` | System prompt injected in every request |
 | `--api-key` | `FOX_API_KEY` | — | Require `Authorization: Bearer <key>` on all requests |
 | `--hf-token` | `HF_TOKEN` | — | HuggingFace token for private repos |
 | `--alias-file` | `FOX_ALIAS_FILE` | `~/.config/ferrumox/aliases.toml` | Short name → model stem mapping |
-| `--json-logs` | `FOX_JSON_LOGS` | false | Structured JSON logs |
+| `--json-logs` | `FOX_JSON_LOGS` | `false` | Structured JSON logs |
 
 ### Config file (`~/.config/ferrumox/config.toml`)
 
@@ -311,6 +332,19 @@ port = 8080
 max_models = 3
 keep_alive_secs = 300
 system_prompt = "You are a helpful assistant."
+
+# KV cache quantization (f16, q8_0, q4_0, turbo3, turbo4, turbo2)
+type_kv = "turbo3"
+# type_k = "turbo3"   # override K independently
+# type_v = "f16"      # override V independently
+
+# Multi-GPU
+split_mode = "layer"   # none | layer | row
+# main_gpu = 0
+# tensor_split = "3,1" # manual VRAM proportions
+
+# MoE CPU offload (DeepSeek, Mixtral)
+# moe_cpu = true
 ```
 
 ### Aliases (`~/.config/ferrumox/aliases.toml`)
@@ -393,7 +427,7 @@ fox/
 │   ├── scheduler/           # Continuous batching + prefix cache
 │   ├── kv_cache/            # PageTable, ref-counted block manager
 │   ├── engine/              # Inference engine, sampling, output filtering
-│   └── cli/                 # Subcommands: serve, run, pull, list, show, ps
+│   └── cli/                 # Subcommands: serve, run, pull, list, show, ps, search, alias, bench, bench-kv, models, rm
 ├── examples/
 │   ├── curl.sh              # curl examples for all API routes
 │   ├── langchain.py         # LangChain integration
@@ -437,7 +471,7 @@ make download-model  Download default model (Llama-3.2-3B Q4_K_M)
 |---------|-------------|
 | CPU | x86_64 or arm64, AVX2 |
 | CUDA | CUDA 12.x, Linux/Windows x86_64 |
-| ROCm | ROCm 6.1+, Linux x86_64 |
+| ROCm | ROCm 6.2+, Linux x86_64 |
 | Metal | macOS 13+, Apple Silicon |
 | Vulkan | Vulkan SDK 1.3+, Linux or Windows x86_64 |
 

@@ -61,6 +61,65 @@ The block pool is allocated at startup based on `--gpu-memory-fraction`. The tot
 
 ---
 
+## Multi-GPU support
+
+fox automatically distributes model layers across all available GPUs when multiple GPUs are present — no configuration required for the default behaviour.
+
+### Split modes
+
+| Mode | Flag value | Description |
+|------|-----------|-------------|
+| Layer split | `layer` (default) | Consecutive transformer layers are assigned to GPUs proportionally to their available VRAM. Best for most workloads. |
+| Row split | `row` | Each layer is split across GPUs using tensor parallelism. Lower latency for very large models but higher interconnect overhead. |
+| Single GPU | `none` | Disables distribution; the model runs entirely on `--main-gpu`. |
+
+```bash
+# Layer split, auto-balance VRAM
+fox serve --split-mode layer
+
+# Two GPUs, manual 3:1 ratio
+fox serve --split-mode layer --tensor-split "3,1"
+
+# Use GPU 1 as primary for single-GPU mode
+fox serve --split-mode none --main-gpu 1
+```
+
+### MoE CPU offload
+
+For Mixture-of-Experts models (DeepSeek, Mixtral, and others), fox can offload the expert weight tensors to CPU RAM while keeping the attention layers on GPU:
+
+```bash
+fox serve --moe-cpu
+```
+
+This lets you run large MoE models on hardware where the full model wouldn't fit in VRAM. Throughput is lower than full-GPU operation because expert weights must be transferred from RAM on each forward pass, but quality is identical.
+
+---
+
+## TurboQuant KV cache
+
+TurboQuant is a high-compression quantization scheme for the KV cache that extends the usable context length by 4–6× compared to the default `f16` precision.
+
+| Type | Bits/token | Compression vs f16 | Recommended use |
+|------|-----------|-------------------|-----------------|
+| `turbo3` | ~3.1 | **~4.9×** | Default choice — best balance of compression and quality |
+| `turbo4` | ~4.25 | ~3.8× | Higher quality, slightly less compression |
+| `turbo2` | ~2.1 | ~6.4× | Maximum compression; some quality degradation |
+
+**Requirements:** Flash attention + `head_dim % 128 == 0`. Most modern models (Llama 3, Gemma 3, Qwen 2.5, Mistral) qualify.
+
+```bash
+# Enable TurboQuant (recommended)
+fox serve --type-kv turbo3
+
+# Asymmetric: full precision for K, TurboQuant for V
+fox serve --type-k f16 --type-v turbo3
+```
+
+Use `fox bench-kv <model>` to measure the throughput and context gain of each KV type on your specific hardware.
+
+---
+
 ## Multi-model serving
 
 fox can hold multiple models in memory simultaneously, routing each request to the appropriate model by the `model` field in the request.

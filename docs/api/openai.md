@@ -16,6 +16,7 @@ fox implements the OpenAI REST API. Any application built with the OpenAI Python
 | `POST` | `/v1/completions` | Text completion |
 | `POST` | `/v1/embeddings` | Text embedding generation |
 | `GET` | `/v1/models` | List available models |
+| `GET` | `/v1/models/:model` | Get single model info |
 | `GET` | `/health` | Server health and status |
 | `GET` | `/metrics` | Prometheus metrics |
 
@@ -233,6 +234,25 @@ List all GGUF model files in the models directory.
 ```
 
 The `id` field is the filename stem (without `.gguf`). Use this value as the `model` field in inference requests.
+
+---
+
+## GET /v1/models/:model
+
+Retrieve information about a single model.
+
+### Response
+
+```json
+{
+  "id": "Llama-3.2-3B-Instruct-Q4_K_M",
+  "object": "model",
+  "created": 1741824000,
+  "owned_by": "fox"
+}
+```
+
+Returns `404` with an OpenAI-format error body if the model file does not exist on disk.
 
 ---
 

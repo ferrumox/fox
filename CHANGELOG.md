@@ -7,7 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [1.0.0] - 2026-03-25
+
+### Added
+
+- **ROCm/HIP backend** — AMD GPU support on Linux via the ROCm HIP runtime. Detected
+  automatically at build time when `hipcc` is found in `PATH` or via the `HIPCC` environment
+  variable. Produces `libggml-hip.so` alongside the binary; no recompilation needed at runtime.
+  A dedicated release tarball (`fox-*-linux-x86_64-rocm.tar.gz`) is published for each release.
+  Priority order: CUDA → ROCm → Vulkan → CPU.
+
+- **Vulkan backend on Linux** — Vulkan GPU support is now built on Linux when the Vulkan
+  toolchain is available (`glslc` in `PATH`, `VULKAN_SDK` env var, or system headers at
+  `/usr/include/vulkan/vulkan.h`). Previously Vulkan was only compiled for Windows releases.
+  Install prerequisites: `sudo apt install libvulkan-dev glslc`. The Linux release tarball now
+  includes `libggml-vulkan.so`.
+
+- **Multi-GPU support** — the model is automatically distributed across all available GPUs
+  using `LLAMA_SPLIT_MODE_LAYER` (layer splitting proportional to each GPU's free VRAM).
+  No configuration required — works transparently with one or multiple GPUs.
+
+  New flags in `fox serve`, `fox run`, `fox bench` and `fox bench-kv`:
+  - `--split-mode <none|layer|row>` / `FOX_SPLIT_MODE` — distribution mode (default: `layer`)
+  - `--main-gpu <idx>` / `FOX_MAIN_GPU` — primary GPU when using `none` mode (default: `0`)
+  - `--tensor-split <"3,1">` / `FOX_TENSOR_SPLIT` — manual VRAM proportions (omit = auto-balance)
+
+  All three settings are persistable in `~/.config/ferrumox/config.toml` as `split_mode`,
+  `main_gpu` and `tensor_split`. The KV cache VRAM budget automatically sums across all GPUs
+  when `split_mode != none`.
+
+- **TurboQuant KV cache quantization** — three new KV cache types that trade a small quality
+  loss for a large increase in usable context length. Requires flash attention and
+  `head_dim % 128 == 0` (most modern models qualify):
+  - `turbo3` — 3.1 bpw, ~4.9× compression vs f16. **Recommended sweet spot.**
+  - `turbo4` — 4.25 bpw, ~3.8× compression.
+  - `turbo2` — 2.1 bpw, ~6.4× compression (most aggressive, perceptible quality loss).
+
+  New flags in `fox serve` and `fox run`:
+  - `--type-kv <type>` / `FOX_TYPE_KV` — quantization for both K and V (default: `f16`).
+  - `--type-k <type>` / `FOX_TYPE_K` — override K cache type independently.
+  - `--type-v <type>` / `FOX_TYPE_V` — override V cache type independently.
+
+  All existing types (`f16`, `q8_0`, `q4_0`) continue to work unchanged.
+
+- **`fox bench-kv <model>`** — new subcommand to compare KV cache quantization types
+  side-by-side without reloading weights. Model weights are loaded once; a fresh llama.cpp
+  context is created for each KV type. The output table shows available KV blocks, maximum
+  context tokens, generation throughput (tok/s), TTFT, and compression ratio versus f16.
+  Supports `--types f16,q8_0,turbo3,turbo4,turbo2`, `--runs N`, and `--max-context-len`.
+
+- **`fox models`** — browse the curated model catalogue. Displays a table with model name,
+  size (GB), tags, and description. Useful for discovering popular GGUF models without leaving
+  the terminal.
+
+- **`fox rm <model>`** — remove a downloaded model file interactively. Resolves the target
+  by stem or filename match; prompts for confirmation unless `-y` is passed. Accepts `--path`
+  to search a custom directory.
+
+- **MoE CPU offload** — expert tensors in Mixture-of-Experts models (DeepSeek, Mixtral, etc.)
+  can be pinned to CPU RAM via `--moe-cpu` / `FOX_MOE_CPU`. Attention layers remain on GPU;
+  expert weight tensors are read from RAM on demand. Enables running large MoE models on GPUs
+  with limited VRAM. Persistable as `moe_cpu = true` in `config.toml`.
+
+- **CORS support** — all routes now respond with permissive CORS headers (`allow-origin: *`,
+  `allow-methods: GET/POST/DELETE/OPTIONS`, `allow-headers: *`) via `tower-http`. Required
+  for web apps making direct API calls to the server.
+
+- **Request parameter validation** — `POST /v1/chat/completions` validates `temperature`,
+  `top_p`, and `repetition_penalty` before processing. Returns HTTP 400 with an OpenAI-format
+  error body on invalid values.
+
+- **`POST /api/models/:name/load`** — load a model into memory on demand via HTTP.
+
+- **`POST /api/models/:name/unload`** — evict a loaded model from memory via HTTP. Returns
+  404 if the model was not loaded.
+
+- **VRAM pre-load estimation** — before loading a model, fox estimates the required VRAM
+  (`file_size × 1.8`) and logs a warning with actionable suggestions when it may not fit.
 
 ### Fixed
 
@@ -32,60 +108,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CI: ROCm Clang not on `PATH`** — added `/opt/rocm/lib/llvm/bin` to `$GITHUB_PATH` in
   the release workflow so CMake can auto-detect the HIP compiler without relying solely on
   `build.rs` path resolution.
-
----
-
-## [1.0.0] - 2026-03-25
-
-### Added
-
-- **ROCm/HIP backend** — AMD GPU support on Linux via the ROCm HIP runtime. Detected
-  automatically at build time when `hipcc` is found in `PATH` or via the `HIPCC` environment
-  variable. Produces `libggml-hip.so` alongside the binary; no recompilation needed at runtime.
-  A dedicated release tarball (`fox-*-linux-x86_64-rocm.tar.gz`) is published for each release.
-  Priority order: CUDA → ROCm → Vulkan → CPU.
-
-- **Vulkan backend on Linux** — Vulkan GPU support is now built on Linux when the Vulkan
-  toolchain is available (`glslc` in `PATH`, `VULKAN_SDK` env var, or system headers at
-  `/usr/include/vulkan/vulkan.h`). Previously Vulkan was only compiled for Windows releases.
-  Install prerequisites: `sudo apt install libvulkan-dev glslc`. The Linux release tarball now
-  includes `libggml-vulkan.so`.
-
-- **Multi-GPU support** — the model is automatically distributed across all available GPUs
-  using `LLAMA_SPLIT_MODE_LAYER` (layer splitting proportional to each GPU's free VRAM).
-  No configuration required — works transparently with one or multiple GPUs.
-
-  New flags in `fox serve`, `fox run` and `fox bench`:
-  - `--split-mode <none|layer|row>` / `FOX_SPLIT_MODE` — distribution mode (default: `layer`)
-  - `--main-gpu <idx>` / `FOX_MAIN_GPU` — primary GPU when using `none` mode (default: `0`)
-  - `--tensor-split <"3,1">` / `FOX_TENSOR_SPLIT` — manual VRAM proportions (omit = auto-balance)
-
-  All three settings are persistable in `~/.config/ferrumox/config.toml` as `split_mode`,
-  `main_gpu` and `tensor_split`. The KV cache VRAM budget automatically sums across all GPUs
-  when `split_mode != none`.
-
-- **MoE CPU offload** — expert tensors in Mixture-of-Experts models (DeepSeek, Mixtral, etc.)
-  can be pinned to CPU RAM via `--moe-cpu` / `FOX_MOE_CPU`. Attention layers remain on GPU;
-  expert weight tensors are read from RAM on demand. Enables running large MoE models on GPUs
-  with limited VRAM. Persistable as `moe_cpu = true` in `config.toml`.
-
-- **CORS support** — all routes now respond with permissive CORS headers (`allow-origin: *`,
-  `allow-methods: GET/POST/DELETE/OPTIONS`, `allow-headers: *`) via `tower-http`. Required
-  for web apps making direct API calls to the server.
-
-- **Request parameter validation** — `POST /v1/chat/completions` validates `temperature`,
-  `top_p`, and `repetition_penalty` before processing. Returns HTTP 400 with an OpenAI-format
-  error body on invalid values.
-
-- **`POST /api/models/:name/load`** — load a model into memory on demand via HTTP.
-
-- **`POST /api/models/:name/unload`** — evict a loaded model from memory via HTTP. Returns
-  404 if the model was not loaded.
-
-- **VRAM pre-load estimation** — before loading a model, fox estimates the required VRAM
-  (`file_size × 1.8`) and logs a warning with actionable suggestions when it may not fit.
-
-### Fixed
 
 - **`FOX_MODEL_PATH` with model in subdirectory** — fox now correctly loads a model when
   `FOX_MODEL_PATH` points to a `.gguf` file inside a subdirectory of `models_dir` (e.g.

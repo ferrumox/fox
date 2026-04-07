@@ -51,10 +51,12 @@ fox serve --json-logs --port 8080 --max-models 2 --keep-alive-secs 600
 
 | Flag | Env variable | Default | Description |
 |------|---|---|---|
-| `--max-context-len <N>` | `FOX_MAX_CONTEXT_LEN` | `4096` | Maximum context length in tokens. Larger values require more KV cache memory. |
+| `--max-context-len <N>` | `FOX_MAX_CONTEXT_LEN` | auto | Maximum context length in tokens. Auto-detected from the model's trained context if omitted. Larger values require more KV cache memory. |
 | `--max-batch-size <N>` | `FOX_MAX_BATCH_SIZE` | `32` | Maximum number of sequences processed in a single forward pass. |
 | `--gpu-memory-fraction <F>` | `FOX_GPU_MEMORY_FRACTION` | `0.85` | Fraction of GPU VRAM reserved for the KV cache. Must be between 0.0 and 1.0. The remaining memory is left for model weights and other allocations. |
-| `--type-kv <TYPE>` | `FOX_TYPE_KV` | `f16` | KV cache element type. `f16` (default), `q8_0` (saves ~50% VRAM), or `q4_0` (saves ~75% VRAM with a small quality trade-off). |
+| `--type-kv <TYPE>` | `FOX_TYPE_KV` | `f16` | KV cache element type for both K and V: `f16`, `q8_0`, `q4_0`, `turbo3`, `turbo4`, or `turbo2`. TurboQuant types require flash attention and `head_dim % 128 == 0`. |
+| `--type-k <TYPE>` | `FOX_TYPE_K` | — | Override K cache type independently (same values as `--type-kv`). Takes precedence over `--type-kv` for the K cache. |
+| `--type-v <TYPE>` | `FOX_TYPE_V` | — | Override V cache type independently (same values as `--type-kv`). Takes precedence over `--type-kv` for the V cache. |
 | `--block-size <N>` | `FOX_BLOCK_SIZE` | `16` | Number of tokens per KV cache block. Smaller blocks improve prefix cache granularity but add overhead. |
 | `--swap-fraction <F>` | `FOX_SWAP_FRACTION` | `0.0` | Fraction of GPU memory reserved for CPU↔GPU KV swap. Currently a placeholder for an upcoming feature. |
 
@@ -63,6 +65,15 @@ fox serve --json-logs --port 8080 --max-models 2 --keep-alive-secs 600
 | Flag | Env variable | Default | Description |
 |------|---|---|---|
 | `--system-prompt <TEXT>` | `FOX_SYSTEM_PROMPT` | `"You are a helpful assistant."` | Default system prompt injected at the start of every conversation that does not already include one. Pass an empty string (`""`) to disable injection. |
+
+### Multi-GPU
+
+| Flag | Env variable | Default | Description |
+|------|---|---|---|
+| `--main-gpu <N>` | `FOX_MAIN_GPU` | `0` | Primary GPU index (0-based). Used as the single GPU when `--split-mode none`, or as the main GPU for scratch buffers in other modes. |
+| `--split-mode <MODE>` | `FOX_SPLIT_MODE` | `layer` | How to distribute the model across GPUs. `none` = single GPU, `layer` = distribute consecutive transformer layers proportionally (recommended), `row` = tensor-parallel row splitting. |
+| `--tensor-split <RATIOS>` | `FOX_TENSOR_SPLIT` | auto | Comma-separated VRAM allocation weights per GPU, e.g. `"3,1"` for 75%/25%. When omitted, fox auto-balances based on available VRAM. Normalised to a sum of 1.0. |
+| `--moe-cpu` | `FOX_MOE_CPU` | `false` | Offload Mixture-of-Experts expert weight tensors to CPU RAM. Attention layers remain on GPU. Enables running large MoE models (DeepSeek, Mixtral) on GPUs with limited VRAM. |
 
 ### Authentication
 
@@ -206,9 +217,30 @@ fox serve \
   --max-models 2 \
   --keep-alive-secs 600 \
   --gpu-memory-fraction 0.85 \
-  --type-kv q8_0 \
-  --max-context-len 4096 \
+  --type-kv turbo3 \
   --hf-token "$HF_TOKEN"
+```
+
+### Multi-GPU with TurboQuant
+
+```bash
+# Two GPUs with automatic layer split and TurboQuant KV cache
+fox serve \
+  --split-mode layer \
+  --type-kv turbo3 \
+  --max-context-len 32768
+
+# Two GPUs, manual 75%/25% VRAM split
+fox serve \
+  --split-mode layer \
+  --tensor-split "3,1" \
+  --type-kv q8_0
+
+# MoE model (DeepSeek, Mixtral) with expert layers in RAM
+fox serve \
+  --moe-cpu \
+  --split-mode layer \
+  --type-kv turbo3
 ```
 
 ---
