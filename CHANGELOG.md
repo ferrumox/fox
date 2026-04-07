@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **ROCm build: CMake 3.21+ rejects `hipcc` as HIP compiler** — CMake 3.21+ requires a real
+  Clang binary instead of the `hipcc` wrapper. `build.rs` now searches for the correct Clang in
+  order: path derived from `hipcc` location (`../llvm/bin/clang`, `../lib/llvm/bin/clang`),
+  `/opt/rocm/lib/llvm/bin/clang`, `/opt/rocm/llvm/bin/clang`, and `amdclang` in `PATH`.
+  If none is found, the ROCm backend is skipped with an actionable warning instead of failing
+  the build.
+
+- **ROCm 6.2 FP8 type guard** — `vendors/hip.h` in llama.cpp incorrectly activates the FP8
+  block (`__hip_fp8_e4m3`, `FP8_AVAILABLE`) when `HIP_VERSION >= 60200000`, but ROCm 6.2.x
+  does not ship `hip/hip_fp8.h`. `build.rs` now patches the guard to `>= 60300000` at build
+  time so the ROCm backend compiles correctly on ROCm 6.2 without requiring a fork of the
+  llama.cpp submodule.
+
+- **CI: ROCm apt package priority on Ubuntu 22.04** — Ubuntu 22.04 ships `rocminfo 5.0.0-1`
+  (upstream versioning) which `apt` incorrectly prefers over ROCm's `1.0.0.60200` (Radeon
+  versioning). The release workflow now sets `Pin-Priority: 1001` for the ROCm apt repository,
+  replacing the previous approach of pinning individual package versions.
+
+- **CI: ROCm Clang not on `PATH`** — added `/opt/rocm/lib/llvm/bin` to `$GITHUB_PATH` in
+  the release workflow so CMake can auto-detect the HIP compiler without relying solely on
+  `build.rs` path resolution.
+
+---
+
 ## [1.0.0] - 2026-03-25
 
 ### Added
