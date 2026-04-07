@@ -128,13 +128,16 @@ jobs:
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] \
             https://repo.radeon.com/rocm/apt/6.2 jammy main" \
             | sudo tee /etc/apt/sources.list.d/rocm.list
-          # Exclude Ubuntu's stub ROCm packages from the default repos so they
-          # don't conflict with the versions ROCm 6.2 requires.
-          printf 'Package: rocminfo rocm-cmake rocm-device-libs\nPin: release o=Ubuntu\nPin-Priority: -1\n' \
-            | sudo tee /etc/apt/preferences.d/block-ubuntu-rocm
+          # Give ROCm repo higher priority than Ubuntu's packages.
+          # Ubuntu 22.04 ships rocminfo 5.0.0-1 (upstream versioning) which
+          # apt prefers over ROCm's 1.0.0.6XXXX (Radeon versioning).
+          # Pin-Priority 1001 forces ROCm packages even when they look like a downgrade.
+          printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1001\n' \
+            | sudo tee /etc/apt/preferences.d/rocm.pref
           sudo apt-get update -q
           sudo apt-get install -y rocm-hip-sdk
           echo "/opt/rocm/bin" >> "$GITHUB_PATH"
+          echo "/opt/rocm/lib/llvm/bin" >> "$GITHUB_PATH"
           echo "HIPCC=/opt/rocm/bin/hipcc" >> "$GITHUB_ENV"
 
       - name: Install cross
