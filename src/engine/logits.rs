@@ -121,6 +121,12 @@ impl InferenceEngine {
             // Record per-token metrics.
             if let Some(m) = &self.metrics {
                 m.tokens_generated_total.inc();
+                if req.generated_tokens == 0 {
+                    let ttft = req.submitted_at.elapsed().as_secs_f64();
+                    m.ttft_seconds
+                        .with_label_values(&[&self.model_name])
+                        .observe(ttft);
+                }
             }
 
             if is_done {

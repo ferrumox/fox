@@ -4,8 +4,9 @@
 
 use anyhow::Result;
 use prometheus::{
-    register_gauge, register_histogram, register_int_counter, register_int_counter_vec,
-    register_int_gauge, Gauge, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge,
+    register_gauge, register_histogram, register_histogram_vec, register_int_counter,
+    register_int_counter_vec, register_int_gauge, Gauge, Histogram, HistogramOpts, HistogramVec,
+    IntCounter, IntCounterVec, IntGauge,
 };
 
 /// All Prometheus metrics for a single server instance.
@@ -26,6 +27,8 @@ pub struct Metrics {
     pub prefix_cache_hits_total: IntCounter,
     /// Total prefix cache misses.
     pub prefix_cache_misses_total: IntCounter,
+    /// Time to first token in seconds, labelled by model name.
+    pub ttft_seconds: HistogramVec,
 }
 
 impl Metrics {
@@ -65,6 +68,14 @@ impl Metrics {
             prefix_cache_misses_total: register_int_counter!(
                 "ferrumox_prefix_cache_misses_total",
                 "Prefix cache misses (full prefill required)"
+            )?,
+            ttft_seconds: register_histogram_vec!(
+                HistogramOpts::new(
+                    "ferrumox_ttft_seconds",
+                    "Time to first token in seconds (submit → first token)"
+                )
+                .buckets(vec![0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]),
+                &["model"]
             )?,
         })
     }

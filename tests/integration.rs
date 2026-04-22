@@ -7,6 +7,7 @@ use tower::ServiceExt;
 
 use ferrumox::api::router as build_router;
 use ferrumox::api::test_helpers::*;
+use ferrumox::metrics::Metrics;
 use ferrumox::model_registry::EngineEntry;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -778,6 +779,17 @@ async fn test_metrics_endpoint() {
         ct.contains("text/plain"),
         "expected text/plain content-type, got: {ct}"
     );
+}
+
+#[test]
+fn ttft_histogram_registers_and_observes() {
+    let m = Metrics::new().expect("metrics should register");
+    m.ttft_seconds
+        .with_label_values(&["test-model"])
+        .observe(0.042);
+    let h = m.ttft_seconds.with_label_values(&["test-model"]);
+    assert_eq!(h.get_sample_count(), 1);
+    assert!((h.get_sample_sum() - 0.042).abs() < 1e-9);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
