@@ -3,6 +3,7 @@
 mod ffi;
 mod logits;
 pub mod model;
+pub(crate) mod mtmd_ffi;
 mod output_filter;
 mod run;
 
@@ -114,6 +115,11 @@ impl InferenceEngine {
     /// Whether the loaded model has native thinking support (`<think>` special token).
     pub fn supports_thinking(&self) -> bool {
         self.model.supports_thinking()
+    }
+
+    /// Whether the loaded model has a multimodal projector (vision support).
+    pub fn supports_vision(&self) -> bool {
+        self.model.supports_vision()
     }
 
     /// Sampling parameters recommended by the model's GGUF metadata, if any.

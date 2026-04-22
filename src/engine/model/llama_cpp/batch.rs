@@ -3,6 +3,7 @@ use anyhow::{anyhow, Result};
 use crate::engine::ffi;
 use crate::engine::model::sampling::{sample_greedy, sample_token, SamplerParams};
 use crate::engine::model::{InferenceRequestForModel, Logits};
+use crate::engine::mtmd_ffi;
 
 use super::LlamaCppModel;
 
@@ -290,5 +291,130 @@ impl LlamaCppModel {
         }
 
         Ok(embeddings)
+    }
+
+    pub(super) fn do_vision_prefill(
+        &self,
+        seq_id: i32,
+        text_prompt: &str,
+        image_bytes: &[u8],
+        temperature: f32,
+        top_p: f32,
+        top_k: u32,
+        repetition_penalty: f32,
+        seed: Option<u64>,
+    ) -> Result<(usize, Logits)> {
+        let mtmd_guard = self
+            .mtmd_ctx
+            .as_ref()
+            .ok_or_else(|| anyhow!("no multimodal projector loaded"))?
+            .lock()
+            .map_err(|e| anyhow!("mtmd lock poisoned: {}", e))?;
+        let mtmd_ptr = mtmd_guard.as_ptr();
+
+        let bitmap = unsafe {
+            mtmd_ffi::mtmd_helper_bitmap_init_from_buf(
+                mtmd_ptr,
+                image_bytes.as_ptr(),
+                image_bytes.len(),
+            )
+        };
+        if bitmap.is_null() {
+            return Err(anyhow!(
+                "failed to decode image (invalid or unsupported format)"
+            ));
+        }
+
+        let prompt_cstr = std::ffi::CString::new(text_prompt)
+            .map_err(|_| anyhow!("prompt contains null byte"))?;
+        let input_text = mtmd_ffi::mtmd_input_text {
+            text: prompt_cstr.as_ptr(),
+            add_special: true,
+            parse_special: true,
+        };
+
+        let chunks = unsafe { mtmd_ffi::mtmd_input_chunks_init() };
+        if chunks.is_null() {
+            unsafe { mtmd_ffi::mtmd_bitmap_free(bitmap) };
+            return Err(anyhow!("failed to allocate mtmd_input_chunks"));
+        }
+
+        let bitmaps: [*const mtmd_ffi::mtmd_bitmap; 1] = [bitmap as *const _];
+        let tok_ret = unsafe {
+            mtmd_ffi::mtmd_tokenize(
+                mtmd_ptr,
+                chunks,
+                &input_text,
+                bitmaps.as_ptr() as *mut *const _,
+                1,
+            )
+        };
+        if tok_ret != 0 {
+            unsafe {
+                mtmd_ffi::mtmd_input_chunks_free(chunks);
+                mtmd_ffi::mtmd_bitmap_free(bitmap);
+            }
+            return Err(anyhow!("mtmd_tokenize failed (code {})", tok_ret));
+        }
+
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+        let lctx = ctx_guard.as_ptr();
+        let n_batch = self.effective_ctx as i32;
+
+        let mut new_n_past: i32 = 0;
+        // mtmd_ffi and ffi have separate bindgen-generated llama_context types;
+        // they're the same C struct so a pointer cast is safe.
+        let lctx_mtmd = lctx as *mut mtmd_ffi::llama_context;
+        let eval_ret = unsafe {
+            mtmd_ffi::mtmd_helper_eval_chunks(
+                mtmd_ptr,
+                lctx_mtmd,
+                chunks,
+                0, // n_past = 0 (fresh sequence)
+                seq_id,
+                n_batch,
+                true, // logits_last
+                &mut new_n_past,
+            )
+        };
+
+        unsafe {
+            mtmd_ffi::mtmd_input_chunks_free(chunks);
+            mtmd_ffi::mtmd_bitmap_free(bitmap);
+        }
+
+        if eval_ret != 0 {
+            return Err(anyhow!(
+                "mtmd_helper_eval_chunks failed (code {})",
+                eval_ret
+            ));
+        }
+
+        let n_vocab = self.config.vocab_size as i32;
+        let logits_ptr = unsafe { ffi::llama_get_logits_ith(lctx, -1) };
+        if logits_ptr.is_null() {
+            return Err(anyhow!("no logits after vision prefill"));
+        }
+        let logits_slice: &[f32] =
+            unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
+
+        let sampled = sample_token(
+            logits_slice,
+            SamplerParams {
+                temperature,
+                top_p,
+                top_k,
+                repetition_penalty,
+                generated_ids: &[],
+                seed,
+                token_count: 0,
+            },
+        );
+        let values = logits_slice.to_vec();
+
+        Ok((new_n_past as usize, Logits::new(values, sampled)))
     }
 }

@@ -16,7 +16,19 @@ pub struct ContentBlock {
     /// Present when type == "text".
     #[serde(default)]
     pub text: Option<String>,
-    // image_url/audio blocks are accepted but not processed (no vision support).
+    /// Present when type == "image_url".
+    #[serde(default)]
+    pub image_url: Option<ImageUrlBlock>,
+}
+
+/// An image URL reference inside a content block.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ImageUrlBlock {
+    /// A URL (http/https) or base64 data URI ("data:image/...;base64,...").
+    pub url: String,
+    /// "auto" | "low" | "high" — accepted for API compatibility.
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// OpenAI-compatible message content: either a plain string or an array of blocks.
@@ -42,6 +54,18 @@ impl MessageContent {
                 })
                 .collect::<Vec<_>>()
                 .join(""),
+        }
+    }
+
+    /// Return the URL of the first image_url block, if any.
+    pub fn first_image_url(&self) -> Option<&str> {
+        match self {
+            MessageContent::Array(blocks) => blocks
+                .iter()
+                .find(|b| b.block_type == "image_url")
+                .and_then(|b| b.image_url.as_ref())
+                .map(|iu| iu.url.as_str()),
+            _ => None,
         }
     }
 }

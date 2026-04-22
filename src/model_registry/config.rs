@@ -43,4 +43,7 @@ pub struct RegistryConfig {
     /// When true, MoE expert tensors are pinned to CPU RAM (via `tensor_buft_overrides`).
     /// Useful for MoE models (e.g. DeepSeek, Mixtral) where expert weights don't fit in VRAM.
     pub moe_offload_cpu: bool,
+    /// Explicit path to a multimodal projector GGUF file for vision models.
+    /// None = auto-detect *mmproj*.gguf in the same directory as the model.
+    pub mmproj_path: Option<PathBuf>,
 }

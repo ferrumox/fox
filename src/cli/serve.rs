@@ -138,6 +138,16 @@ pub struct ServeArgs {
     /// Attention layers remain on GPU; expert weights are read from RAM on demand.
     #[arg(long, env = "FOX_MOE_CPU")]
     pub moe_cpu: bool,
+
+    /// Path to the multimodal projector GGUF file for vision models.
+    /// If omitted, fox auto-detects *mmproj*.gguf in the same directory as the model.
+    #[arg(long, env = "FOX_MMPROJ")]
+    pub mmproj: Option<PathBuf>,
+
+    /// Directory containing .gguf model files for on-demand loading.
+    /// Defaults to ~/.cache/ferrumox/models (platform-appropriate).
+    #[arg(long, env = "FOX_MODELS_DIR")]
+    pub models_dir: Option<PathBuf>,
 }
 
 fn parse_kv_type(s: &str) -> u32 {
@@ -237,7 +247,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     // Load model aliases from TOML file (optional).
     let aliases = load_aliases(args.alias_file.clone());
 
-    let models_dir = default_models_dir();
+    let models_dir = args.models_dir.clone().unwrap_or_else(default_models_dir);
 
     let registry_cfg = RegistryConfig {
         models_dir: models_dir.clone(),
@@ -259,6 +269,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             .map(parse_tensor_split)
             .unwrap_or_default(),
         moe_offload_cpu: args.moe_cpu,
+        mmproj_path: args.mmproj.clone(),
     };
 
     let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));

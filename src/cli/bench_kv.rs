@@ -306,6 +306,7 @@ pub async fn run_bench_kv(args: BenchKvArgs) -> Result<()> {
         split_mode,
         &tensor_split,
         args.moe_cpu,
+        None,
     )?;
 
     spinner.finish_and_clear();

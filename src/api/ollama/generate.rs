@@ -8,7 +8,10 @@ use std::time::Instant;
 
 use crate::api::error::load_model_or_respond;
 use crate::api::router::AppState;
-use crate::api::shared::inference::{prepare_prompt, sampling_from_ollama, MessageForTemplate};
+use crate::api::shared::image::resolve_image_bytes;
+use crate::api::shared::inference::{
+    prepare_prompt, prepare_vision_prompt, sampling_from_ollama, MessageForTemplate,
+};
 use crate::api::shared::streaming::{
     collect_tokens, ndjson_response, ndjson_stream, now_rfc3339, ollama_done_reason,
 };
@@ -25,6 +28,40 @@ pub async fn ollama_generate(
         Err(r) => return r,
     };
 
+    // Detect images from the `images` field (base64 strings).
+    let first_image_b64: Option<&str> = req
+        .images
+        .as_ref()
+        .and_then(|imgs| imgs.first().map(|s| s.as_str()));
+
+    let has_image = first_image_b64.is_some();
+    let is_vision = has_image && entry.engine.supports_vision();
+
+    if has_image && !entry.engine.supports_vision() {
+        let err = serde_json::json!({"error": "this model does not support images (no multimodal projector loaded)"});
+        return axum::response::Response::builder()
+            .status(400)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(err.to_string()))
+            .unwrap();
+    }
+
+    let image_bytes = if let Some(b64) = first_image_b64 {
+        match resolve_image_bytes(b64).await {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                let err = serde_json::json!({"error": format!("failed to decode image: {e}")});
+                return axum::response::Response::builder()
+                    .status(400)
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(err.to_string()))
+                    .unwrap();
+            }
+        }
+    } else {
+        None
+    };
+
     // Build MessageForTemplate list (system prompt + user prompt).
     let mut messages: Vec<MessageForTemplate> = Vec::new();
     if let Some(ref sys) = req.system {
@@ -33,6 +70,7 @@ pub async fn ollama_generate(
             content: Some(sys.clone()),
             tool_calls: None,
             tool_call_id: None,
+            image_data: None,
         });
     }
     messages.push(MessageForTemplate {
@@ -40,6 +78,7 @@ pub async fn ollama_generate(
         content: Some(req.prompt.clone()),
         tool_calls: None,
         tool_call_id: None,
+        image_data: if is_vision { image_bytes.clone() } else { None },
     });
 
     // JSON mode from the `format` field.
@@ -63,28 +102,43 @@ pub async fn ollama_generate(
     let (mut sampling, max_tokens) = sampling_from_ollama(req.options.as_ref(), false);
     sampling.initial_in_thinking = supports_thinking;
 
-    let (prompt_tokens, prompt_tokens_len) = prepare_prompt(
-        &entry,
-        messages,
-        state.system_prompt.as_deref(),
-        None, // no tools on /api/generate
-        false,
-        None,
-        response_format.as_ref(),
-        false, // show_thinking always false for /api/generate
-    );
+    let (prompt_tokens, prompt_tokens_len, vision_prompt) = if is_vision {
+        let vp = prepare_vision_prompt(
+            &entry,
+            messages.clone(),
+            state.system_prompt.as_deref(),
+            None,
+            false,
+            None,
+            response_format.as_ref(),
+            false,
+        );
+        let estimate = entry.engine.tokenize(&vp).map(|t| t.len()).unwrap_or(256);
+        (vec![0i32; estimate], estimate, Some(vp))
+    } else {
+        let (tokens, len) = prepare_prompt(
+            &entry,
+            messages,
+            state.system_prompt.as_deref(),
+            None,
+            false,
+            None,
+            response_format.as_ref(),
+            false,
+        );
+        (tokens, len, None)
+    };
 
     let stream_mode = req.stream.unwrap_or(true);
 
     let req_id = entry.engine.next_request_id();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
-    entry.engine.submit_request(InferenceRequest::new(
-        req_id,
-        prompt_tokens,
-        max_tokens,
-        sampling,
-        tx,
-    ));
+    let mut inference_req = InferenceRequest::new(req_id, prompt_tokens, max_tokens, sampling, tx);
+    if is_vision {
+        inference_req.vision_image = image_bytes;
+        inference_req.vision_prompt = vision_prompt;
+    }
+    entry.engine.submit_request(inference_req);
 
     let model_name = req.model.clone();
 

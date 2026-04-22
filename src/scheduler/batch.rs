@@ -135,6 +135,12 @@ pub struct InferenceRequest {
     /// boundary re-submission).  The decode position is based on this value, not
     /// `prompt_tokens.len()`, to avoid position gaps in recurrent/hybrid models.
     pub prefilled_tokens: usize,
+    /// Raw image bytes for vision requests. When set, prefill uses mtmd
+    /// (CLIP encode + eval) instead of the normal batched text prefill.
+    pub vision_image: Option<Vec<u8>>,
+    /// Fully formatted text prompt (with `<__media__>` marker) for vision requests.
+    /// Used by mtmd_tokenize instead of the pre-tokenized `prompt_tokens`.
+    pub vision_prompt: Option<String>,
 }
 
 impl InferenceRequest {
@@ -162,6 +168,8 @@ impl InferenceRequest {
             prefix_seq_id: None,
             submitted_at: std::time::Instant::now(),
             prefilled_tokens: 0,
+            vision_image: None,
+            vision_prompt: None,
         }
     }
 

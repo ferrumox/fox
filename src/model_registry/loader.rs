@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -10,6 +10,19 @@ use crate::scheduler::Scheduler;
 
 use super::config::RegistryConfig;
 use super::entry::EngineEntry;
+
+fn detect_mmproj(model_path: &Path) -> Option<PathBuf> {
+    let dir = model_path.parent()?;
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let p = entry.path();
+        let name = p.file_name()?.to_str()?.to_lowercase();
+        if name.contains("mmproj") && name.ends_with(".gguf") {
+            return Some(p);
+        }
+    }
+    None
+}
 
 pub(super) async fn load_model(
     name: &str,
@@ -30,6 +43,7 @@ pub(super) async fn load_model(
     let split_mode = cfg.split_mode;
     let tensor_split = cfg.tensor_split.clone();
     let moe_offload_cpu = cfg.moe_offload_cpu;
+    let mmproj_path = cfg.mmproj_path.clone().or_else(|| detect_mmproj(&path));
 
     // Estimate VRAM requirement before attempting to load.
     // Heuristic: file_size × 1.8 covers weights + overhead. Warn early so the
@@ -52,6 +66,10 @@ pub(super) async fn load_model(
 
     tracing::info!(model = %name, path = ?path, "loading model");
 
+    if let Some(ref mmproj) = mmproj_path {
+        tracing::info!(model = %name, mmproj = ?mmproj, "multimodal projector detected");
+    }
+
     let model = tokio::task::spawn_blocking(move || {
         LlamaCppModel::load(
             &path,
@@ -65,6 +83,7 @@ pub(super) async fn load_model(
             split_mode,
             &tensor_split,
             moe_offload_cpu,
+            mmproj_path.as_deref(),
         )
     })
     .await
@@ -96,9 +115,11 @@ pub(super) async fn load_model(
     };
 
     let supports_thinking = engine.supports_thinking();
+    let supports_vision = engine.supports_vision();
     tracing::info!(
         model = %engine.model_name(),
         thinking = supports_thinking,
+        vision = supports_vision,
         "model ready"
     );
 

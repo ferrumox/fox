@@ -189,4 +189,27 @@ pub trait Model: Send + Sync {
     /// Used as base stop sequences so generation halts on model-native terminators
     /// even when the token ID is not caught by `is_eog_token`.
     fn stop_tokens(&self) -> Vec<String>;
+
+    /// Returns true when the model has a multimodal projector loaded (vision support).
+    fn supports_vision(&self) -> bool {
+        false
+    }
+
+    /// Run multimodal prefill for a single vision request.
+    /// Uses mtmd to tokenize text+image, encode via CLIP, and evaluate in the LLM context.
+    /// Returns (n_tokens_in_kv, logits) after all chunks are evaluated.
+    fn vision_prefill_sync(&self, _params: &VisionPrefillParams) -> Result<(usize, Logits)> {
+        anyhow::bail!("vision not supported by this model backend")
+    }
+}
+
+pub struct VisionPrefillParams {
+    pub seq_id: i32,
+    pub text_prompt: String,
+    pub image_bytes: Vec<u8>,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub top_k: u32,
+    pub repetition_penalty: f32,
+    pub seed: Option<u64>,
 }
