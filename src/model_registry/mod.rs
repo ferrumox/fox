@@ -28,6 +28,10 @@ pub struct ModelRegistry {
     aliases: HashMap<String, String>,
 }
 
+fn normalize_for_match(s: &str) -> String {
+    s.chars().filter(|c| *c != '-' && *c != '.').collect()
+}
+
 impl ModelRegistry {
     pub fn new(config: RegistryConfig, aliases: HashMap<String, String>) -> Self {
         let cap = NonZeroUsize::new(config.max_models.max(1))
@@ -150,6 +154,7 @@ impl ModelRegistry {
     /// 2. Exact stem match (case-insensitive)
     /// 3. Stem starts with the name
     /// 4. Stem contains the name
+    /// 5. Normalized match (strip hyphens/dots, e.g. "llama3.2" matches "llama-3.2-1b-instruct-q8_0")
     pub(crate) fn resolve_model_name(&self, name: &str) -> Result<(String, PathBuf)> {
         // Step 0: if `name` is already a path to an existing file, use it directly.
         // This handles FOX_MODEL_PATH pointing to a model in a subdirectory or
@@ -191,6 +196,17 @@ impl ModelRegistry {
         for (path, _) in &entries {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                 if stem.to_lowercase().contains(&lower) {
+                    return Ok((stem.to_string(), path.clone()));
+                }
+            }
+        }
+
+        // 4. Normalized match — strip hyphens and dots so e.g. "llama3.2" matches "llama-3.2-1b-..."
+        let norm_query = normalize_for_match(&lower);
+        for (path, _) in &entries {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                let norm_stem = normalize_for_match(&stem.to_lowercase());
+                if norm_stem.starts_with(&norm_query) || norm_stem.contains(&norm_query) {
                     return Ok((stem.to_string(), path.clone()));
                 }
             }
@@ -412,5 +428,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), HashMap::new());
         assert!(registry.resolve_model_name("doesnt-exist").is_err());
+    }
+
+    #[test]
+    fn test_normalize_strips_hyphens_and_dots() {
+        assert_eq!(normalize_for_match("llama-3.2-1b"), "llama321b");
+    }
+
+    #[test]
+    fn test_normalize_preserves_other_chars() {
+        assert_eq!(normalize_for_match("Q4_K_M"), "Q4_K_M");
+        assert_eq!(normalize_for_match("instruct"), "instruct");
+    }
+
+    #[test]
+    fn test_normalize_empty_string() {
+        assert_eq!(normalize_for_match(""), "");
+    }
+
+    #[test]
+    fn test_normalize_only_separators() {
+        assert_eq!(normalize_for_match("-.--."), "");
+    }
+
+    #[test]
+    fn test_resolve_normalized_match_ollama_style() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Llama-3.2-3B-Instruct.gguf"), b"").unwrap();
+
+        let registry = ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), HashMap::new());
+        let (stem, _) = registry.resolve_model_name("llama3.2").unwrap();
+        assert_eq!(stem, "Llama-3.2-3B-Instruct");
+    }
+
+    #[test]
+    fn test_resolve_normalized_match_no_dots() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Mistral-7B-v0.3.gguf"), b"").unwrap();
+
+        let registry = ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), HashMap::new());
+        let (stem, _) = registry.resolve_model_name("mistral7b").unwrap();
+        assert_eq!(stem, "Mistral-7B-v0.3");
     }
 }

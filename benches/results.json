@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "hardware_key": "x86_64/NVIDIA GeForce RTX 3090",
+      "hardware": {
+        "arch": "x86_64",
+        "os": "Linux",
+        "gpu": "NVIDIA GeForce RTX 3090",
+        "gpu_vram_mb": 24576,
+        "cpu": "AMD Ryzen Threadripper 2920X 12-Core Processor"
+      },
+      "model": "llama3.2",
+      "config": {
+        "concurrency": 4,
+        "requests": 50,
+        "max_tokens": 128
+      },
+      "ferrumox_cpu": {
+        "ttft_p50_ms": 90,
+        "ttft_p95_ms": 4141,
+        "latency_p50_ms": 90,
+        "latency_p95_ms": 27778,
+        "latency_p99_ms": 27779,
+        "throughput_tps": 18.306367380184298
+      },
+      "runs": 1,
+      "last_updated": "2026-04-22T20:35:43Z",
+      "ferrumox_gpu": {
+        "ttft_p50_ms": 43,
+        "ttft_p95_ms": 74,
+        "latency_p50_ms": 43,
+        "latency_p95_ms": 4276,
+        "latency_p99_ms": 4276,
+        "throughput_tps": 120.78247008959339
+      },
+      "ollama_cpu": {
+        "ttft_p50_ms": 66945,
+        "ttft_p95_ms": 72319,
+        "latency_p50_ms": 89552,
+        "latency_p95_ms": 95766,
+        "latency_p99_ms": 97567,
+        "throughput_tps": 5.222012094187607
+      },
+      "ollama_gpu": {
+        "ttft_p50_ms": 1971,
+        "ttft_p95_ms": 46259,
+        "latency_p50_ms": 2603,
+        "latency_p95_ms": 46920,
+        "latency_p99_ms": 48339,
+        "throughput_tps": 75.19815574116704
+      }
+    }
+  ]
+}
