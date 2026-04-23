@@ -2,6 +2,8 @@
 models/
 *.gguf
 
+.claude/
+
 # Rust / Cargo
 /target/
 **/*.rs.bk
@@ -29,4 +31,3 @@ Thumbs.db
 .env.local
 *.log
 
-.lab.claude/worktrees/
