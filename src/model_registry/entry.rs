@@ -6,6 +6,8 @@ pub struct EngineEntry {
     pub engine: Arc<InferenceEngine>,
     /// Aborted when this entry is dropped (LRU eviction or explicit unload).
     pub(super) loop_handle: tokio::task::JoinHandle<()>,
+    /// Set when the model was loaded with reduced settings due to OOM recovery.
+    pub degraded: Option<String>,
 }
 
 impl Drop for EngineEntry {
@@ -55,6 +57,7 @@ impl EngineEntry {
         Arc::new(Self {
             engine,
             loop_handle,
+            degraded: None,
         })
     }
 }

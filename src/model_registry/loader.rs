@@ -8,6 +8,7 @@ use crate::engine::InferenceEngine;
 use crate::kv_cache::KVCacheManager;
 use crate::scheduler::Scheduler;
 
+use super::config::kv_type;
 use super::config::RegistryConfig;
 use super::entry::EngineEntry;
 
@@ -22,6 +23,61 @@ fn detect_mmproj(model_path: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+struct OomFallback {
+    context_len: Option<u32>,
+    type_k: u32,
+    type_v: u32,
+    label: String,
+}
+
+fn kv_type_name(t: u32) -> &'static str {
+    match t {
+        kv_type::F16 => "f16",
+        kv_type::Q8_0 => "q8_0",
+        kv_type::Q4_0 => "q4_0",
+        kv_type::TURBO3 => "turbo3",
+        kv_type::TURBO4 => "turbo4",
+        kv_type::TURBO2 => "turbo2",
+        _ => "unknown",
+    }
+}
+
+fn build_oom_fallbacks(original_ctx: Option<u32>, type_k: u32, type_v: u32) -> Vec<OomFallback> {
+    let mut fallbacks = Vec::new();
+
+    let start = original_ctx.unwrap_or(65536);
+    let mut ctx = start / 2;
+    while ctx >= 1024 {
+        fallbacks.push(OomFallback {
+            context_len: Some(ctx),
+            type_k,
+            type_v,
+            label: format!("context={ctx} kv={}", kv_type_name(type_k)),
+        });
+        ctx /= 2;
+    }
+
+    if type_k != kv_type::Q8_0 || type_v != kv_type::Q8_0 {
+        for ctx in [2048, 1024] {
+            fallbacks.push(OomFallback {
+                context_len: Some(ctx),
+                type_k: kv_type::Q8_0,
+                type_v: kv_type::Q8_0,
+                label: format!("context={ctx} kv=q8_0"),
+            });
+        }
+    }
+
+    fallbacks
+}
+
+fn is_retryable_oom(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("llama_init_from_model failed")
+        || msg.contains("out of memory")
+        || msg.contains("failed to allocate")
 }
 
 pub(super) async fn load_model(
@@ -45,9 +101,6 @@ pub(super) async fn load_model(
     let moe_offload_cpu = cfg.moe_offload_cpu;
     let mmproj_path = cfg.mmproj_path.clone().or_else(|| detect_mmproj(&path));
 
-    // Estimate VRAM requirement before attempting to load.
-    // Heuristic: file_size × 1.8 covers weights + overhead. Warn early so the
-    // user gets actionable advice instead of a cryptic load failure.
     if let Ok(meta) = std::fs::metadata(&path) {
         let estimated_bytes = (meta.len() as f64 * 1.8) as usize;
         let available_bytes = gpu_memory_bytes;
@@ -70,24 +123,60 @@ pub(super) async fn load_model(
         tracing::info!(model = %name, mmproj = ?mmproj, "multimodal projector detected");
     }
 
-    let model = tokio::task::spawn_blocking(move || {
-        LlamaCppModel::load(
-            &path,
-            max_batch_size,
-            max_context_len,
-            gpu_memory_bytes,
-            gpu_memory_fraction,
-            type_k,
-            type_v,
-            main_gpu,
-            split_mode,
-            &tensor_split,
-            moe_offload_cpu,
-            mmproj_path.as_deref(),
-        )
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;
+    let (model, degraded, effective_type_k, effective_type_v) = {
+        let p = path.clone();
+        let ts = tensor_split.clone();
+        let name_for_log = name.clone();
+        let mmproj = mmproj_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let name = name_for_log;
+
+            match LlamaCppModel::load(
+                &p, max_batch_size, max_context_len, gpu_memory_bytes, gpu_memory_fraction,
+                type_k, type_v, main_gpu, split_mode, &ts, moe_offload_cpu,
+                mmproj.as_deref(),
+            ) {
+                Ok(model) => return Ok((model, None, type_k, type_v)),
+                Err(e) if is_retryable_oom(&e) => {
+                    tracing::warn!(
+                        model = %name,
+                        error = %e,
+                        "OOM on initial load, trying reduced settings"
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+
+            let fallbacks = build_oom_fallbacks(max_context_len, type_k, type_v);
+            let mut last_err = None;
+            for fb in &fallbacks {
+                tracing::info!(model = %name, fallback = %fb.label, "OOM recovery: retrying");
+                match LlamaCppModel::load(
+                    &p, max_batch_size, fb.context_len, gpu_memory_bytes, gpu_memory_fraction,
+                    fb.type_k, fb.type_v, main_gpu, split_mode, &ts, moe_offload_cpu,
+                    mmproj.as_deref(),
+                ) {
+                    Ok(model) => {
+                        tracing::warn!(
+                            model = %name,
+                            settings = %fb.label,
+                            "loaded with reduced settings (OOM recovery)"
+                        );
+                        return Ok((model, Some(fb.label.clone()), fb.type_k, fb.type_v));
+                    }
+                    Err(e) if is_retryable_oom(&e) => {
+                        last_err = Some(e);
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            Err(last_err.unwrap_or_else(|| anyhow::anyhow!("OOM recovery exhausted all fallbacks")))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??
+    };
 
     let model_config = model.model_config();
     let model: Arc<dyn Model> = Arc::new(model);
@@ -96,8 +185,8 @@ pub(super) async fn load_model(
         gpu_memory_bytes,
         gpu_memory_fraction,
         block_size,
-        type_k,
-        type_v,
+        effective_type_k,
+        effective_type_v,
     ));
 
     let scheduler = Arc::new(Scheduler::new(kv_cache.clone(), max_batch_size));
@@ -116,15 +205,26 @@ pub(super) async fn load_model(
 
     let supports_thinking = engine.supports_thinking();
     let supports_vision = engine.supports_vision();
-    tracing::info!(
-        model = %engine.model_name(),
-        thinking = supports_thinking,
-        vision = supports_vision,
-        "model ready"
-    );
+    if let Some(ref d) = degraded {
+        tracing::warn!(
+            model = %engine.model_name(),
+            thinking = supports_thinking,
+            vision = supports_vision,
+            degraded = %d,
+            "model ready (degraded)"
+        );
+    } else {
+        tracing::info!(
+            model = %engine.model_name(),
+            thinking = supports_thinking,
+            vision = supports_vision,
+            "model ready"
+        );
+    }
 
     Ok(EngineEntry {
         engine,
         loop_handle,
+        degraded,
     })
 }
