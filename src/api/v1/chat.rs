@@ -24,6 +24,8 @@ use crate::api::types::{
     ChatCompletionResponse, ChatMessageDelta, ChatMessageResponse, ToolCallDelta,
     ToolCallFunctionDelta, Usage,
 };
+use std::sync::Arc;
+
 use crate::scheduler::{InferenceRequest, SamplingParams, Token};
 
 pub async fn chat_completions(
@@ -64,9 +66,9 @@ pub async fn chat_completions(
     }
 
     // Resolve image bytes if needed.
-    let image_bytes = if let Some(ref url) = first_image_url {
+    let image_bytes: Option<Arc<Vec<u8>>> = if let Some(ref url) = first_image_url {
         match resolve_image_bytes(url).await {
-            Ok(bytes) => Some(bytes),
+            Ok(bytes) => Some(Arc::new(bytes)),
             Err(e) => {
                 return AppError::BadRequest(format!("failed to load image: {e}")).into_response();
             }

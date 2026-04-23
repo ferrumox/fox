@@ -21,6 +21,8 @@ use crate::api::types::{
     OllamaChatChunk, OllamaChatMessage, OllamaChatRequest, OllamaToolCall, OllamaToolCallFunction,
     ToolCall, ToolCallFunction,
 };
+use std::sync::Arc;
+
 use crate::scheduler::{InferenceRequest, Token};
 
 pub async fn ollama_chat(
@@ -52,9 +54,9 @@ pub async fn ollama_chat(
             .unwrap();
     }
 
-    let image_bytes = if let Some(b64) = first_image_b64 {
+    let image_bytes: Option<Arc<Vec<u8>>> = if let Some(b64) = first_image_b64 {
         match resolve_image_bytes(b64).await {
-            Ok(bytes) => Some(bytes),
+            Ok(bytes) => Some(Arc::new(bytes)),
             Err(e) => {
                 let err = serde_json::json!({"error": format!("failed to decode image: {e}")});
                 return axum::response::Response::builder()

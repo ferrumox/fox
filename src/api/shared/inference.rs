@@ -20,7 +20,7 @@ pub struct MessageForTemplate {
     pub tool_calls: Option<Vec<ToolCall>>,
     pub tool_call_id: Option<String>,
     /// Raw image bytes for vision processing (decoded from base64/URL by the handler).
-    pub image_data: Option<Vec<u8>>,
+    pub image_data: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 /// Flatten a [`MessageForTemplate`] into a `(role, content)` tuple for

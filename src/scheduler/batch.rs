@@ -1,5 +1,7 @@
 // Batch types and InferenceRequest for the scheduler.
 
+use std::sync::Arc;
+
 use crate::kv_cache::PageTable;
 use tokio::sync::mpsc;
 
@@ -146,7 +148,7 @@ pub struct InferenceRequest {
     pub prefilled_tokens: usize,
     /// Raw image bytes for vision requests. When set, prefill uses mtmd
     /// (CLIP encode + eval) instead of the normal batched text prefill.
-    pub vision_image: Option<Vec<u8>>,
+    pub vision_image: Option<Arc<Vec<u8>>>,
     /// Fully formatted text prompt (with `<__media__>` marker) for vision requests.
     /// Used by mtmd_tokenize instead of the pre-tokenized `prompt_tokens`.
     pub vision_prompt: Option<String>,

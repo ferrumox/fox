@@ -212,7 +212,7 @@ pub trait Model: Send + Sync {
 pub struct VisionPrefillParams {
     pub seq_id: i32,
     pub text_prompt: String,
-    pub image_bytes: Vec<u8>,
+    pub image_bytes: std::sync::Arc<Vec<u8>>,
     pub temperature: f32,
     pub top_p: f32,
     pub top_k: u32,

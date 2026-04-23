@@ -118,7 +118,7 @@ impl InferenceEngine {
                 vision_params.push(VisionPrefillParams {
                     seq_id: r.kv_seq_id,
                     text_prompt: r.vision_prompt.clone().unwrap(),
-                    image_bytes: r.vision_image.clone().unwrap(),
+                    image_bytes: Arc::clone(r.vision_image.as_ref().unwrap()),
                     temperature: r.sampling.temperature,
                     top_p: r.sampling.top_p,
                     top_k: r.sampling.top_k,
