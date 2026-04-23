@@ -105,14 +105,24 @@ jobs:
 
       # ── Base branch ────────────────────────────────────────────────
       - name: Checkout base
+        id: checkout-base
         run: |
           git checkout "${{ github.event.pull_request.base.sha }}"
-          git submodule update --recursive
+          if ! git submodule update --recursive; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not check out base submodule — skipping baseline comparison"
+            git checkout "${{ github.sha }}"
+            git submodule update --recursive
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build (base)
+        if: steps.checkout-base.outputs.skip != 'true'
         run: cargo build --release --bin fox --bin fox-bench
 
       - name: Benchmark (base)
+        if: steps.checkout-base.outputs.skip != 'true'
         run: |
           ./target/release/fox serve \
             --model-path "$MODEL_DIR/$MODEL_FILE" \
@@ -147,10 +157,12 @@ jobs:
 
       # ── Compare ────────────────────────────────────────────────────
       - name: Return to PR branch
+        if: steps.checkout-base.outputs.skip != 'true'
         run: git checkout "${{ github.sha }}"
 
       - name: Check for regressions
         id: gate
+        if: steps.checkout-base.outputs.skip != 'true'
         run: /tmp/bench-gate.sh /tmp/bench-base.json /tmp/bench-pr.json
 
       - name: Comment on PR
@@ -254,14 +266,24 @@ jobs:
 
       # ── Base branch ────────────────────────────────────────────────
       - name: Checkout base
+        id: checkout-embed-base
         run: |
           git checkout "${{ github.event.pull_request.base.sha }}"
-          git submodule update --recursive
+          if ! git submodule update --recursive; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not check out base submodule — skipping baseline comparison"
+            git checkout "${{ github.sha }}"
+            git submodule update --recursive
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build (base)
+        if: steps.checkout-embed-base.outputs.skip != 'true'
         run: cargo build --release --bin fox
 
       - name: Embedding benchmark (base)
+        if: steps.checkout-embed-base.outputs.skip != 'true'
         run: |
           ./target/release/fox serve \
             --model-path "$MODEL_DIR/$EMBED_MODEL_FILE" \
@@ -289,10 +311,12 @@ jobs:
 
       # ── Compare ────────────────────────────────────────────────────
       - name: Return to PR branch
+        if: steps.checkout-embed-base.outputs.skip != 'true'
         run: git checkout "${{ github.sha }}"
 
       - name: Check for embedding regressions
         id: embed-gate
+        if: steps.checkout-embed-base.outputs.skip != 'true'
         run: /tmp/bench-embed-gate.sh /tmp/embed-base.json /tmp/embed-pr.json
 
       - name: Comment on PR
