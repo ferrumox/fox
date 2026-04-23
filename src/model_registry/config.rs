@@ -40,6 +40,8 @@ pub struct RegistryConfig {
     /// Explicit path to a multimodal projector GGUF file for vision models.
     /// None = auto-detect *mmproj*.gguf in the same directory as the model.
     pub mmproj_path: Option<PathBuf>,
+    /// Number of mtmd contexts for parallel CLIP encoding (default 1).
+    pub vision_contexts: usize,
     /// Models discovered from well-known directories (HuggingFace, Ollama, LM Studio, etc.).
     pub discovered_models: Vec<DiscoveredModel>,
     /// Enable Flash Attention for faster inference and lower memory usage.

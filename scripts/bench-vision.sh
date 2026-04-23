@@ -8,7 +8,7 @@ set -euo pipefail
 # Otherwise a 32x32 solid red PNG is used (tiny — for smoke tests only).
 
 URL="${1:-http://localhost:8080}"
-REQUESTS="${2:-50}"
+REQUESTS="${2:-1000}"
 CONCURRENCY="${3:-4}"
 IMAGE_B64_FILE="${4:-}"
 MODEL="nanollava-text-model-f16"

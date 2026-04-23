@@ -209,6 +209,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         args.moe_cpu,
         None,
         true,
+        1,
     )?;
     let model_config = model.model_config();
 

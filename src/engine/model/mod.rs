@@ -207,12 +207,60 @@ pub trait Model: Send + Sync {
     fn vision_prefill_sync(&self, _params: &VisionPrefillParams) -> Result<(usize, Logits)> {
         anyhow::bail!("vision not supported by this model backend")
     }
+
+    /// Preprocess a vision request: decode image, tokenize, and CLIP-encode.
+    /// This only needs an mtmd context (not llama_context) and can run off the inference thread.
+    fn vision_preprocess_sync(&self, _params: &VisionPreprocessParams) -> Result<PreprocessedVision> {
+        anyhow::bail!("vision not supported by this model backend")
+    }
+
+    /// Decode a preprocessed vision request into the LLM's KV cache.
+    /// Uses pre-encoded CLIP embeddings — only needs the llama_context.
+    /// Returns (n_tokens_in_kv, logits).
+    fn vision_decode_prefill_sync(&self, _params: &VisionDecodeParams) -> Result<(usize, Logits)> {
+        anyhow::bail!("vision not supported by this model backend")
+    }
 }
 
 pub struct VisionPrefillParams {
     pub seq_id: i32,
     pub text_prompt: String,
     pub image_bytes: std::sync::Arc<Vec<u8>>,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub top_k: u32,
+    pub repetition_penalty: f32,
+    pub seed: Option<u64>,
+}
+
+/// Parameters for the preprocessing phase (CLIP encoding, off inference thread).
+pub struct VisionPreprocessParams {
+    pub text_prompt: String,
+    pub image_bytes: std::sync::Arc<Vec<u8>>,
+}
+
+/// Result of vision preprocessing: tokenized chunks + pre-encoded CLIP embeddings.
+/// Owns the C-allocated chunks pointer and frees it on drop.
+pub struct PreprocessedVision {
+    pub(crate) chunks: *mut crate::engine::mtmd_ffi::mtmd_input_chunks,
+    /// Pre-encoded CLIP embeddings for each image/audio chunk, keyed by chunk index.
+    pub(crate) image_embeddings: Vec<(usize, Vec<f32>)>,
+}
+
+unsafe impl Send for PreprocessedVision {}
+
+impl Drop for PreprocessedVision {
+    fn drop(&mut self) {
+        if !self.chunks.is_null() {
+            unsafe { crate::engine::mtmd_ffi::mtmd_input_chunks_free(self.chunks) };
+        }
+    }
+}
+
+/// Parameters for the decode phase (LLM eval with pre-encoded embeddings).
+pub struct VisionDecodeParams {
+    pub seq_id: i32,
+    pub preprocessed: PreprocessedVision,
     pub temperature: f32,
     pub top_p: f32,
     pub top_k: u32,

@@ -143,6 +143,11 @@ pub struct ServeArgs {
     #[arg(long, env = "FOX_MMPROJ")]
     pub mmproj: Option<PathBuf>,
 
+    /// Number of mtmd (CLIP) contexts for parallel vision preprocessing.
+    /// Higher values allow concurrent CLIP encoding of multiple images at the cost of VRAM.
+    #[arg(long, default_value = "1", env = "FOX_VISION_CONTEXTS")]
+    pub vision_contexts: usize,
+
     /// Directory containing .gguf model files for on-demand loading.
     /// Defaults to ~/.cache/ferrumox/models (platform-appropriate).
     #[arg(long, env = "FOX_MODELS_DIR")]
@@ -294,6 +299,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             .unwrap_or_default(),
         moe_offload_cpu: args.moe_cpu,
         mmproj_path: args.mmproj.clone(),
+        vision_contexts: args.vision_contexts,
         discovered_models: discovered,
         flash_attn: args.flash_attn,
     };

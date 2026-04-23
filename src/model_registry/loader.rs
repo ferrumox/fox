@@ -98,6 +98,7 @@ pub(super) async fn load_model(
     let moe_offload_cpu = cfg.moe_offload_cpu;
     let mmproj_path = cfg.mmproj_path.clone().or_else(|| detect_mmproj(&path));
     let flash_attn = cfg.flash_attn;
+    let vision_contexts = cfg.vision_contexts;
 
     if let Ok(meta) = std::fs::metadata(&path) {
         let estimated_bytes = (meta.len() as f64 * 1.8) as usize;
@@ -143,6 +144,7 @@ pub(super) async fn load_model(
                 moe_offload_cpu,
                 mmproj.as_deref(),
                 flash_attn,
+                vision_contexts,
             ) {
                 Ok(model) => return Ok((model, None, type_k, type_v)),
                 Err(e) if is_retryable_oom(&e) => {
@@ -173,6 +175,7 @@ pub(super) async fn load_model(
                     moe_offload_cpu,
                     mmproj.as_deref(),
                     flash_attn,
+                    vision_contexts,
                 ) {
                     Ok(model) => {
                         tracing::warn!(

@@ -169,6 +169,7 @@ mod tests {
             tensor_split: vec![],
             moe_offload_cpu: false,
             mmproj_path: None,
+            vision_contexts: 1,
             discovered_models: vec![],
             flash_attn: true,
         };

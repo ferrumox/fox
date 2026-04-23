@@ -29,6 +29,7 @@ impl LlamaCppModel {
         moe_offload_cpu: bool,
         mmproj_path: Option<&std::path::Path>,
         flash_attn: bool,
+        vision_contexts: usize,
     ) -> Result<Self> {
         let _ = (
             model_path,
@@ -44,6 +45,7 @@ impl LlamaCppModel {
             moe_offload_cpu,
             mmproj_path,
             flash_attn,
+            vision_contexts,
         );
         let config = ModelConfig {
             num_layers: 32,

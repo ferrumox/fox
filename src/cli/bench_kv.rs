@@ -309,6 +309,7 @@ pub async fn run_bench_kv(args: BenchKvArgs) -> Result<()> {
         args.moe_cpu,
         None,
         true,
+        1,
     )?;
 
     spinner.finish_and_clear();

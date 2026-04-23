@@ -40,6 +40,7 @@ pub fn make_test_registry(
         tensor_split: vec![],
         moe_offload_cpu: false,
         mmproj_path: None,
+            vision_contexts: 1,
         discovered_models: vec![],
         flash_attn: true,
     };
@@ -87,6 +88,7 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         tensor_split: vec![],
         moe_offload_cpu: false,
         mmproj_path: None,
+            vision_contexts: 1,
         discovered_models: vec![],
         flash_attn: true,
     };

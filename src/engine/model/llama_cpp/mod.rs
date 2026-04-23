@@ -108,14 +108,14 @@ fn diagnose_load_failure(model_path: &std::path::Path) -> anyhow::Error {
         _ => false,
     };
 
-    if memory_likely_cause || file_size > 0 {
+    let model_name = model_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?");
+
+    if memory_likely_cause {
         let mut msg = format!(
-            "failed to load '{}' ({:.1} GB): not enough memory to fit the model.\n",
-            model_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?"),
-            file_gb
+            "failed to load '{model_name}' ({file_gb:.1} GB): not enough memory to fit the model.\n",
         );
         if let Some(vram) = gpu_free {
             msg.push_str(&format!(
@@ -141,12 +141,27 @@ fn diagnose_load_failure(model_path: &std::path::Path) -> anyhow::Error {
         }
         anyhow!("{}", msg.trim_end())
     } else {
-        anyhow!(
-            "failed to load '{}': llama.cpp could not open the model.\n\
-             The file may use a GGUF version not supported by this build of Fox.\n\
-             → Check for a newer Fox release or try a different model variant.",
-            model_path.display()
-        )
+        let mut msg = format!(
+            "failed to load '{model_name}': llama.cpp could not load the model.\n",
+        );
+        if let Some(vram) = gpu_free {
+            msg.push_str(&format!(
+                "  GPU free:  {:.1} GB\n",
+                vram as f64 / 1_073_741_824.0
+            ));
+        }
+        if let Some(ram) = ram_free {
+            msg.push_str(&format!(
+                "  RAM free:  {:.1} GB\n",
+                ram as f64 / 1_073_741_824.0
+            ));
+        }
+        msg.push_str("\nPossible causes:\n");
+        msg.push_str("  • GPU backend libraries (libggml-cuda.so / libggml-vulkan.so) not found.\n");
+        msg.push_str("  • KV cache context allocation too large — try --max-context-len 2048.\n");
+        msg.push_str("  • GGUF version not supported by this build of Fox.\n");
+        msg.push_str("  • File corrupt or from an incomplete download.\n");
+        anyhow!("{}", msg.trim_end())
     }
 }
 
@@ -157,6 +172,51 @@ fn diagnose_load_failure(model_path: &std::path::Path) -> anyhow::Error {
 #[cfg(not(fox_stub))]
 pub(crate) fn resolve_context_len(user_limit: Option<u32>, model_train_ctx: u32) -> u32 {
     user_limit.unwrap_or(model_train_ctx)
+}
+
+/// Pool of mtmd contexts for parallel CLIP encoding.
+#[cfg(not(fox_stub))]
+pub(super) struct MtmdPool {
+    contexts: std::sync::Mutex<Vec<NonNull<mtmd_ffi::mtmd_context>>>,
+    available: std::sync::Condvar,
+    /// Input embedding dimension from the model (needed for embedding buffer sizing).
+    pub(super) n_embd_inp: usize,
+}
+
+#[cfg(not(fox_stub))]
+impl MtmdPool {
+    fn new(contexts: Vec<NonNull<mtmd_ffi::mtmd_context>>, n_embd_inp: usize) -> Self {
+        Self {
+            contexts: std::sync::Mutex::new(contexts),
+            available: std::sync::Condvar::new(),
+            n_embd_inp,
+        }
+    }
+
+    pub(super) fn acquire(&self) -> NonNull<mtmd_ffi::mtmd_context> {
+        let mut pool = self.contexts.lock().expect("mtmd pool lock poisoned");
+        loop {
+            if let Some(ctx) = pool.pop() {
+                return ctx;
+            }
+            pool = self.available.wait(pool).expect("mtmd pool lock poisoned");
+        }
+    }
+
+    pub(super) fn release(&self, ctx: NonNull<mtmd_ffi::mtmd_context>) {
+        if let Ok(mut pool) = self.contexts.lock() {
+            pool.push(ctx);
+        }
+        self.available.notify_one();
+    }
+
+    fn free_all(&self) {
+        if let Ok(mut pool) = self.contexts.lock() {
+            for ctx in pool.drain(..) {
+                unsafe { mtmd_ffi::mtmd_free(ctx.as_ptr()) };
+            }
+        }
+    }
 }
 
 /// Llama.cpp model via FFI.
@@ -172,19 +232,17 @@ pub struct LlamaCppModel {
     /// Whether this instance owns the model pointer and should free it on drop.
     /// `false` when sharing weights with another `LlamaCppModel` (e.g. bench-kv).
     owns_model: bool,
-    /// Multimodal (vision) context, created from an mmproj GGUF file.
+    /// Pool of multimodal (vision) contexts for parallel CLIP encoding.
     /// None when no multimodal projector is loaded.
-    mtmd_ctx: Option<std::sync::Mutex<NonNull<mtmd_ffi::mtmd_context>>>,
+    pub(super) mtmd_pool: Option<MtmdPool>,
 }
 
 #[cfg(not(fox_stub))]
 impl Drop for LlamaCppModel {
     fn drop(&mut self) {
-        // Free the mtmd context first (uses the model internally).
-        if let Some(ref mtmd) = self.mtmd_ctx {
-            if let Ok(ctx) = mtmd.lock() {
-                unsafe { mtmd_ffi::mtmd_free(ctx.as_ptr()) };
-            }
+        // Free mtmd pool contexts first (they reference the model internally).
+        if let Some(ref pool) = self.mtmd_pool {
+            pool.free_all();
         }
         // Free the llama context (must happen before model is freed).
         if let Ok(ctx) = self._ctx.lock() {
@@ -214,6 +272,7 @@ impl LlamaCppModel {
         moe_offload_cpu: bool,
         mmproj_path: Option<&std::path::Path>,
         flash_attn: bool,
+        vision_contexts: usize,
     ) -> Result<Self> {
         // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
         // Fox shows its own clean progress spinner instead.
@@ -379,8 +438,8 @@ impl LlamaCppModel {
         #[allow(clippy::arc_with_non_send_sync)]
         let ctx_arc = Arc::new(std::sync::Mutex::new(ctx));
 
-        // Load multimodal projector (vision/CLIP encoder) if provided.
-        let mtmd_ctx = if let Some(mmproj) = mmproj_path {
+        // Load multimodal projector (vision/CLIP encoder) pool if provided.
+        let mtmd_pool = if let Some(mmproj) = mmproj_path {
             let mmproj_cstr = std::ffi::CString::new(
                 mmproj
                     .to_str()
@@ -388,23 +447,48 @@ impl LlamaCppModel {
             )?;
             let mut mtmd_params = unsafe { mtmd_ffi::mtmd_context_params_default() };
             mtmd_params.use_gpu = true;
-            // Suppress mtmd logging (fox handles its own logging).
             unsafe {
                 mtmd_ffi::mtmd_log_set(Some(noop_log), std::ptr::null_mut());
             }
-            let raw = unsafe {
-                mtmd_ffi::mtmd_init_from_file(
-                    mmproj_cstr.as_ptr(),
-                    model.as_ptr() as *const _,
-                    mtmd_params,
-                )
-            };
-            match NonNull::new(raw) {
-                Some(ptr) => Some(std::sync::Mutex::new(ptr)),
-                None => {
-                    tracing::warn!(mmproj = ?mmproj, "failed to load multimodal projector");
-                    None
+
+            let n_contexts = vision_contexts.max(1);
+            let mut pool_ctxs: Vec<NonNull<mtmd_ffi::mtmd_context>> = Vec::new();
+            for i in 0..n_contexts {
+                let raw = unsafe {
+                    mtmd_ffi::mtmd_init_from_file(
+                        mmproj_cstr.as_ptr(),
+                        model.as_ptr() as *const _,
+                        mtmd_params,
+                    )
+                };
+                match NonNull::new(raw) {
+                    Some(ptr) => pool_ctxs.push(ptr),
+                    None => {
+                        if i == 0 {
+                            tracing::warn!(mmproj = ?mmproj, "failed to load multimodal projector");
+                        } else {
+                            tracing::warn!(
+                                context_idx = i,
+                                "failed to create additional mtmd context, using {} contexts",
+                                pool_ctxs.len()
+                            );
+                        }
+                        break;
+                    }
                 }
+            }
+            if pool_ctxs.is_empty() {
+                None
+            } else {
+                let n_embd_inp =
+                    unsafe { ffi::llama_model_n_embd_inp(model.as_ptr()) } as usize;
+                if n_contexts > 1 {
+                    tracing::info!(
+                        count = pool_ctxs.len(),
+                        "created mtmd context pool for parallel CLIP encoding"
+                    );
+                }
+                Some(MtmdPool::new(pool_ctxs, n_embd_inp))
             }
         } else {
             None
@@ -418,7 +502,7 @@ impl LlamaCppModel {
             eos_token,
             effective_ctx: effective_max_ctx,
             owns_model: true,
-            mtmd_ctx,
+            mtmd_pool,
         })
     }
 
@@ -490,7 +574,7 @@ impl LlamaCppModel {
             eos_token: self.eos_token,
             effective_ctx: effective_max_ctx,
             owns_model: false, // weights are owned by the original LlamaCppModel
-            mtmd_ctx: None,    // new_context is for bench-kv; vision not needed
+            mtmd_pool: None,   // new_context is for bench-kv; vision not needed
         })
     }
 }
@@ -656,7 +740,7 @@ impl Model for LlamaCppModel {
     }
 
     fn supports_vision(&self) -> bool {
-        self.mtmd_ctx.is_some()
+        self.mtmd_pool.is_some()
     }
 
     fn vision_prefill_sync(&self, params: &super::VisionPrefillParams) -> Result<(usize, Logits)> {
@@ -664,6 +748,28 @@ impl Model for LlamaCppModel {
             params.seq_id,
             &params.text_prompt,
             &params.image_bytes,
+            params.temperature,
+            params.top_p,
+            params.top_k,
+            params.repetition_penalty,
+            params.seed,
+        )
+    }
+
+    fn vision_preprocess_sync(
+        &self,
+        params: &super::VisionPreprocessParams,
+    ) -> Result<super::PreprocessedVision> {
+        self.do_vision_preprocess(&params.text_prompt, &params.image_bytes)
+    }
+
+    fn vision_decode_prefill_sync(
+        &self,
+        params: &super::VisionDecodeParams,
+    ) -> Result<(usize, Logits)> {
+        self.do_vision_decode_prefill(
+            params.seq_id,
+            &params.preprocessed,
             params.temperature,
             params.top_p,
             params.top_k,

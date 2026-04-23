@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 
 use crate::engine::ffi;
 use crate::engine::model::sampling::{sample_greedy, sample_token, SamplerParams};
-use crate::engine::model::{InferenceRequestForModel, Logits};
+use crate::engine::model::{InferenceRequestForModel, Logits, PreprocessedVision};
 use crate::engine::mtmd_ffi;
 
 use super::LlamaCppModel;
@@ -299,6 +299,270 @@ impl LlamaCppModel {
         Ok(embeddings)
     }
 
+    /// Phase 1: Preprocess a vision request off the inference thread.
+    /// Decodes image, tokenizes text+image, and runs CLIP encoding.
+    /// Only needs an mtmd context (acquired from pool), not llama_context.
+    pub(super) fn do_vision_preprocess(
+        &self,
+        text_prompt: &str,
+        image_bytes: &[u8],
+    ) -> Result<PreprocessedVision> {
+        let pool = self
+            .mtmd_pool
+            .as_ref()
+            .ok_or_else(|| anyhow!("no multimodal projector loaded"))?;
+
+        let mtmd_ptr_nn = pool.acquire();
+        let mtmd_ptr = mtmd_ptr_nn.as_ptr();
+
+        let result = (|| -> Result<PreprocessedVision> {
+            let bitmap = unsafe {
+                mtmd_ffi::mtmd_helper_bitmap_init_from_buf(
+                    mtmd_ptr,
+                    image_bytes.as_ptr(),
+                    image_bytes.len(),
+                )
+            };
+            if bitmap.is_null() {
+                return Err(anyhow!(
+                    "failed to decode image (invalid or unsupported format)"
+                ));
+            }
+
+            let prompt_cstr = std::ffi::CString::new(text_prompt)
+                .map_err(|_| anyhow!("prompt contains null byte"))?;
+            let input_text = mtmd_ffi::mtmd_input_text {
+                text: prompt_cstr.as_ptr(),
+                add_special: true,
+                parse_special: true,
+            };
+
+            let chunks = unsafe { mtmd_ffi::mtmd_input_chunks_init() };
+            if chunks.is_null() {
+                unsafe { mtmd_ffi::mtmd_bitmap_free(bitmap) };
+                return Err(anyhow!("failed to allocate mtmd_input_chunks"));
+            }
+
+            let bitmaps: [*const mtmd_ffi::mtmd_bitmap; 1] = [bitmap as *const _];
+            let tok_ret = unsafe {
+                mtmd_ffi::mtmd_tokenize(
+                    mtmd_ptr,
+                    chunks,
+                    &input_text,
+                    bitmaps.as_ptr() as *mut *const _,
+                    1,
+                )
+            };
+
+            unsafe { mtmd_ffi::mtmd_bitmap_free(bitmap) };
+
+            if tok_ret != 0 {
+                unsafe { mtmd_ffi::mtmd_input_chunks_free(chunks) };
+                return Err(anyhow!("mtmd_tokenize failed (code {})", tok_ret));
+            }
+
+            // CLIP-encode each image/audio chunk and copy embeddings out.
+            let n_chunks = unsafe { mtmd_ffi::mtmd_input_chunks_size(chunks) };
+            let n_embd_inp = pool.n_embd_inp;
+            let mut image_embeddings: Vec<(usize, Vec<f32>)> = Vec::new();
+
+            for i in 0..n_chunks {
+                let chunk = unsafe { mtmd_ffi::mtmd_input_chunks_get(chunks, i) };
+                let chunk_type = unsafe { mtmd_ffi::mtmd_input_chunk_get_type(chunk) };
+                // MTMD_INPUT_CHUNK_TYPE_TEXT = 0, IMAGE = 1, AUDIO = 2
+                if chunk_type == 0 {
+                    continue;
+                }
+
+                let encode_ret = unsafe { mtmd_ffi::mtmd_encode_chunk(mtmd_ptr, chunk) };
+                if encode_ret != 0 {
+                    unsafe { mtmd_ffi::mtmd_input_chunks_free(chunks) };
+                    return Err(anyhow!("mtmd_encode_chunk failed (code {})", encode_ret));
+                }
+
+                let n_tokens =
+                    unsafe { mtmd_ffi::mtmd_input_chunk_get_n_tokens(chunk) } as usize;
+                let embd_ptr = unsafe { mtmd_ffi::mtmd_get_output_embd(mtmd_ptr) };
+                if embd_ptr.is_null() {
+                    unsafe { mtmd_ffi::mtmd_input_chunks_free(chunks) };
+                    return Err(anyhow!("mtmd_get_output_embd returned null"));
+                }
+
+                let embd_len = n_embd_inp * n_tokens;
+                let embd_slice = unsafe { std::slice::from_raw_parts(embd_ptr, embd_len) };
+                image_embeddings.push((i, embd_slice.to_vec()));
+            }
+
+            Ok(PreprocessedVision {
+                chunks,
+                image_embeddings,
+            })
+        })();
+
+        pool.release(mtmd_ptr_nn);
+        result
+    }
+
+    /// Phase 2: Decode preprocessed vision chunks into the LLM's KV cache.
+    /// Uses pre-encoded CLIP embeddings — runs on the inference thread with llama_context.
+    pub(super) fn do_vision_decode_prefill(
+        &self,
+        seq_id: i32,
+        preprocessed: &PreprocessedVision,
+        temperature: f32,
+        top_p: f32,
+        top_k: u32,
+        repetition_penalty: f32,
+        seed: Option<u64>,
+    ) -> Result<(usize, Logits)> {
+        let pool = self
+            .mtmd_pool
+            .as_ref()
+            .ok_or_else(|| anyhow!("no multimodal projector loaded"))?;
+
+        let mtmd_ptr_nn = pool.acquire();
+        let mtmd_ptr = mtmd_ptr_nn.as_ptr();
+
+        let result = (|| -> Result<(usize, Logits)> {
+            let ctx_guard = self
+                ._ctx
+                .lock()
+                .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+            let lctx = ctx_guard.as_ptr();
+            let lctx_mtmd = lctx as *mut mtmd_ffi::llama_context;
+            let n_batch = self.effective_ctx as i32;
+
+            let chunks = preprocessed.chunks;
+            let n_chunks = unsafe { mtmd_ffi::mtmd_input_chunks_size(chunks) };
+            let mut n_past: i32 = 0;
+
+            // Build a map from chunk index to pre-encoded embeddings.
+            let mut embd_map: std::collections::HashMap<usize, &Vec<f32>> =
+                std::collections::HashMap::new();
+            for (idx, embd) in &preprocessed.image_embeddings {
+                embd_map.insert(*idx, embd);
+            }
+
+            for i in 0..n_chunks {
+                let chunk = unsafe { mtmd_ffi::mtmd_input_chunks_get(chunks, i) };
+                let chunk_type = unsafe { mtmd_ffi::mtmd_input_chunk_get_type(chunk) };
+                let is_last = i == n_chunks - 1;
+
+                if chunk_type == 0 {
+                    // Text chunk: manually batch-decode tokens.
+                    let mut n_tokens_out: usize = 0;
+                    let tokens_ptr = unsafe {
+                        mtmd_ffi::mtmd_input_chunk_get_tokens_text(chunk, &mut n_tokens_out)
+                    };
+                    if tokens_ptr.is_null() || n_tokens_out == 0 {
+                        continue;
+                    }
+
+                    let text_batch = unsafe { ffi::llama_batch_init(n_batch, 0, 1) };
+                    let tokens =
+                        unsafe { std::slice::from_raw_parts(tokens_ptr, n_tokens_out) };
+
+                    let mut ti = 0usize;
+                    while ti < n_tokens_out {
+                        let batch_ptr = &text_batch as *const _ as *mut ffi::llama_batch;
+                        unsafe { (*batch_ptr).n_tokens = 0 };
+
+                        while ti < n_tokens_out
+                            && (unsafe { (*batch_ptr).n_tokens } as i32) < n_batch
+                        {
+                            let j = unsafe { (*batch_ptr).n_tokens } as usize;
+                            unsafe {
+                                *(*batch_ptr).token.add(j) = tokens[ti];
+                                *(*batch_ptr).pos.add(j) = n_past;
+                                *(*batch_ptr).n_seq_id.add(j) = 1;
+                                *(*(*batch_ptr).seq_id.add(j)) = seq_id;
+                                *(*batch_ptr).logits.add(j) = 0;
+                                (*batch_ptr).n_tokens += 1;
+                            }
+                            n_past += 1;
+                            ti += 1;
+                        }
+
+                        let at_end = ti == n_tokens_out;
+                        if is_last && at_end {
+                            let n = unsafe { (*batch_ptr).n_tokens } as usize;
+                            if n > 0 {
+                                unsafe {
+                                    *(*batch_ptr).logits.add(n - 1) = 1;
+                                }
+                            }
+                        }
+
+                        let ret = unsafe { ffi::llama_decode(lctx, text_batch) };
+                        if ret != 0 {
+                            unsafe { ffi::llama_batch_free(text_batch) };
+                            return Err(anyhow!("llama_decode failed on text chunk (code {})", ret));
+                        }
+                    }
+                    unsafe { ffi::llama_batch_free(text_batch) };
+                } else {
+                    // Image/audio chunk: use pre-encoded embeddings.
+                    let embd = embd_map
+                        .get(&i)
+                        .ok_or_else(|| anyhow!("missing pre-encoded embeddings for chunk {}", i))?;
+
+                    let mut chunk_n_past: i32 = 0;
+                    let ret = unsafe {
+                        mtmd_ffi::mtmd_helper_decode_image_chunk(
+                            mtmd_ptr,
+                            lctx_mtmd,
+                            chunk,
+                            embd.as_ptr() as *mut f32,
+                            n_past,
+                            seq_id,
+                            n_batch,
+                            &mut chunk_n_past,
+                        )
+                    };
+                    if ret != 0 {
+                        return Err(anyhow!(
+                            "mtmd_helper_decode_image_chunk failed (code {})",
+                            ret
+                        ));
+                    }
+                    n_past = chunk_n_past;
+                }
+            }
+
+            // Sample from logits.
+            let logits_ptr = unsafe { ffi::llama_get_logits_ith(lctx, -1) };
+            if logits_ptr.is_null() {
+                return Err(anyhow!("no logits after vision decode prefill"));
+            }
+            let n_vocab = self.config.vocab_size as i32;
+            let logits_slice =
+                unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
+
+            let sampled = sample_token(
+                logits_slice,
+                SamplerParams {
+                    temperature,
+                    top_p,
+                    top_k,
+                    min_p: 0.0,
+                    repetition_penalty,
+                    frequency_penalty: 0.0,
+                    presence_penalty: 0.0,
+                    generated_ids: &[],
+                    seed,
+                    token_count: 0,
+                },
+            );
+            let values = logits_slice.to_vec();
+
+            Ok((n_past as usize, Logits::new(values, sampled)))
+        })();
+
+        pool.release(mtmd_ptr_nn);
+        result
+    }
+
+    /// Combined vision prefill (backward compat): preprocess + decode in one call.
     pub(super) fn do_vision_prefill(
         &self,
         seq_id: i32,
@@ -310,120 +574,15 @@ impl LlamaCppModel {
         repetition_penalty: f32,
         seed: Option<u64>,
     ) -> Result<(usize, Logits)> {
-        let mtmd_guard = self
-            .mtmd_ctx
-            .as_ref()
-            .ok_or_else(|| anyhow!("no multimodal projector loaded"))?
-            .lock()
-            .map_err(|e| anyhow!("mtmd lock poisoned: {}", e))?;
-        let mtmd_ptr = mtmd_guard.as_ptr();
-
-        let bitmap = unsafe {
-            mtmd_ffi::mtmd_helper_bitmap_init_from_buf(
-                mtmd_ptr,
-                image_bytes.as_ptr(),
-                image_bytes.len(),
-            )
-        };
-        if bitmap.is_null() {
-            return Err(anyhow!(
-                "failed to decode image (invalid or unsupported format)"
-            ));
-        }
-
-        let prompt_cstr = std::ffi::CString::new(text_prompt)
-            .map_err(|_| anyhow!("prompt contains null byte"))?;
-        let input_text = mtmd_ffi::mtmd_input_text {
-            text: prompt_cstr.as_ptr(),
-            add_special: true,
-            parse_special: true,
-        };
-
-        let chunks = unsafe { mtmd_ffi::mtmd_input_chunks_init() };
-        if chunks.is_null() {
-            unsafe { mtmd_ffi::mtmd_bitmap_free(bitmap) };
-            return Err(anyhow!("failed to allocate mtmd_input_chunks"));
-        }
-
-        let bitmaps: [*const mtmd_ffi::mtmd_bitmap; 1] = [bitmap as *const _];
-        let tok_ret = unsafe {
-            mtmd_ffi::mtmd_tokenize(
-                mtmd_ptr,
-                chunks,
-                &input_text,
-                bitmaps.as_ptr() as *mut *const _,
-                1,
-            )
-        };
-        if tok_ret != 0 {
-            unsafe {
-                mtmd_ffi::mtmd_input_chunks_free(chunks);
-                mtmd_ffi::mtmd_bitmap_free(bitmap);
-            }
-            return Err(anyhow!("mtmd_tokenize failed (code {})", tok_ret));
-        }
-
-        let ctx_guard = self
-            ._ctx
-            .lock()
-            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
-        let lctx = ctx_guard.as_ptr();
-        let n_batch = self.effective_ctx as i32;
-
-        let mut new_n_past: i32 = 0;
-        // mtmd_ffi and ffi have separate bindgen-generated llama_context types;
-        // they're the same C struct so a pointer cast is safe.
-        let lctx_mtmd = lctx as *mut mtmd_ffi::llama_context;
-        let eval_ret = unsafe {
-            mtmd_ffi::mtmd_helper_eval_chunks(
-                mtmd_ptr,
-                lctx_mtmd,
-                chunks,
-                0, // n_past = 0 (fresh sequence)
-                seq_id,
-                n_batch,
-                true, // logits_last
-                &mut new_n_past,
-            )
-        };
-
-        unsafe {
-            mtmd_ffi::mtmd_input_chunks_free(chunks);
-            mtmd_ffi::mtmd_bitmap_free(bitmap);
-        }
-
-        if eval_ret != 0 {
-            return Err(anyhow!(
-                "mtmd_helper_eval_chunks failed (code {})",
-                eval_ret
-            ));
-        }
-
-        let n_vocab = self.config.vocab_size as i32;
-        let logits_ptr = unsafe { ffi::llama_get_logits_ith(lctx, -1) };
-        if logits_ptr.is_null() {
-            return Err(anyhow!("no logits after vision prefill"));
-        }
-        let logits_slice: &[f32] =
-            unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
-
-        let sampled = sample_token(
-            logits_slice,
-            SamplerParams {
-                temperature,
-                top_p,
-                top_k,
-                min_p: 0.0,
-                repetition_penalty,
-                frequency_penalty: 0.0,
-                presence_penalty: 0.0,
-                generated_ids: &[],
-                seed,
-                token_count: 0,
-            },
-        );
-        let values = logits_slice.to_vec();
-
-        Ok((new_n_past as usize, Logits::new(values, sampled)))
+        let preprocessed = self.do_vision_preprocess(text_prompt, image_bytes)?;
+        self.do_vision_decode_prefill(
+            seq_id,
+            &preprocessed,
+            temperature,
+            top_p,
+            top_k,
+            repetition_penalty,
+            seed,
+        )
     }
 }
