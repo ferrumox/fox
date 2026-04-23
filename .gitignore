@@ -29,4 +29,4 @@ Thumbs.db
 .env.local
 *.log
 
-.lab
+.lab.claude/worktrees/
