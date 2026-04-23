@@ -28,6 +28,7 @@ jobs:
             ext: ""
             archive: tar
             artifact_suffix: ""
+            build_deb: true
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
             use_cross: false
@@ -197,6 +198,20 @@ jobs:
           "ASSET=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
           "ASSET_SHA256=${zip}.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Install cargo-deb
+        if: matrix.build_deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build .deb package
+        if: matrix.build_deb
+        shell: bash
+        run: |
+          cargo deb --no-build --target ${{ matrix.target }}
+          DEB=$(ls target/${{ matrix.target }}/debian/*.deb)
+          sha256sum "$DEB" > "${DEB}.sha256"
+          echo "DEB_ASSET=$DEB" >> "$GITHUB_ENV"
+          echo "DEB_ASSET_SHA256=${DEB}.sha256" >> "$GITHUB_ENV"
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
@@ -204,3 +219,5 @@ jobs:
           files: |
             ${{ env.ASSET }}
             ${{ env.ASSET_SHA256 }}
+            ${{ env.DEB_ASSET }}
+            ${{ env.DEB_ASSET_SHA256 }}

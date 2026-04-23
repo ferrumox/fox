@@ -66,3 +66,22 @@ tokio-test = "0.4"
 tempfile = "3"
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
+
+[package.metadata.deb]
+maintainer = "Ferrumox Contributors"
+copyright = "2026 Ferrumox contributors"
+depends = "$auto"
+suggests = "nvidia-cuda-toolkit"
+section = "utils"
+priority = "optional"
+extended-description = """\
+High-performance LLM inference engine built in Rust. \
+Provides OpenAI and Ollama compatible APIs, continuous batching, \
+KV cache management, and GPU acceleration via llama.cpp."""
+assets = [
+    ["target/release/fox", "usr/bin/", "755"],
+    ["target/release/fox-bench", "usr/bin/", "755"],
+    ["target/release/libggml*.so*", "usr/lib/", "644"],
+    ["target/release/libllama*.so*", "usr/lib/", "644"],
+    ["fox.service", "lib/systemd/system/fox@.service", "644"],
+]

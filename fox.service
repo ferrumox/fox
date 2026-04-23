@@ -3,7 +3,7 @@ Description=Ferrumox LLM inference server (%i)
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/fox serve --model-path %i
+ExecStart=/usr/bin/fox serve --model-path %i
 Restart=on-failure
 RestartSec=5
 
