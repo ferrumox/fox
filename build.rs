@@ -105,6 +105,7 @@ fn main() {
         if std::path::Path::new(nvcc_path).exists() {
             println!("cargo:warning=CUDA found at {nvcc_path} — building libggml-cuda.so");
             cmake_config.define("GGML_CUDA", "ON");
+            cmake_config.define("GGML_CUDA_GRAPHS", "ON");
             cmake_config.define("CMAKE_CUDA_COMPILER", nvcc_path);
             true
         } else {
