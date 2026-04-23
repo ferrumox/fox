@@ -5,6 +5,7 @@ pub mod cli;
 pub mod config;
 pub(crate) mod engine;
 pub(crate) mod kv_cache;
+pub(crate) mod mcp;
 pub mod metrics;
 pub mod model_registry;
 pub mod registry;
