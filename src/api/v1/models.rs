@@ -168,6 +168,7 @@ mod tests {
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
+            flash_attn: true,
         };
         let reg = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
         let app = router(
@@ -178,6 +179,7 @@ mod tests {
             dir.path().to_path_buf(),
             None,
             None,
+            "*",
         );
         let resp = get_req(app, "/v1/models").await;
         assert_eq!(resp.status(), 200);

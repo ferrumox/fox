@@ -486,6 +486,7 @@ mod tests {
             dir.path().to_path_buf(),
             None,
             None,
+            "*",
         );
         let body = serde_json::json!({
             "model": "stub",

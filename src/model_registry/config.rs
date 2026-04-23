@@ -43,4 +43,6 @@ pub struct RegistryConfig {
     /// When true, MoE expert tensors are pinned to CPU RAM (via `tensor_buft_overrides`).
     /// Useful for MoE models (e.g. DeepSeek, Mixtral) where expert weights don't fit in VRAM.
     pub moe_offload_cpu: bool,
+    /// Enable Flash Attention for faster inference and lower memory usage.
+    pub flash_attn: bool,
 }

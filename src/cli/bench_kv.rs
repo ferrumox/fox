@@ -111,6 +111,7 @@ async fn run_one_type(
         GPU_FRACTION,
         type_id,
         type_id,
+        true,
     )?;
 
     let model_config = model.model_config();
@@ -306,6 +307,7 @@ pub async fn run_bench_kv(args: BenchKvArgs) -> Result<()> {
         split_mode,
         &tensor_split,
         args.moe_cpu,
+        true,
     )?;
 
     spinner.finish_and_clear();

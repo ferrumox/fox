@@ -201,6 +201,7 @@ impl LlamaCppModel {
         split_mode: u32,
         tensor_split: &[f32],
         moe_offload_cpu: bool,
+        flash_attn: bool,
     ) -> Result<Self> {
         // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
         // Fox shows its own clean progress spinner instead.
@@ -349,7 +350,7 @@ impl LlamaCppModel {
         // n_batch must be at least as large as n_ctx to handle full prompts in one pass
         ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
-        ctx_params.flash_attn_type = 1; // LLAMA_FLASH_ATTN_TYPE_ENABLED
+        ctx_params.flash_attn_type = if flash_attn { 1 } else { 0 };
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;
         ctx_params.type_v = type_v as _;
@@ -391,6 +392,7 @@ impl LlamaCppModel {
         gpu_memory_fraction: f32,
         type_k: u32,
         type_v: u32,
+        flash_attn: bool,
     ) -> Result<Self> {
         let model = self._model;
 
@@ -424,7 +426,7 @@ impl LlamaCppModel {
         ctx_params.n_ctx = n_ctx;
         ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
-        ctx_params.flash_attn_type = 1;
+        ctx_params.flash_attn_type = if flash_attn { 1 } else { 0 };
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;
         ctx_params.type_v = type_v as _;
