@@ -244,6 +244,7 @@ pub struct VisionPreprocessParams {
 
 /// Result of vision preprocessing: tokenized chunks + pre-encoded CLIP embeddings.
 /// Owns the C-allocated chunks pointer and frees it on drop.
+#[cfg_attr(fox_stub, allow(dead_code))]
 pub struct PreprocessedVision {
     pub(crate) chunks: *mut std::ffi::c_void,
     /// Pre-encoded CLIP embeddings for each image/audio chunk, keyed by chunk index.
