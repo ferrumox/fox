@@ -353,33 +353,21 @@ fn main() {
     let mtmd_dir = llama_root.join("tools").join("mtmd");
     let mtmd_models_dir = mtmd_dir.join("models");
 
-    let mtmd_sources: Vec<PathBuf> = vec![
+    let mut mtmd_sources: Vec<PathBuf> = vec![
         mtmd_dir.join("mtmd.cpp"),
         mtmd_dir.join("mtmd-audio.cpp"),
         mtmd_dir.join("mtmd-image.cpp"),
         mtmd_dir.join("mtmd-helper.cpp"),
         mtmd_dir.join("clip.cpp"),
-        mtmd_models_dir.join("cogvlm.cpp"),
-        mtmd_models_dir.join("conformer.cpp"),
-        mtmd_models_dir.join("deepseekocr.cpp"),
-        mtmd_models_dir.join("gemma4v.cpp"),
-        mtmd_models_dir.join("glm4v.cpp"),
-        mtmd_models_dir.join("internvl.cpp"),
-        mtmd_models_dir.join("kimik25.cpp"),
-        mtmd_models_dir.join("kimivl.cpp"),
-        mtmd_models_dir.join("llama4.cpp"),
-        mtmd_models_dir.join("llava.cpp"),
-        mtmd_models_dir.join("minicpmv.cpp"),
-        mtmd_models_dir.join("mobilenetv5.cpp"),
-        mtmd_models_dir.join("nemotron-v2-vl.cpp"),
-        mtmd_models_dir.join("paddleocr.cpp"),
-        mtmd_models_dir.join("pixtral.cpp"),
-        mtmd_models_dir.join("qwen2vl.cpp"),
-        mtmd_models_dir.join("qwen3vl.cpp"),
-        mtmd_models_dir.join("siglip.cpp"),
-        mtmd_models_dir.join("whisper-enc.cpp"),
-        mtmd_models_dir.join("youtuvl.cpp"),
     ];
+    if let Ok(entries) = std::fs::read_dir(&mtmd_models_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("cpp") {
+                mtmd_sources.push(p);
+            }
+        }
+    }
 
     let mut mtmd_build = cc::Build::new();
     mtmd_build

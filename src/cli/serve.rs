@@ -96,20 +96,18 @@ pub struct ServeArgs {
     #[arg(long, default_value = DEFAULT_KEEP_ALIVE_SECS, env = "FOX_KEEP_ALIVE_SECS")]
     pub keep_alive_secs: u64,
 
-    /// KV cache quantization for both K and V: f16 (default), q8_0, q4_0, turbo3, turbo4, turbo2.
+    /// KV cache quantization for both K and V: f16 (default), q8_0, q4_0.
     /// Use --type-k / --type-v to set K and V independently (asymmetric configs).
-    /// turbo3 (3.1 bpw, ~4.9x compression) is the recommended TurboQuant sweet spot.
-    /// TurboQuant requires Flash Attention and head_dim divisible by 128.
     #[arg(long, default_value = DEFAULT_TYPE_KV, env = "FOX_TYPE_KV")]
     pub type_kv: String,
 
     /// Key cache element type (overrides --type-kv for K).
-    /// Values: f16, q8_0, q4_0, turbo3, turbo4, turbo2.
+    /// Values: f16, q8_0, q4_0.
     #[arg(long, env = "FOX_TYPE_K")]
     pub type_k: Option<String>,
 
     /// Value cache element type (overrides --type-kv for V).
-    /// Values: f16, q8_0, q4_0, turbo3, turbo4, turbo2.
+    /// Values: f16, q8_0, q4_0.
     #[arg(long, env = "FOX_TYPE_V")]
     pub type_v: Option<String>,
 
@@ -171,9 +169,6 @@ fn parse_kv_type(s: &str) -> u32 {
     match s {
         "q8_0" => kv_type::Q8_0,
         "q4_0" => kv_type::Q4_0,
-        "turbo3" => kv_type::TURBO3,
-        "turbo4" => kv_type::TURBO4,
-        "turbo2" => kv_type::TURBO2,
         _ => kv_type::F16,
     }
 }

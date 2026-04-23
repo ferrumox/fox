@@ -43,7 +43,7 @@ pub enum Command {
     Run(run::RunArgs),
     /// Benchmark model load time and inference throughput
     Bench(bench::BenchArgs),
-    /// Compare KV cache quantization types (F16, Q8_0, TurboQuant) side-by-side
+    /// Compare KV cache quantization types (F16, Q8_0, Q4_0) side-by-side
     BenchKv(bench_kv::BenchKvArgs),
     /// Download a GGUF model from HuggingFace Hub
     Pull(pull::PullArgs),

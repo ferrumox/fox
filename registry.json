@@ -88,14 +88,6 @@
       "size_gb": 4.7,
       "tags": ["chat", "multilingual", "coding"]
     },
-    "deepseek-r1": {
-      "aliases": ["deepseek", "r1"],
-      "repo": "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF",
-      "recommended": "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
-      "description": "DeepSeek R1 Distill 7B — chain-of-thought reasoning",
-      "size_gb": 4.7,
-      "tags": ["reasoning", "math", "thinking"]
-    },
     "granite3.1-dense": {
       "aliases": ["granite", "granite3.1:8b"],
       "repo": "bartowski/granite-3.1-8b-instruct-GGUF",
@@ -103,6 +95,22 @@
       "description": "IBM Granite 3.1 8B — modern code & reasoning model (Dec 2024)",
       "size_gb": 4.9,
       "tags": ["coding", "chat", "reasoning"]
+    },
+    "qwen3.6": {
+      "aliases": ["qwen3.6:27b"],
+      "repo": "unsloth/Qwen3.6-27B-GGUF",
+      "recommended": "Qwen3.6-27B-Q4_K_M.gguf",
+      "description": "Alibaba Qwen 3.6 27B — dense model, vision-capable",
+      "size_gb": 15.7,
+      "tags": ["chat", "multilingual", "vision", "reasoning"]
+    },
+    "qwen3.6-moe": {
+      "aliases": ["qwen3.6:35b", "qwen3.6-a3b"],
+      "repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
+      "recommended": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+      "description": "Alibaba Qwen 3.6 35B-A3B — MoE with 3B active params, vision-capable",
+      "size_gb": 20.6,
+      "tags": ["chat", "moe", "multilingual", "vision", "reasoning"]
     },
     "nomic-embed": {
       "aliases": ["embed", "nomic"],

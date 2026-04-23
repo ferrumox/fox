@@ -1,0 +1,96 @@
+name: Update llama.cpp
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Monday 6 AM UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  SUBMODULE_PATH: vendor/llama.cpp
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Check for upstream updates
+        id: check
+        working-directory: ${{ env.SUBMODULE_PATH }}
+        run: |
+          git fetch origin master
+          CURRENT=$(git rev-parse HEAD)
+          LATEST=$(git rev-parse origin/master)
+          BEHIND=$(git rev-list --count HEAD..origin/master)
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          if [ "$CURRENT" = "$LATEST" ]; then
+            echo "Already up to date with llama.cpp master"
+          else
+            echo "$BEHIND new commits available"
+          fi
+
+      - name: Update submodule
+        if: steps.check.outputs.behind != '0'
+        working-directory: ${{ env.SUBMODULE_PATH }}
+        run: git checkout origin/master
+
+      - name: Verify build
+        if: steps.check.outputs.behind != '0'
+        run: |
+          FOX_SKIP_LLAMA=1 rustup run stable cargo check 2>&1
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Create pull request
+        if: steps.check.outputs.behind != '0'
+        run: |
+          BEHIND=${{ steps.check.outputs.behind }}
+          SHORT_OLD=$(echo "${{ steps.check.outputs.current }}" | cut -c1-10)
+          SHORT_NEW=$(echo "${{ steps.check.outputs.latest }}" | cut -c1-10)
+          BRANCH="auto/llama-cpp-${SHORT_NEW}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Close any existing auto-update PRs
+          gh pr list --label "llama.cpp-update" --state open --json number --jq '.[].number' \
+            | xargs -I{} gh pr close {} --comment "Superseded by newer update" 2>/dev/null || true
+
+          git checkout -b "$BRANCH"
+          git add "${{ env.SUBMODULE_PATH }}"
+          git commit -m "$(cat <<EOF
+          chore: update llama.cpp submodule (+${BEHIND} commits)
+
+          ${SHORT_OLD} → ${SHORT_NEW}
+          EOF
+          )"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --title "chore: update llama.cpp (+${BEHIND} upstream commits)" \
+            --label "llama.cpp-update" \
+            --body "$(cat <<EOF
+          ## Summary
+          - Updates \`vendor/llama.cpp\` submodule to latest master
+          - **${BEHIND}** new upstream commits (\`${SHORT_OLD}\` → \`${SHORT_NEW}\`)
+          - [Compare changes](https://github.com/ggml-org/llama.cpp/compare/${SHORT_OLD}...${SHORT_NEW})
+
+          ## Test plan
+          - [ ] CI passes (\`cargo check\` verified in workflow)
+          - [ ] CUDA Docker build succeeds
+          - [ ] Smoke test: serve a model and run a completion
+          EOF
+          )"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

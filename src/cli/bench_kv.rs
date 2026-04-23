@@ -4,7 +4,7 @@
 // KV type — no weight reload between runs, so GPU memory stays stable.
 //
 //   fox bench-kv phi
-//   fox bench-kv phi --types f16,q8_0,turbo3,turbo4,turbo2
+//   fox bench-kv phi --types f16,q8_0,q4_0
 //   fox bench-kv phi --runs 3 --max-context-len 4096
 
 use std::path::PathBuf;
@@ -23,7 +23,7 @@ use crate::model_registry::kv_type;
 use crate::scheduler::{InferenceRequest, SamplingParams};
 
 const DEFAULT_PROMPT: &str = "Explain what a large language model is in two sentences.";
-const DEFAULT_TYPES: &str = "f16,q8_0,turbo3,turbo4,turbo2";
+const DEFAULT_TYPES: &str = "f16,q8_0,q4_0";
 const BLOCK_SIZE: usize = 16;
 const GPU_FRACTION: f32 = 0.85;
 
@@ -34,7 +34,7 @@ pub struct BenchKvArgs {
     pub model: String,
 
     /// Comma-separated KV cache types to compare.
-    /// Supported: f16, q8_0, q4_0, turbo3, turbo4, turbo2
+    /// Supported: f16, q8_0, q4_0
     #[arg(long, default_value = DEFAULT_TYPES)]
     pub types: String,
 
@@ -88,9 +88,6 @@ fn parse_kv_type_label(s: &str) -> Option<(&'static str, u32)> {
         "f16" => Some(("f16", kv_type::F16)),
         "q8_0" => Some(("q8_0", kv_type::Q8_0)),
         "q4_0" => Some(("q4_0", kv_type::Q4_0)),
-        "turbo3" => Some(("turbo3", kv_type::TURBO3)),
-        "turbo4" => Some(("turbo4", kv_type::TURBO4)),
-        "turbo2" => Some(("turbo2", kv_type::TURBO2)),
         _ => None,
     }
 }
@@ -282,7 +279,7 @@ pub async fn run_bench_kv(args: BenchKvArgs) -> Result<()> {
         .collect();
 
     if types.is_empty() {
-        anyhow::bail!("No valid KV types specified. Use: f16, q8_0, q4_0, turbo3, turbo4, turbo2");
+        anyhow::bail!("No valid KV types specified. Use: f16, q8_0, q4_0");
     }
 
     // ── Load model weights once with a minimal context ───────────────────────
@@ -385,12 +382,7 @@ pub async fn run_bench_kv(args: BenchKvArgs) -> Result<()> {
             "—".to_string()
         };
 
-        let is_turbo = r.label.starts_with("turbo");
-        let label_display = if is_turbo {
-            format!("✦ {}", r.label)
-        } else {
-            format!("  {}", r.label)
-        };
+        let label_display = format!("  {}", r.label);
 
         eprintln!(
             "  {:<8}  {:>8}  {:>10}  {:>9}  {:>7}  {:>7}",
@@ -400,7 +392,6 @@ pub async fn run_bench_kv(args: BenchKvArgs) -> Result<()> {
 
     eprintln!();
     eprintln!("  blocks = available KV cache slots  ·  ctx-tokens = blocks × {BLOCK_SIZE}");
-    eprintln!("  ✦ = TurboQuant (requires flash attention + head_dim % 128 == 0)");
     eprintln!();
 
     Ok(())

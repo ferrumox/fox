@@ -37,9 +37,6 @@ fn kv_type_name(t: u32) -> &'static str {
         kv_type::F16 => "f16",
         kv_type::Q8_0 => "q8_0",
         kv_type::Q4_0 => "q4_0",
-        kv_type::TURBO3 => "turbo3",
-        kv_type::TURBO4 => "turbo4",
-        kv_type::TURBO2 => "turbo2",
         _ => "unknown",
     }
 }

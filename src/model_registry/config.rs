@@ -9,13 +9,6 @@ pub mod kv_type {
     pub const F16: u32 = 1;
     pub const Q4_0: u32 = 2;
     pub const Q8_0: u32 = 8;
-    /// TurboQuant 3-bit KV (3.1 bpw, ~4.9x compression). Recommended sweet spot.
-    /// Requires Flash Attention and head_dim divisible by 128.
-    pub const TURBO3: u32 = 41;
-    /// TurboQuant 4-bit KV (4.25 bpw, ~3.8x compression).
-    pub const TURBO4: u32 = 42;
-    /// TurboQuant 2-bit KV (2.1 bpw, ~6.4x compression).
-    pub const TURBO2: u32 = 43;
 }
 
 pub struct RegistryConfig {
