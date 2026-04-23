@@ -166,16 +166,8 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
     let client = build_client(args.hf_token.as_deref())?;
     let spec = parse_model_spec(&args.model_id);
 
-    // Resolve HF repo: raw input or search.
-    let hf_repo = match spec.raw_repo {
-        Some(repo) => repo,
-        None => {
-            eprintln!("Searching HuggingFace for \"{}\"…", spec.search_query);
-            let repo = search_top_repo(&spec.search_query, &client).await?;
-            eprintln!("Found: {}", repo);
-            repo
-        }
-    };
+    // Resolve HF repo: registry → raw input → HF search.
+    let (hf_repo, registry_filename) = resolve_repo(&spec, &client).await?;
 
     // Fetch file list from HF Hub API.
     let url = format!("{HF_API_BASE}/{hf_repo}");
@@ -214,7 +206,7 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         );
     }
 
-    // Select file: --filename > quant prefix > pick balanced from all files.
+    // Select file: --filename > registry recommended > quant prefix > pick balanced.
     let filename = if let Some(f) = args.filename {
         if !gguf_files.contains(&f) {
             anyhow::bail!(
@@ -229,6 +221,13 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
             );
         }
         f
+    } else if let Some(ref rec) = registry_filename {
+        if gguf_files.contains(rec) {
+            rec.clone()
+        } else {
+            let all: Vec<&String> = gguf_files.iter().collect();
+            pick_balanced(&all).to_string()
+        }
     } else if let Some(ref q) = spec.quant {
         let matches: Vec<&String> = gguf_files
             .iter()
@@ -338,6 +337,34 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
     Ok(())
 }
 
+/// Resolve a model spec to an HF repo, checking the curated registry first.
+/// Returns `(repo, Option<recommended_filename>)`.
+async fn resolve_repo(
+    spec: &ModelSpec,
+    client: &reqwest::Client,
+) -> Result<(String, Option<String>)> {
+    // If the user gave a raw HF repo path, use it directly.
+    if let Some(ref repo) = spec.raw_repo {
+        return Ok((repo.clone(), None));
+    }
+
+    // Check the curated registry before searching HF.
+    let registry = crate::registry::Registry::load();
+    if let Some((_canonical, model)) = registry.resolve(&spec.search_query) {
+        eprintln!("Using curated registry: {}", model.repo);
+        return Ok((model.repo, Some(model.recommended)));
+    }
+
+    // Also try the original input (before parse_model_spec split it).
+    // e.g. "llama3" won't match search_query "llama3" if it was mapped to
+    // an alias, but the split format "gemma3 12b" won't be in the registry.
+
+    eprintln!("Searching HuggingFace for \"{}\"…", spec.search_query);
+    let repo = search_top_repo(&spec.search_query, client).await?;
+    eprintln!("Found: {}", repo);
+    Ok((repo, None))
+}
+
 fn build_client(token: Option<&str>) -> Result<reqwest::Client> {
     let mut headers = reqwest::header::HeaderMap::new();
     if let Some(tok) = token {
@@ -364,4 +391,113 @@ fn pick_balanced<'a>(files: &[&'a String]) -> &'a String {
         }
     }
     files[0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_model_spec_friendly_name() {
+        let spec = parse_model_spec("gemma3");
+        assert!(spec.raw_repo.is_none());
+        assert_eq!(spec.search_query, "gemma3");
+        assert!(spec.quant.is_none());
+    }
+
+    #[test]
+    fn test_parse_model_spec_with_size() {
+        let spec = parse_model_spec("gemma3:12b");
+        assert!(spec.raw_repo.is_none());
+        assert_eq!(spec.search_query, "gemma3 12b");
+        assert!(spec.quant.is_none());
+    }
+
+    #[test]
+    fn test_parse_model_spec_with_size_and_quant() {
+        let spec = parse_model_spec("gemma3:12b-q4");
+        assert!(spec.raw_repo.is_none());
+        assert_eq!(spec.search_query, "gemma3 12b");
+        assert_eq!(spec.quant.as_deref(), Some("Q4"));
+    }
+
+    #[test]
+    fn test_parse_model_spec_raw_repo() {
+        let spec = parse_model_spec("bartowski/gemma-3-12b-it-GGUF");
+        assert_eq!(
+            spec.raw_repo.as_deref(),
+            Some("bartowski/gemma-3-12b-it-GGUF")
+        );
+        assert!(spec.quant.is_none());
+    }
+
+    #[test]
+    fn test_parse_model_spec_raw_repo_with_quant() {
+        let spec = parse_model_spec("bartowski/gemma-3-12b-it-GGUF:q8");
+        assert_eq!(
+            spec.raw_repo.as_deref(),
+            Some("bartowski/gemma-3-12b-it-GGUF")
+        );
+        assert_eq!(spec.quant.as_deref(), Some("Q8"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_repo_from_registry() {
+        let spec = ModelSpec {
+            raw_repo: None,
+            search_query: "llama3".to_string(),
+            quant: None,
+        };
+        let client = reqwest::Client::new();
+        let (repo, recommended) = resolve_repo(&spec, &client).await.unwrap();
+        assert_eq!(repo, "bartowski/Llama-3.2-3B-Instruct-GGUF");
+        assert_eq!(
+            recommended.as_deref(),
+            Some("Llama-3.2-3B-Instruct-Q4_K_M.gguf")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_repo_from_registry_exact_key() {
+        let spec = ModelSpec {
+            raw_repo: None,
+            search_query: "nomic-embed".to_string(),
+            quant: None,
+        };
+        let client = reqwest::Client::new();
+        let (repo, recommended) = resolve_repo(&spec, &client).await.unwrap();
+        assert!(repo.contains("nomic"));
+        assert!(recommended.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_repo_raw_repo_bypasses_registry() {
+        let spec = ModelSpec {
+            raw_repo: Some("someone/custom-repo".to_string()),
+            search_query: "someone/custom-repo".to_string(),
+            quant: None,
+        };
+        let client = reqwest::Client::new();
+        let (repo, recommended) = resolve_repo(&spec, &client).await.unwrap();
+        assert_eq!(repo, "someone/custom-repo");
+        assert!(recommended.is_none());
+    }
+
+    #[test]
+    fn test_pick_balanced_prefers_q4_k_m() {
+        let files = [
+            "model-Q5_K_M.gguf".to_string(),
+            "model-Q4_K_M.gguf".to_string(),
+            "model-Q8_0.gguf".to_string(),
+        ];
+        let refs: Vec<&String> = files.iter().collect();
+        assert_eq!(pick_balanced(&refs), "model-Q4_K_M.gguf");
+    }
+
+    #[test]
+    fn test_pick_balanced_falls_back() {
+        let files = ["model-IQ2_M.gguf".to_string()];
+        let refs: Vec<&String> = files.iter().collect();
+        assert_eq!(pick_balanced(&refs), "model-IQ2_M.gguf");
+    }
 }

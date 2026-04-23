@@ -150,10 +150,9 @@ impl ModelRegistry {
     /// 2. Exact stem match (case-insensitive)
     /// 3. Stem starts with the name
     /// 4. Stem contains the name
+    /// 5. Curated registry: resolve friendly name → recommended filename → disk scan
     pub(crate) fn resolve_model_name(&self, name: &str) -> Result<(String, PathBuf)> {
         // Step 0: if `name` is already a path to an existing file, use it directly.
-        // This handles FOX_MODEL_PATH pointing to a model in a subdirectory or
-        // outside of models_dir entirely.
         let as_path = std::path::PathBuf::from(name);
         if as_path.is_file() {
             let stem = as_path
@@ -192,6 +191,26 @@ impl ModelRegistry {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                 if stem.to_lowercase().contains(&lower) {
                     return Ok((stem.to_string(), path.clone()));
+                }
+            }
+        }
+
+        // 4. Curated registry: resolve friendly name to recommended filename,
+        //    then try to find that file on disk.
+        let registry = crate::registry::Registry::load();
+        if let Some((_canonical, model)) = registry.resolve(name) {
+            let rec_stem = model
+                .recommended
+                .strip_suffix(".gguf")
+                .unwrap_or(&model.recommended);
+            let rec_lower = rec_stem.to_lowercase();
+            for (path, _) in &entries {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if stem.eq_ignore_ascii_case(rec_stem)
+                        || stem.to_lowercase().contains(&rec_lower)
+                    {
+                        return Ok((stem.to_string(), path.clone()));
+                    }
                 }
             }
         }
@@ -412,5 +431,59 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), HashMap::new());
         assert!(registry.resolve_model_name("doesnt-exist").is_err());
+    }
+
+    #[test]
+    fn test_resolve_via_curated_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        // Put the recommended file from registry.json on "disk"
+        std::fs::write(dir.path().join("Llama-3.2-3B-Instruct-Q4_K_M.gguf"), b"").unwrap();
+
+        let registry = ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), HashMap::new());
+        // "llama3" is an alias in registry.json → llama3.2 → recommended file
+        let (stem, _path) = registry.resolve_model_name("llama3").unwrap();
+        assert_eq!(stem, "Llama-3.2-3B-Instruct-Q4_K_M");
+    }
+
+    #[test]
+    fn test_resolve_via_curated_registry_exact_key() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Llama-3.2-3B-Instruct-Q4_K_M.gguf"), b"").unwrap();
+
+        let registry = ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), HashMap::new());
+        let (stem, _path) = registry.resolve_model_name("llama3.2").unwrap();
+        assert_eq!(stem, "Llama-3.2-3B-Instruct-Q4_K_M");
+    }
+
+    #[test]
+    fn test_resolve_via_curated_registry_embed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("nomic-embed-text-v1.5.Q4_K_M.gguf"), b"").unwrap();
+
+        let registry = ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), HashMap::new());
+        let (stem, _path) = registry.resolve_model_name("embed").unwrap();
+        assert_eq!(stem, "nomic-embed-text-v1.5.Q4_K_M");
+    }
+
+    #[test]
+    fn test_resolve_curated_not_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        // Registry resolves "llama3" but the file isn't on disk
+        let registry = ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), HashMap::new());
+        assert!(registry.resolve_model_name("llama3").is_err());
+    }
+
+    #[test]
+    fn test_resolve_alias_takes_priority_over_curated() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("my-custom-llama.gguf"), b"").unwrap();
+        std::fs::write(dir.path().join("Llama-3.2-3B-Instruct-Q4_K_M.gguf"), b"").unwrap();
+
+        let mut aliases = HashMap::new();
+        aliases.insert("llama3".to_string(), "my-custom-llama".to_string());
+        let registry = ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), aliases);
+        // User alias should win over curated registry
+        let (stem, _path) = registry.resolve_model_name("llama3").unwrap();
+        assert_eq!(stem, "my-custom-llama");
     }
 }

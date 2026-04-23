@@ -64,3 +64,67 @@ impl Registry {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_json_parses() {
+        let reg = Registry::load();
+        assert!(!reg.models.is_empty());
+    }
+
+    #[test]
+    fn resolve_exact_key() {
+        let reg = Registry::load();
+        let (name, model) = reg.resolve("llama3.2").expect("llama3.2 should resolve");
+        assert_eq!(name, "llama3.2");
+        assert!(!model.repo.is_empty());
+        assert!(model.recommended.ends_with(".gguf"));
+    }
+
+    #[test]
+    fn resolve_alias() {
+        let reg = Registry::load();
+        let (name, model) = reg.resolve("llama3").expect("llama3 alias should resolve");
+        assert_eq!(name, "llama3.2");
+        assert_eq!(model.repo, "bartowski/Llama-3.2-3B-Instruct-GGUF");
+    }
+
+    #[test]
+    fn resolve_embed_alias() {
+        let reg = Registry::load();
+        let (name, model) = reg.resolve("embed").expect("embed alias should resolve");
+        assert_eq!(name, "nomic-embed");
+        assert!(model.repo.contains("nomic"));
+    }
+
+    #[test]
+    fn resolve_unknown_returns_none() {
+        let reg = Registry::load();
+        assert!(reg.resolve("nonexistent-model-xyz").is_none());
+    }
+
+    #[test]
+    fn resolve_raw_hf_repo_returns_none() {
+        let reg = Registry::load();
+        assert!(reg
+            .resolve("bartowski/Llama-3.2-3B-Instruct-GGUF")
+            .is_none());
+    }
+
+    #[test]
+    fn all_models_have_required_fields() {
+        let reg = Registry::load();
+        for (name, model) in reg.all() {
+            assert!(!name.is_empty(), "model name should not be empty");
+            assert!(!model.repo.is_empty(), "{name} missing repo");
+            assert!(
+                model.recommended.ends_with(".gguf"),
+                "{name} recommended should end with .gguf"
+            );
+            assert!(model.repo.contains('/'), "{name} repo should be owner/name");
+        }
+    }
+}

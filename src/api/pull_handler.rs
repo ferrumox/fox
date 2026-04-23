@@ -82,8 +82,24 @@ async fn do_pull(
         .build()
         .context("building HTTP client")?;
 
+    // Check curated registry first: resolve friendly names to HF repos.
+    let registry = crate::registry::Registry::load();
+    let (resolved_repo, registry_recommended) = if model_id.contains('/') {
+        (model_id.clone(), None)
+    } else if let Some((_canonical, model)) = registry.resolve(&model_id) {
+        send!(PullStatus {
+            status: format!("resolved to {}", model.repo),
+            digest: None,
+            total: None,
+            completed: None,
+        });
+        (model.repo, Some(model.recommended))
+    } else {
+        (model_id.clone(), None)
+    };
+
     // Fetch model metadata from HF Hub API.
-    let url = format!("{HF_API_BASE}/{model_id}");
+    let url = format!("{HF_API_BASE}/{resolved_repo}");
     let resp = client
         .get(&url)
         .send()
@@ -122,12 +138,11 @@ async fn do_pull(
         anyhow::bail!("no gguf files found");
     }
 
-    // Pick the best file: prefer Q4_K_M quantization, fall back to first.
-    let filename = gguf_files
-        .iter()
-        .find(|f| f.contains("Q4_K_M"))
-        .or_else(|| gguf_files.first())
-        .cloned()
+    // Pick the best file: registry recommended → Q4_K_M → first.
+    let filename = registry_recommended
+        .filter(|rec| gguf_files.contains(rec))
+        .or_else(|| gguf_files.iter().find(|f| f.contains("Q4_K_M")).cloned())
+        .or_else(|| gguf_files.first().cloned())
         .ok_or_else(|| anyhow::anyhow!("no .gguf file found in repository"))?;
 
     std::fs::create_dir_all(&models_dir).context("creating models directory")?;
@@ -144,7 +159,7 @@ async fn do_pull(
     }
 
     // Download the model file with SSE progress events.
-    let download_url = format!("{HF_CDN_BASE}/{model_id}/resolve/main/{filename}");
+    let download_url = format!("{HF_CDN_BASE}/{resolved_repo}/resolve/main/{filename}");
 
     let resp = client
         .get(&download_url)
