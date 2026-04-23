@@ -74,8 +74,14 @@ pub struct InferenceRequestForModel {
     pub top_p: f32,
     /// Top-K filter (0 = disabled).
     pub top_k: u32,
+    /// Min-P dynamic probability floor (0.0 = disabled).
+    pub min_p: f32,
     /// Repetition penalty (1.0 = disabled).
     pub repetition_penalty: f32,
+    /// Frequency penalty (0.0 = disabled).
+    pub frequency_penalty: f32,
+    /// Presence penalty (0.0 = disabled).
+    pub presence_penalty: f32,
     /// RNG seed for reproducible sampling (None = random).
     pub seed: Option<u64>,
     /// Previously generated token IDs (for repetition penalty).

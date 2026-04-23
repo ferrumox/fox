@@ -26,12 +26,35 @@ pub(crate) fn apply_repetition_penalty(logits: &mut [f32], token_ids: &[i32], pe
     }
 }
 
+/// Apply frequency and presence penalties (OpenAI spec, additive).
+/// Frequency penalty scales with how often a token appeared; presence penalty is flat per unique token.
+pub(crate) fn apply_frequency_presence_penalty(
+    logits: &mut [f32],
+    token_ids: &[i32],
+    frequency_penalty: f32,
+    presence_penalty: f32,
+) {
+    let mut counts = std::collections::HashMap::<i32, u32>::new();
+    for &tid in token_ids {
+        *counts.entry(tid).or_insert(0) += 1;
+    }
+    for (&tid, &count) in &counts {
+        if tid >= 0 && (tid as usize) < logits.len() {
+            logits[tid as usize] -=
+                frequency_penalty * count as f32 + presence_penalty;
+        }
+    }
+}
+
 /// Parameters for the full stochastic sampler.
 pub(crate) struct SamplerParams<'a> {
     pub(crate) temperature: f32,
     pub(crate) top_p: f32,
     pub(crate) top_k: u32,
+    pub(crate) min_p: f32,
     pub(crate) repetition_penalty: f32,
+    pub(crate) frequency_penalty: f32,
+    pub(crate) presence_penalty: f32,
     pub(crate) generated_ids: &'a [i32],
     pub(crate) seed: Option<u64>,
     pub(crate) token_count: usize,
@@ -46,29 +69,42 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         temperature,
         top_p,
         top_k,
+        min_p: min_p_threshold,
         repetition_penalty,
+        frequency_penalty,
+        presence_penalty,
         generated_ids,
         seed,
         token_count,
     } = p;
     let mut logits = logits.to_vec();
 
-    // 1. Repetition penalty
+    // 1. Repetition penalty (multiplicative)
     if repetition_penalty != 1.0 && !generated_ids.is_empty() {
         apply_repetition_penalty(&mut logits, generated_ids, repetition_penalty);
     }
 
-    // 2. Greedy shortcut
+    // 2. Frequency + presence penalties (additive, OpenAI spec)
+    if (frequency_penalty != 0.0 || presence_penalty != 0.0) && !generated_ids.is_empty() {
+        apply_frequency_presence_penalty(
+            &mut logits,
+            generated_ids,
+            frequency_penalty,
+            presence_penalty,
+        );
+    }
+
+    // 3. Greedy shortcut
     if temperature <= 0.0 {
         return sample_greedy(&logits);
     }
 
-    // 3. Temperature scaling
+    // 4. Temperature scaling
     for l in &mut logits {
         *l /= temperature;
     }
 
-    // 4. Top-K masking
+    // 5. Top-K masking
     let k = top_k as usize;
     if k > 0 && k < logits.len() {
         let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
@@ -81,7 +117,7 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         }
     }
 
-    // 5. Softmax + sort by descending probability
+    // 6. Softmax + sort by descending probability
     let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let exp_sum: f32 = logits.iter().map(|&l| (l - max_l).exp()).sum();
     let mut probs: Vec<(usize, f32)> = logits
@@ -91,7 +127,15 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         .collect();
     probs.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(Ordering::Equal));
 
-    // 6. Top-P nucleus truncation
+    // 7. Min-P filtering: drop tokens below min_p * max_prob
+    if min_p_threshold > 0.0 {
+        if let Some(&(_, max_prob)) = probs.first() {
+            let cutoff = min_p_threshold * max_prob;
+            probs.retain(|&(_, p)| p >= cutoff);
+        }
+    }
+
+    // 8. Top-P nucleus truncation
     if top_p < 1.0 {
         let mut cum = 0.0f32;
         let mut end = probs.len();
@@ -212,7 +256,10 @@ mod tests {
                 temperature: 0.0,
                 top_p: 1.0,
                 top_k: 0,
+                min_p: 0.0,
                 repetition_penalty: 1.0,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
                 generated_ids: &[],
                 seed: None,
                 token_count: 0,
@@ -230,7 +277,10 @@ mod tests {
                 temperature: -1.0,
                 top_p: 1.0,
                 top_k: 0,
+                min_p: 0.0,
                 repetition_penalty: 1.0,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
                 generated_ids: &[],
                 seed: None,
                 token_count: 0,
@@ -250,7 +300,10 @@ mod tests {
             temperature: 1.0,
             top_p: 1.0,
             top_k: 0,
+            min_p: 0.0,
             repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
             generated_ids: &[],
             seed: Some(42),
             token_count: 0,
@@ -274,7 +327,10 @@ mod tests {
                     temperature: 1.0,
                     top_p: 1.0,
                     top_k: 2,
+                    min_p: 0.0,
                     repetition_penalty: 1.0,
+                    frequency_penalty: 0.0,
+                    presence_penalty: 0.0,
                     generated_ids: &[],
                     seed: Some(seed),
                     token_count: 0,
@@ -301,7 +357,10 @@ mod tests {
                     temperature: 1.0,
                     top_p: 0.5,
                     top_k: 0,
+                    min_p: 0.0,
                     repetition_penalty: 1.0,
+                    frequency_penalty: 0.0,
+                    presence_penalty: 0.0,
                     generated_ids: &[],
                     seed: Some(seed),
                     token_count: 0,
@@ -325,12 +384,204 @@ mod tests {
                 temperature: 0.0, // greedy so result is deterministic
                 top_p: 1.0,
                 top_k: 0,
+                min_p: 0.0,
                 repetition_penalty: 10.0,
-                generated_ids: &[0], // token 0 was already generated
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+                generated_ids: &[0],
                 seed: None,
                 token_count: 1,
             },
         );
         assert_eq!(token, 1, "penalised token 0 should lose to token 1");
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_frequency_presence_penalty
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn frequency_penalty_scales_with_count() {
+        let mut logits = vec![5.0f32, 3.0, 1.0];
+        // Token 0 appeared 3 times, token 1 appeared once.
+        apply_frequency_presence_penalty(&mut logits, &[0, 0, 0, 1], 1.0, 0.0);
+        assert!(
+            (logits[0] - 2.0).abs() < 1e-6,
+            "token 0 should be penalised by 3×1.0 = 3.0"
+        );
+        assert!(
+            (logits[1] - 2.0).abs() < 1e-6,
+            "token 1 should be penalised by 1×1.0 = 1.0"
+        );
+        assert!((logits[2] - 1.0).abs() < 1e-6, "token 2 untouched");
+    }
+
+    #[test]
+    fn presence_penalty_flat_per_unique_token() {
+        let mut logits = vec![5.0f32, 3.0, 1.0];
+        // Token 0 appeared 3 times — presence penalty is flat regardless of count.
+        apply_frequency_presence_penalty(&mut logits, &[0, 0, 0, 1], 0.0, 2.0);
+        assert!(
+            (logits[0] - 3.0).abs() < 1e-6,
+            "token 0 gets flat -2.0 presence penalty"
+        );
+        assert!(
+            (logits[1] - 1.0).abs() < 1e-6,
+            "token 1 gets flat -2.0 presence penalty"
+        );
+        assert!((logits[2] - 1.0).abs() < 1e-6, "token 2 untouched");
+    }
+
+    #[test]
+    fn combined_frequency_and_presence_penalty() {
+        let mut logits = vec![10.0f32, 5.0];
+        // Token 0 appeared twice: freq=1.0×2 + pres=0.5 = 2.5 subtracted.
+        apply_frequency_presence_penalty(&mut logits, &[0, 0], 1.0, 0.5);
+        assert!(
+            (logits[0] - 7.5).abs() < 1e-6,
+            "token 0: 10.0 - 2×1.0 - 0.5 = 7.5"
+        );
+        assert!((logits[1] - 5.0).abs() < 1e-6, "token 1 untouched");
+    }
+
+    #[test]
+    fn frequency_presence_noop_when_no_generated_tokens() {
+        let original = vec![1.0f32, 2.0, 3.0];
+        let mut logits = original.clone();
+        apply_frequency_presence_penalty(&mut logits, &[], 1.0, 1.0);
+        assert_eq!(logits, original);
+    }
+
+    // -----------------------------------------------------------------------
+    // sample_token — frequency/presence penalty integration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn frequency_penalty_changes_greedy_winner() {
+        // Token 0 has the highest logit but appeared 5 times.
+        let logits = vec![6.0f32, 3.0];
+        let token = sample_token(
+            &logits,
+            SamplerParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                top_k: 0,
+                min_p: 0.0,
+                repetition_penalty: 1.0,
+                frequency_penalty: 1.0,
+                presence_penalty: 0.0,
+                generated_ids: &[0, 0, 0, 0, 0],
+                seed: None,
+                token_count: 5,
+            },
+        );
+        assert_eq!(token, 1, "frequency penalty should make token 1 win");
+    }
+
+    #[test]
+    fn presence_penalty_changes_greedy_winner() {
+        let logits = vec![4.0f32, 3.0];
+        let token = sample_token(
+            &logits,
+            SamplerParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                top_k: 0,
+                min_p: 0.0,
+                repetition_penalty: 1.0,
+                frequency_penalty: 0.0,
+                presence_penalty: 2.0,
+                generated_ids: &[0],
+                seed: None,
+                token_count: 1,
+            },
+        );
+        assert_eq!(token, 1, "presence penalty should make token 1 win");
+    }
+
+    // -----------------------------------------------------------------------
+    // sample_token — min_p filtering
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn min_p_filters_low_probability_tokens() {
+        // Token 3 is dominant (logit 10). Tokens 0,1,2 have logit 0 — their
+        // probability after softmax is tiny relative to token 3.
+        // With min_p=0.5, only tokens with prob >= 0.5 × max_prob survive.
+        let logits = vec![0.0f32, 0.0, 0.0, 10.0];
+        for seed in 0u64..20 {
+            let t = sample_token(
+                &logits,
+                SamplerParams {
+                    temperature: 1.0,
+                    top_p: 1.0,
+                    top_k: 0,
+                    min_p: 0.5,
+                    repetition_penalty: 1.0,
+                    frequency_penalty: 0.0,
+                    presence_penalty: 0.0,
+                    generated_ids: &[],
+                    seed: Some(seed),
+                    token_count: 0,
+                },
+            );
+            assert_eq!(t, 3, "only token 3 should survive min_p=0.5 filter");
+        }
+    }
+
+    #[test]
+    fn min_p_zero_disables_filtering() {
+        // With min_p=0, all tokens should be eligible.
+        let logits = vec![1.0f32, 1.0, 1.0, 1.0];
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0u64..100 {
+            let t = sample_token(
+                &logits,
+                SamplerParams {
+                    temperature: 1.0,
+                    top_p: 1.0,
+                    top_k: 0,
+                    min_p: 0.0,
+                    repetition_penalty: 1.0,
+                    frequency_penalty: 0.0,
+                    presence_penalty: 0.0,
+                    generated_ids: &[],
+                    seed: Some(seed),
+                    token_count: 0,
+                },
+            );
+            seen.insert(t);
+        }
+        assert_eq!(seen.len(), 4, "all 4 tokens should be sampled with min_p=0");
+    }
+
+    #[test]
+    fn min_p_keeps_tokens_close_to_max() {
+        // Two tokens with equal logits — both should survive any min_p < 1.0
+        let logits = vec![5.0f32, 5.0];
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0u64..50 {
+            let t = sample_token(
+                &logits,
+                SamplerParams {
+                    temperature: 1.0,
+                    top_p: 1.0,
+                    top_k: 0,
+                    min_p: 0.9,
+                    repetition_penalty: 1.0,
+                    frequency_penalty: 0.0,
+                    presence_penalty: 0.0,
+                    generated_ids: &[],
+                    seed: Some(seed),
+                    token_count: 0,
+                },
+            );
+            seen.insert(t);
+        }
+        assert_eq!(
+            seen.len(),
+            2,
+            "both equal-probability tokens should survive min_p=0.9"
+        );
     }
 }

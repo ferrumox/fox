@@ -57,9 +57,21 @@ pub struct RunArgs {
     #[arg(long)]
     pub top_k: Option<u32>,
 
+    /// Min-P dynamic probability floor (0.0 = disabled)
+    #[arg(long)]
+    pub min_p: Option<f32>,
+
     /// Repetition penalty (1.0 = disabled)
     #[arg(long, default_value = "1.0")]
     pub repetition_penalty: f32,
+
+    /// Frequency penalty — subtracted proportionally to token count (0.0 = disabled)
+    #[arg(long)]
+    pub frequency_penalty: Option<f32>,
+
+    /// Presence penalty — flat subtraction per unique generated token (0.0 = disabled)
+    #[arg(long)]
+    pub presence_penalty: Option<f32>,
 
     /// RNG seed for reproducible output
     #[arg(long)]
@@ -573,11 +585,14 @@ fn build_sampling_params(
         temperature,
         top_p,
         top_k,
+        min_p: args.min_p.unwrap_or(0.0),
         repetition_penalty: args.repetition_penalty,
+        frequency_penalty: args.frequency_penalty.unwrap_or(0.0),
+        presence_penalty: args.presence_penalty.unwrap_or(0.0),
         seed: args.seed,
         stop: None,
         show_thinking: args.show_thinking,
-        initial_in_thinking: false, // set by callers that force thinking mode
+        initial_in_thinking: false,
         max_thinking_chars: 8192,
     }
 }

@@ -122,7 +122,13 @@ pub struct OllamaOptions {
     #[serde(default)]
     pub top_k: Option<u32>,
     #[serde(default)]
+    pub min_p: Option<f32>,
+    #[serde(default)]
     pub repeat_penalty: Option<f32>,
+    #[serde(default)]
+    pub frequency_penalty: Option<f32>,
+    #[serde(default)]
+    pub presence_penalty: Option<f32>,
     #[serde(default)]
     pub seed: Option<u64>,
     /// Maximum tokens to generate (equivalent to max_tokens).

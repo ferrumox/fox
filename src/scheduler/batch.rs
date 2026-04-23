@@ -12,8 +12,14 @@ pub struct SamplingParams {
     pub top_p: f32,
     /// Top-K filter (0 = disabled).
     pub top_k: u32,
+    /// Min-P dynamic probability floor (0.0 = disabled).
+    pub min_p: f32,
     /// Repetition penalty applied to already-generated tokens (1.0 = disabled).
     pub repetition_penalty: f32,
+    /// Frequency penalty — subtracted proportionally to token count (0.0 = disabled).
+    pub frequency_penalty: f32,
+    /// Presence penalty — flat subtraction per unique generated token (0.0 = disabled).
+    pub presence_penalty: f32,
     /// Optional RNG seed for reproducible sampling.
     pub seed: Option<u64>,
     /// Stop generation when the output ends with any of these strings.
@@ -41,7 +47,10 @@ impl Default for SamplingParams {
             temperature: 1.0,
             top_p: 1.0,
             top_k: 0,
+            min_p: 0.0,
             repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
             seed: None,
             stop: None,
             show_thinking: false,
