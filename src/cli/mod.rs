@@ -4,6 +4,7 @@ pub mod alias;
 pub mod bench;
 pub mod bench_kv;
 pub mod discover;
+pub mod gpu_info;
 pub mod list;
 pub mod mcp;
 pub mod models;
@@ -64,12 +65,14 @@ pub enum Command {
     Discover(discover::DiscoverArgs),
     /// Start an MCP (Model Context Protocol) server over stdio
     Mcp(mcp::McpArgs),
+    /// Display GPU backend, VRAM, and driver details
+    GpuInfo(gpu_info::GpuInfoArgs),
 }
 
 /// Known subcommand names — anything else is treated as `fox run <arg>`.
 const SUBCOMMANDS: &[&str] = &[
     "serve", "run", "bench", "bench-kv", "pull", "list", "rm", "show", "ps", "models", "search",
-    "alias", "discover", "mcp", "help",
+    "alias", "discover", "mcp", "gpu-info", "help",
 ];
 
 pub async fn run() -> anyhow::Result<()> {
@@ -105,5 +108,6 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Alias(args) => alias::run_alias(args).await,
         Command::Discover(args) => discover::run_discover(args).await,
         Command::Mcp(args) => mcp::run_mcp(args).await,
+        Command::GpuInfo(args) => gpu_info::run_gpu_info(args).await,
     }
 }
