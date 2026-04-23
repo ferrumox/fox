@@ -168,3 +168,144 @@ jobs:
             gh pr comment "${{ github.event.pull_request.number }}" \
               --body-file /tmp/bench-comment.md
           fi
+
+  embed-bench:
+    name: Embedding Regression Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      pull-requests: write
+    env:
+      EMBED_MODEL_REPO: nomic-ai/nomic-embed-text-v1.5-GGUF
+      EMBED_MODEL_FILE: nomic-embed-text-v1.5.Q8_0.gguf
+      EMBED_MODEL_STEM: nomic-embed-text-v1.5.Q8_0
+      EMBED_PORT: 8091
+      EMBED_REQUESTS: 20
+      EMBED_WARMUP: 3
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake libclang-dev jq bc
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: bench-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: bench-cargo-
+
+      - name: Cache embedding model
+        id: embed-model-cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.MODEL_DIR }}/${{ env.EMBED_MODEL_FILE }}
+          key: bench-model-nomic-embed-v15-q8-v1
+
+      - name: Download embedding model
+        if: steps.embed-model-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$MODEL_DIR"
+          curl -fSL --retry 3 -o "$MODEL_DIR/$EMBED_MODEL_FILE" \
+            "https://huggingface.co/$EMBED_MODEL_REPO/resolve/main/$EMBED_MODEL_FILE"
+
+      - name: Save gate scripts
+        run: |
+          cp scripts/bench-embed-run.sh /tmp/bench-embed-run.sh
+          cp scripts/bench-embed-gate.sh /tmp/bench-embed-gate.sh
+          chmod +x /tmp/bench-embed-run.sh /tmp/bench-embed-gate.sh
+
+      # ── PR branch ──────────────────────────────────────────────────
+      - name: Build (PR)
+        run: cargo build --release --bin fox
+
+      - name: Embedding benchmark (PR)
+        run: |
+          ./target/release/fox serve \
+            --model-path "$MODEL_DIR/$EMBED_MODEL_FILE" \
+            --port "$EMBED_PORT" &
+          FOX_PID=$!
+          trap 'kill $FOX_PID 2>/dev/null; wait $FOX_PID 2>/dev/null' EXIT
+
+          for i in $(seq 1 120); do
+            curl -sf "http://localhost:$EMBED_PORT/health" >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          /tmp/bench-embed-run.sh \
+            --url "http://localhost:$EMBED_PORT" \
+            --model "$EMBED_MODEL_STEM" \
+            --requests "$EMBED_REQUESTS" \
+            --warmup "$EMBED_WARMUP" \
+            > /tmp/embed-pr.json
+
+          kill "$FOX_PID" 2>/dev/null; wait "$FOX_PID" 2>/dev/null || true
+          trap - EXIT
+
+          echo "=== PR embedding results ==="
+          jq '.' /tmp/embed-pr.json
+
+      # ── Base branch ────────────────────────────────────────────────
+      - name: Checkout base
+        run: |
+          git checkout "${{ github.event.pull_request.base.sha }}"
+          git submodule update --recursive
+
+      - name: Build (base)
+        run: cargo build --release --bin fox
+
+      - name: Embedding benchmark (base)
+        run: |
+          ./target/release/fox serve \
+            --model-path "$MODEL_DIR/$EMBED_MODEL_FILE" \
+            --port "$EMBED_PORT" &
+          FOX_PID=$!
+          trap 'kill $FOX_PID 2>/dev/null; wait $FOX_PID 2>/dev/null' EXIT
+
+          for i in $(seq 1 120); do
+            curl -sf "http://localhost:$EMBED_PORT/health" >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          /tmp/bench-embed-run.sh \
+            --url "http://localhost:$EMBED_PORT" \
+            --model "$EMBED_MODEL_STEM" \
+            --requests "$EMBED_REQUESTS" \
+            --warmup "$EMBED_WARMUP" \
+            > /tmp/embed-base.json
+
+          kill "$FOX_PID" 2>/dev/null; wait "$FOX_PID" 2>/dev/null || true
+          trap - EXIT
+
+          echo "=== Base embedding results ==="
+          jq '.' /tmp/embed-base.json
+
+      # ── Compare ────────────────────────────────────────────────────
+      - name: Return to PR branch
+        run: git checkout "${{ github.sha }}"
+
+      - name: Check for embedding regressions
+        id: embed-gate
+        run: /tmp/bench-embed-gate.sh /tmp/embed-base.json /tmp/embed-pr.json
+
+      - name: Comment on PR
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f /tmp/bench-embed-comment.md ]; then
+            gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+              --jq '.[] | select(.body | startswith("## Embedding")) | .id' \
+            | while read -r id; do
+              gh api -X DELETE "repos/${{ github.repository }}/issues/comments/$id" || true
+            done
+            gh pr comment "${{ github.event.pull_request.number }}" \
+              --body-file /tmp/bench-embed-comment.md
+          fi
