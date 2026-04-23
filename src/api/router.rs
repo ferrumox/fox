@@ -51,6 +51,7 @@ pub struct AppState {
     pub api_key: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn router(
     registry: Arc<ModelRegistry>,
     primary_model: String,

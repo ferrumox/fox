@@ -85,7 +85,7 @@ pub fn discover_models(extra_dirs: &[PathBuf]) -> Vec<DiscoveredModel> {
         }
     }
 
-    models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    models.sort_by_key(|a| a.name.to_lowercase());
 
     tracing::info!(count = models.len(), "model discovery complete");
     for m in &models {
