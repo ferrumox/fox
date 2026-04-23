@@ -3,6 +3,12 @@ name: Benchmark Gate
 on:
   pull_request:
     branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE-*'
+      - '.devcontainer/**'
+      - 'docs/**'
+      - 'examples/**'
 
 concurrency:
   group: bench-${{ github.head_ref }}

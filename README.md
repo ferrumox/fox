@@ -22,7 +22,7 @@
 
 ```bash
 # Linux / macOS
-curl -fsSL https://github.com/ferrumox/fox/releases/latest/download/install.sh | sh
+curl -fsSL https://get.ferrumox.dev | sh
 
 # Windows
 irm https://raw.githubusercontent.com/ferrumox/fox/main/install.ps1 | iex
@@ -155,7 +155,7 @@ Auto-detection priority: **CUDA → ROCm → Vulkan → Metal → CPU**.
 ### Linux / macOS
 
 ```bash
-curl -fsSL https://github.com/ferrumox/fox/releases/latest/download/install.sh | sh
+curl -fsSL https://get.ferrumox.dev | sh
 ```
 
 Or download a binary directly:
@@ -187,18 +187,40 @@ cd fox
 cargo build --release
 ```
 
-GPU backend is detected at runtime — no recompilation needed when switching between CPU, CUDA, and Metal.
+GPU backends (CUDA, ROCm, Vulkan, Metal) are auto-detected at build time and compiled as shared libraries loaded at runtime via dlopen.
 
 ### Docker
 
 ```bash
-docker run -p 8080:8080 \
-  -v ~/.cache/ferrumox/models:/root/.cache/ferrumox/models \
-  ferrumox/fox serve
+# CPU
+docker build -t fox .
+docker run -p 8080:8080 -v ~/.cache/ferrumox/models:/root/.cache/ferrumox/models fox serve
+
+# CUDA
+docker build -f Dockerfile.cuda -t fox-cuda .
+docker run --gpus all -p 8080:8080 -v ~/.cache/ferrumox/models:/root/.cache/ferrumox/models fox-cuda serve
+
+# ROCm
+docker build -f Dockerfile.rocm -t fox-rocm .
+docker run --device=/dev/kfd --device=/dev/dri -p 8080:8080 -v ~/.cache/ferrumox/models:/root/.cache/ferrumox/models fox-rocm serve
 
 # Or with docker compose
 docker compose up
 ```
+
+### Dev Containers
+
+Pre-configured development environments are available for each GPU backend:
+
+```bash
+.devcontainer/
+├── cpu/       # Debian + Rust toolchain
+├── vulkan/    # + libvulkan-dev, glslc, spirv-headers
+├── cuda/      # nvidia/cuda:12.4.1-devel base, --gpus all
+└── rocm/      # rocm/dev-ubuntu-22.04:6.2.4 base, --device=/dev/kfd
+```
+
+Open the project in VS Code and select **Reopen in Container** to pick a variant.
 
 ---
 
@@ -240,7 +262,16 @@ fox bench llama3.2 --runs 10
 
 # Benchmark KV cache quantization types side by side
 fox bench-kv llama3.2
-fox bench-kv llama3.2 --types f16,q8_0,turbo3,turbo4,turbo2 --runs 3
+fox bench-kv llama3.2 --types f16,q8_0,q4_0 --runs 3
+
+# Discover GGUF models on your system
+fox discover
+
+# GPU info
+fox gpu-info
+
+# Start an MCP server (Model Context Protocol)
+fox mcp
 ```
 
 ---
@@ -282,11 +313,12 @@ fox bench-kv llama3.2 --types f16,q8_0,turbo3,turbo4,turbo2 --runs 3
 - **Prefix caching** — shared system prompts are processed once and reused across requests
 - **Continuous batching** — multiple concurrent users processed in parallel, not serialized
 - **Multi-GPU support** — automatic layer-split distribution across all GPUs; configurable via `--split-mode`, `--tensor-split`, `--main-gpu`
-- **TurboQuant KV cache** — `turbo3` (3.1 bpw, ~4.9× context), `turbo4`, `turbo2`; extends context by 4–6× with minimal quality loss
+- **Vision / multimodal** — LLaVA, Qwen-VL and other vision models; auto-detects `*mmproj*.gguf` or specify with `--mmproj`
 - **MoE CPU offload** — run DeepSeek, Mixtral and other MoE models with expert layers in RAM via `--moe-cpu`
+- **MCP server** — expose fox as a Model Context Protocol server via `fox mcp`
 - **Function calling** and **structured JSON output** (OpenAI spec)
 - **Request cancellation** — closing the connection immediately frees GPU memory
-- **KV cache quantization** — `f16`, `q8_0`, `q4_0`, `turbo3`, `turbo4`, `turbo2`
+- **KV cache quantization** — `f16`, `q8_0`, `q4_0`
 - **CORS** — permissive headers on all routes; web apps can call the API directly
 - **API key authentication** — optional `FOX_API_KEY` for access control
 - **Prometheus metrics** — latency, throughput, KV cache usage out of the box
@@ -309,9 +341,10 @@ All flags can also be set via environment variable or `~/.config/ferrumox/config
 | `--keep-alive-secs` | `FOX_KEEP_ALIVE_SECS` | `300` | Evict idle models after N seconds (0 = never) |
 | `--max-context-len` | `FOX_MAX_CONTEXT_LEN` | auto | Context window size (auto-detects from model if omitted) |
 | `--gpu-memory-fraction` | `FOX_GPU_MEMORY_FRACTION` | `0.85` | Fraction of GPU RAM allocated to the KV cache |
-| `--type-kv` | `FOX_TYPE_KV` | `f16` | KV cache type for both K and V: `f16`, `q8_0`, `q4_0`, `turbo3`, `turbo4`, `turbo2` |
+| `--type-kv` | `FOX_TYPE_KV` | `f16` | KV cache type for both K and V: `f16`, `q8_0`, `q4_0` |
 | `--type-k` | `FOX_TYPE_K` | — | Override K cache type independently (same values as `--type-kv`) |
 | `--type-v` | `FOX_TYPE_V` | — | Override V cache type independently (same values as `--type-kv`) |
+| `--mmproj` | `FOX_MMPROJ` | auto | Path to multimodal projector GGUF for vision models (auto-detects `*mmproj*.gguf` in model dir) |
 | `--main-gpu` | `FOX_MAIN_GPU` | `0` | Primary GPU index (0-based) |
 | `--split-mode` | `FOX_SPLIT_MODE` | `layer` | Multi-GPU split: `none`, `layer` (layer distribution), `row` (tensor-parallel) |
 | `--tensor-split` | `FOX_TENSOR_SPLIT` | auto | Comma-separated VRAM proportions, e.g. `"3,1"` for 75%/25% (omit for auto-balance) |
@@ -333,9 +366,9 @@ max_models = 3
 keep_alive_secs = 300
 system_prompt = "You are a helpful assistant."
 
-# KV cache quantization (f16, q8_0, q4_0, turbo3, turbo4, turbo2)
-type_kv = "turbo3"
-# type_k = "turbo3"   # override K independently
+# KV cache quantization (f16, q8_0, q4_0)
+type_kv = "q8_0"
+# type_k = "q8_0"     # override K independently
 # type_v = "f16"      # override V independently
 
 # Multi-GPU
@@ -401,46 +434,39 @@ fox/
 ├── src/
 │   ├── main.rs              # Entry point, config, signal handling
 │   ├── metrics.rs           # Prometheus metrics registry
-│   ├── model_registry.rs    # Multi-model registry with LRU eviction
+│   ├── model_registry/      # Multi-model registry with LRU eviction
 │   ├── config.rs            # Config file loading
 │   ├── registry.rs          # Model discovery helpers
 │   ├── api/                 # REST API (OpenAI + Ollama compat)
 │   │   ├── router.rs        # Axum router setup
-│   │   ├── types.rs         # Request/response types
+│   │   ├── types/           # Request/response types (v1, ollama, tools, embeddings, pull)
 │   │   ├── auth.rs          # API key middleware
 │   │   ├── error.rs         # Unified error types
 │   │   ├── pull_handler.rs  # POST /api/pull SSE streaming
 │   │   ├── v1/              # OpenAI-compat handlers
-│   │   │   ├── chat.rs
-│   │   │   ├── completions.rs
-│   │   │   ├── embeddings.rs
-│   │   │   └── models.rs
 │   │   ├── ollama/          # Ollama-compat handlers
-│   │   │   ├── chat.rs
-│   │   │   ├── generate.rs
-│   │   │   ├── embed.rs
-│   │   │   └── management.rs
-│   │   └── shared/          # Shared inference + streaming helpers
-│   │       ├── inference.rs
-│   │       ├── streaming.rs
-│   │       └── digest.rs
+│   │   └── shared/          # Shared inference, streaming, image handling
 │   ├── scheduler/           # Continuous batching + prefix cache
 │   ├── kv_cache/            # PageTable, ref-counted block manager
-│   ├── engine/              # Inference engine, sampling, output filtering
-│   └── cli/                 # Subcommands: serve, run, pull, list, show, ps, search, alias, bench, bench-kv, models, rm
+│   ├── engine/              # Inference engine, sampling, vision (mtmd), output filtering
+│   └── cli/                 # Subcommands: serve, run, pull, list, show, ps, search,
+│                            #   alias, bench, bench-kv, models, rm, discover, mcp, gpu-info
 ├── examples/
 │   ├── curl.sh              # curl examples for all API routes
 │   ├── langchain.py         # LangChain integration
 │   └── openwebui.md         # Open WebUI setup guide
 ├── scripts/
 │   └── benchmark.sh         # Reproducible benchmark vs Ollama
-├── benches/
-│   └── results.md           # Benchmark results (generated)
 ├── vendor/llama.cpp/        # Git submodule
-├── Dockerfile
+├── .devcontainer/           # Dev containers: cpu, vulkan, cuda, rocm
+├── Dockerfile               # CPU production image
+├── Dockerfile.cuda          # CUDA production image
+├── Dockerfile.rocm          # ROCm production image
 ├── docker-compose.yml
 ├── fox.service              # systemd unit
 ├── install.sh               # One-liner installer
+├── install.ps1              # Windows installer
+├── build.rs                 # Build script (llama.cpp cmake + bindgen)
 ├── Makefile
 ├── CHANGELOG.md
 └── Cargo.toml
