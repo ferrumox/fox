@@ -40,8 +40,7 @@ pub(crate) fn apply_frequency_presence_penalty(
     }
     for (&tid, &count) in &counts {
         if tid >= 0 && (tid as usize) < logits.len() {
-            logits[tid as usize] -=
-                frequency_penalty * count as f32 + presence_penalty;
+            logits[tid as usize] -= frequency_penalty * count as f32 + presence_penalty;
         }
     }
 }

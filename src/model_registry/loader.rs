@@ -133,9 +133,19 @@ pub(super) async fn load_model(
             let name = name_for_log;
 
             match LlamaCppModel::load(
-                &p, max_batch_size, max_context_len, gpu_memory_bytes, gpu_memory_fraction,
-                type_k, type_v, main_gpu, split_mode, &ts, moe_offload_cpu,
-                mmproj.as_deref(), flash_attn,
+                &p,
+                max_batch_size,
+                max_context_len,
+                gpu_memory_bytes,
+                gpu_memory_fraction,
+                type_k,
+                type_v,
+                main_gpu,
+                split_mode,
+                &ts,
+                moe_offload_cpu,
+                mmproj.as_deref(),
+                flash_attn,
             ) {
                 Ok(model) => return Ok((model, None, type_k, type_v)),
                 Err(e) if is_retryable_oom(&e) => {
@@ -153,9 +163,19 @@ pub(super) async fn load_model(
             for fb in &fallbacks {
                 tracing::info!(model = %name, fallback = %fb.label, "OOM recovery: retrying");
                 match LlamaCppModel::load(
-                    &p, max_batch_size, fb.context_len, gpu_memory_bytes, gpu_memory_fraction,
-                    fb.type_k, fb.type_v, main_gpu, split_mode, &ts, moe_offload_cpu,
-                    mmproj.as_deref(), flash_attn,
+                    &p,
+                    max_batch_size,
+                    fb.context_len,
+                    gpu_memory_bytes,
+                    gpu_memory_fraction,
+                    fb.type_k,
+                    fb.type_v,
+                    main_gpu,
+                    split_mode,
+                    &ts,
+                    moe_offload_cpu,
+                    mmproj.as_deref(),
+                    flash_attn,
                 ) {
                     Ok(model) => {
                         tracing::warn!(
