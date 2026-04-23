@@ -28,6 +28,7 @@ impl LlamaCppModel {
         tensor_split: &[f32],
         moe_offload_cpu: bool,
         mmproj_path: Option<&std::path::Path>,
+        flash_attn: bool,
     ) -> Result<Self> {
         let _ = (
             model_path,
@@ -42,6 +43,7 @@ impl LlamaCppModel {
             tensor_split,
             moe_offload_cpu,
             mmproj_path,
+            flash_attn,
         );
         let config = ModelConfig {
             num_layers: 32,
@@ -62,6 +64,7 @@ impl LlamaCppModel {
         gpu_memory_fraction: f32,
         type_k: u32,
         type_v: u32,
+        flash_attn: bool,
     ) -> Result<Self> {
         let _ = (
             max_batch_size,
@@ -70,6 +73,7 @@ impl LlamaCppModel {
             gpu_memory_fraction,
             type_k,
             type_v,
+            flash_attn,
         );
         Ok(Self {
             config: self.config.clone(),

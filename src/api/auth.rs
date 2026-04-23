@@ -74,6 +74,7 @@ mod tests {
                     moe_offload_cpu: false,
                     mmproj_path: None,
                     discovered_models: vec![],
+                    flash_attn: true,
                 },
                 Default::default(),
             )),

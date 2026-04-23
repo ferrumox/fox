@@ -49,4 +49,6 @@ pub struct RegistryConfig {
     pub mmproj_path: Option<PathBuf>,
     /// Models discovered from well-known directories (HuggingFace, Ollama, LM Studio, etc.).
     pub discovered_models: Vec<DiscoveredModel>,
+    /// Enable Flash Attention for faster inference and lower memory usage.
+    pub flash_attn: bool,
 }

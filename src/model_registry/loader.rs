@@ -100,6 +100,7 @@ pub(super) async fn load_model(
     let tensor_split = cfg.tensor_split.clone();
     let moe_offload_cpu = cfg.moe_offload_cpu;
     let mmproj_path = cfg.mmproj_path.clone().or_else(|| detect_mmproj(&path));
+    let flash_attn = cfg.flash_attn;
 
     if let Ok(meta) = std::fs::metadata(&path) {
         let estimated_bytes = (meta.len() as f64 * 1.8) as usize;
@@ -134,7 +135,7 @@ pub(super) async fn load_model(
             match LlamaCppModel::load(
                 &p, max_batch_size, max_context_len, gpu_memory_bytes, gpu_memory_fraction,
                 type_k, type_v, main_gpu, split_mode, &ts, moe_offload_cpu,
-                mmproj.as_deref(),
+                mmproj.as_deref(), flash_attn,
             ) {
                 Ok(model) => return Ok((model, None, type_k, type_v)),
                 Err(e) if is_retryable_oom(&e) => {
@@ -154,7 +155,7 @@ pub(super) async fn load_model(
                 match LlamaCppModel::load(
                     &p, max_batch_size, fb.context_len, gpu_memory_bytes, gpu_memory_fraction,
                     fb.type_k, fb.type_v, main_gpu, split_mode, &ts, moe_offload_cpu,
-                    mmproj.as_deref(),
+                    mmproj.as_deref(), flash_attn,
                 ) {
                     Ok(model) => {
                         tracing::warn!(

@@ -250,6 +250,7 @@ async fn multi_model_each_request_routes_to_correct_engine() {
         dir.path().to_path_buf(),
         None,
         None,
+        "*",
     );
 
     let resp_a = post_json(

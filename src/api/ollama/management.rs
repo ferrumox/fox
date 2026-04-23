@@ -389,6 +389,7 @@ mod tests {
             moe_offload_cpu: false,
             mmproj_path: None,
             discovered_models: vec![],
+            flash_attn: true,
         };
         Arc::new(ModelRegistry::new(cfg, HashMap::new()))
     }
@@ -419,6 +420,7 @@ mod tests {
             dir.path().to_path_buf(),
             None,
             None,
+            "*",
         );
         let resp = get_req(app, "/api/ps").await;
         assert_eq!(resp.status(), 200);

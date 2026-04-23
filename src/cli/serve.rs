@@ -154,6 +154,16 @@ pub struct ServeArgs {
     /// Example: --model-dirs "/path/one;/path/two"
     #[arg(long, env = "FOX_MODEL_DIRS")]
     pub model_dirs: Option<String>,
+    /// Enable Flash Attention (default: enabled).
+    /// Reduces memory usage and improves throughput. Disable with --no-flash-attn
+    /// if you encounter compatibility issues with specific models.
+    #[arg(long, default_value = "true", env = "FOX_FLASH_ATTN", action = clap::ArgAction::Set)]
+    pub flash_attn: bool,
+
+    /// Allowed CORS origins (comma-separated). Default: "*" (allow all).
+    /// Set to specific origins to restrict access, e.g. "https://example.com,http://localhost:3000".
+    #[arg(long, default_value = "*", env = "FOX_CORS_ORIGINS")]
+    pub cors_origins: String,
 }
 
 fn parse_kv_type(s: &str) -> u32 {
@@ -290,6 +300,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         moe_offload_cpu: args.moe_cpu,
         mmproj_path: args.mmproj.clone(),
         discovered_models: discovered,
+        flash_attn: args.flash_attn,
     };
 
     let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));
@@ -360,6 +371,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     if args.api_key.is_some() {
         tracing::info!("API key authentication enabled");
     }
+    tracing::info!(flash_attn = args.flash_attn, cors = %args.cors_origins, "server config");
 
     let app = router(
         registry,
@@ -369,8 +381,8 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         models_dir,
         args.hf_token,
         args.api_key,
-    )
-    .layer(tower_http::cors::CorsLayer::permissive());
+        &args.cors_origins,
+    );
 
     tracing::info!("listening on {}", addr);
     let display_name = if primary_model.is_empty() {

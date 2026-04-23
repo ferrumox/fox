@@ -1,7 +1,7 @@
 // Router assembly and AppState definition.
 
 use axum::{
-    http::Method,
+    http::{HeaderValue, Method},
     middleware,
     routing::{delete, get, post},
     Router,
@@ -12,6 +12,24 @@ use std::sync::{Arc, Mutex};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::model_registry::ModelRegistry;
+
+fn build_cors_layer(origins: &str) -> CorsLayer {
+    let methods = [Method::GET, Method::POST, Method::DELETE, Method::OPTIONS];
+    if origins == "*" {
+        return CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(methods)
+            .allow_headers(Any);
+    }
+    let parsed: Vec<HeaderValue> = origins
+        .split(',')
+        .filter_map(|o| o.trim().parse().ok())
+        .collect();
+    CorsLayer::new()
+        .allow_origin(parsed)
+        .allow_methods(methods)
+        .allow_headers(Any)
+}
 
 /// Shared state injected into every route handler.
 #[derive(Clone)]
@@ -41,6 +59,7 @@ pub fn router(
     models_dir: PathBuf,
     hf_token: Option<String>,
     api_key: Option<String>,
+    cors_origins: &str,
 ) -> Router {
     let state = AppState {
         registry,
@@ -120,11 +139,6 @@ pub fn router(
             state.clone(),
             crate::api::auth::auth_middleware,
         ))
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-                .allow_headers(Any),
-        )
+        .layer(build_cors_layer(cors_origins))
         .with_state(state)
 }

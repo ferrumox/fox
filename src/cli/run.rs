@@ -208,6 +208,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         &tensor_split_parsed,
         args.moe_cpu,
         None,
+        true,
     )?;
     let model_config = model.model_config();
 
