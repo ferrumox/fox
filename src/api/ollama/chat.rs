@@ -9,9 +9,10 @@ use std::time::Instant;
 
 use crate::api::error::load_model_or_respond;
 use crate::api::router::AppState;
+use crate::api::shared::image::resolve_image_bytes;
 use crate::api::shared::inference::{
-    extract_thinking, prepare_prompt, resolve_tool_choice, sampling_from_ollama,
-    try_parse_tool_call, MessageForTemplate,
+    extract_thinking, prepare_prompt, prepare_vision_prompt, resolve_tool_choice,
+    sampling_from_ollama, try_parse_tool_call, MessageForTemplate,
 };
 use crate::api::shared::streaming::{
     collect_tokens, ndjson_response, ndjson_stream, now_rfc3339, ollama_done_reason,
@@ -32,6 +33,41 @@ pub async fn ollama_chat(
         Err(r) => return r,
     };
 
+    // Detect first image across all messages (Ollama sends base64 in `images` array).
+    let first_image_b64: Option<&str> = req
+        .messages
+        .iter()
+        .filter_map(|m| m.images.as_ref()?.first().map(|s| s.as_str()))
+        .next();
+
+    let has_image = first_image_b64.is_some();
+    let is_vision = has_image && entry.engine.supports_vision();
+
+    if has_image && !entry.engine.supports_vision() {
+        let err = serde_json::json!({"error": "this model does not support images (no multimodal projector loaded)"});
+        return axum::response::Response::builder()
+            .status(400)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(err.to_string()))
+            .unwrap();
+    }
+
+    let image_bytes = if let Some(b64) = first_image_b64 {
+        match resolve_image_bytes(b64).await {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                let err = serde_json::json!({"error": format!("failed to decode image: {e}")});
+                return axum::response::Response::builder()
+                    .status(400)
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(err.to_string()))
+                    .unwrap();
+            }
+        }
+    } else {
+        None
+    };
+
     // Convert Ollama messages → MessageForTemplate (handles tool history).
     let messages: Vec<MessageForTemplate> = req
         .messages
@@ -49,6 +85,11 @@ pub async fn ollama_chat(
                     })
                     .collect::<Vec<_>>()
             });
+            let has_this_image = m
+                .images
+                .as_ref()
+                .map(|imgs| !imgs.is_empty())
+                .unwrap_or(false);
             MessageForTemplate {
                 role: m.role.clone(),
                 content: if m.content.is_empty() {
@@ -58,6 +99,11 @@ pub async fn ollama_chat(
                 },
                 tool_calls,
                 tool_call_id: m.tool_call_id.clone(),
+                image_data: if has_this_image {
+                    image_bytes.clone()
+                } else {
+                    None
+                },
             }
         })
         .collect();
@@ -100,26 +146,41 @@ pub async fn ollama_chat(
         sampling_from_ollama(req.options.as_ref(), show_thinking_in_output);
     sampling.initial_in_thinking = use_thinking;
 
-    let (prompt_tokens, prompt_tokens_len) = prepare_prompt(
-        &entry,
-        messages,
-        state.system_prompt.as_deref(),
-        eff_tools,
-        false, // tool_required (Ollama uses auto only)
-        None,  // specific_tool
-        response_format.as_ref(),
-        show_thinking_in_output,
-    );
+    let (prompt_tokens, prompt_tokens_len, vision_prompt) = if is_vision {
+        let vp = prepare_vision_prompt(
+            &entry,
+            messages.clone(),
+            state.system_prompt.as_deref(),
+            eff_tools,
+            false,
+            None,
+            response_format.as_ref(),
+            show_thinking_in_output,
+        );
+        let estimate = entry.engine.tokenize(&vp).map(|t| t.len()).unwrap_or(256);
+        (vec![0i32; estimate], estimate, Some(vp))
+    } else {
+        let (tokens, len) = prepare_prompt(
+            &entry,
+            messages,
+            state.system_prompt.as_deref(),
+            eff_tools,
+            false,
+            None,
+            response_format.as_ref(),
+            show_thinking_in_output,
+        );
+        (tokens, len, None)
+    };
 
     let req_id = entry.engine.next_request_id();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
-    entry.engine.submit_request(InferenceRequest::new(
-        req_id,
-        prompt_tokens,
-        max_tokens,
-        sampling,
-        tx,
-    ));
+    let mut inference_req = InferenceRequest::new(req_id, prompt_tokens, max_tokens, sampling, tx);
+    if is_vision {
+        inference_req.vision_image = image_bytes;
+        inference_req.vision_prompt = vision_prompt;
+    }
+    entry.engine.submit_request(inference_req);
 
     let model_name = req.model.clone();
 

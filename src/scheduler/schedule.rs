@@ -337,6 +337,13 @@ impl Scheduler {
                 continue;
             }
 
+            // Vision requests use dummy prompt_tokens — their KV was populated by
+            // mtmd (interleaved text+image), not by the token IDs, so caching would
+            // produce false hits. Skip prefix caching entirely.
+            if req.vision_image.is_some() {
+                return false;
+            }
+
             let full_blocks = req.prompt_tokens.len() / block_size;
             if full_blocks == 0 {
                 return false; // prompt too short to cache even one block

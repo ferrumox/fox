@@ -520,6 +520,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "base64",
  "bindgen",
  "bytes",
  "cc",

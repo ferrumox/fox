@@ -13,11 +13,14 @@ use crate::api::types::{OllamaOptions, ResponseFormat, Tool, ToolCall, ToolCallF
 
 /// A chat message carrying all fields needed for prompt building.
 /// Content is already extracted to plain text (callers handle MessageContent → String).
+#[derive(Clone)]
 pub struct MessageForTemplate {
     pub role: String,
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ToolCall>>,
     pub tool_call_id: Option<String>,
+    /// Raw image bytes for vision processing (decoded from base64/URL by the handler).
+    pub image_data: Option<Vec<u8>>,
 }
 
 /// Flatten a [`MessageForTemplate`] into a `(role, content)` tuple for
@@ -357,6 +360,7 @@ pub fn prepare_prompt(
                     content: Some(sp.to_string()),
                     tool_calls: None,
                     tool_call_id: None,
+                    image_data: None,
                 },
             );
         }
@@ -376,6 +380,7 @@ pub fn prepare_prompt(
                     content: Some(tool_msg),
                     tool_calls: None,
                     tool_call_id: None,
+                    image_data: None,
                 },
             );
         }
@@ -394,6 +399,7 @@ pub fn prepare_prompt(
                     content: Some(instr),
                     tool_calls: None,
                     tool_call_id: None,
+                    image_data: None,
                 },
             );
         }
@@ -422,6 +428,102 @@ pub fn prepare_prompt(
 
     let len = tokens.len();
     (tokens, len)
+}
+
+/// Media marker used by mtmd to denote where an image should be inserted.
+const MEDIA_MARKER: &str = "<__media__>";
+
+/// Build the prompt text for a vision request, inserting the media marker
+/// where the image should appear. Returns the raw prompt string (NOT tokenized —
+/// mtmd_tokenize handles tokenization + image interleaving).
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_vision_prompt(
+    entry: &EngineEntry,
+    mut messages: Vec<MessageForTemplate>,
+    system_prompt: Option<&str>,
+    tools: Option<&[Tool]>,
+    tool_required: bool,
+    specific_tool: Option<&str>,
+    response_format: Option<&ResponseFormat>,
+    show_thinking: bool,
+) -> String {
+    // For the message with image_data, insert the media marker before the text content.
+    for msg in &mut messages {
+        if msg.image_data.is_some() {
+            let text = msg.content.as_deref().unwrap_or("");
+            msg.content = Some(format!("{MEDIA_MARKER}\n{text}"));
+        }
+    }
+
+    // Inject server-level system prompt when none is already present.
+    if let Some(sp) = system_prompt {
+        if messages.first().map(|m| m.role.as_str()) != Some("system") {
+            messages.insert(
+                0,
+                MessageForTemplate {
+                    role: "system".to_string(),
+                    content: Some(sp.to_string()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    image_data: None,
+                },
+            );
+        }
+    }
+
+    // Append tool descriptions.
+    if let Some(tools) = tools {
+        let tool_msg = tools_system_message(tools, tool_required, specific_tool);
+        if messages.first().map(|m| m.role.as_str()) == Some("system") {
+            let sys = messages[0].content.get_or_insert_with(String::new);
+            sys.push_str(&format!("\n\n{tool_msg}"));
+        } else {
+            messages.insert(
+                0,
+                MessageForTemplate {
+                    role: "system".to_string(),
+                    content: Some(tool_msg),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    image_data: None,
+                },
+            );
+        }
+    }
+
+    // Inject JSON-mode instruction.
+    if let Some(instr) = json_mode_instruction(response_format) {
+        if messages.first().map(|m| m.role.as_str()) == Some("system") {
+            let sys = messages[0].content.get_or_insert_with(String::new);
+            sys.push_str(&format!("\n\n{instr}"));
+        } else {
+            messages.insert(
+                0,
+                MessageForTemplate {
+                    role: "system".to_string(),
+                    content: Some(instr),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    image_data: None,
+                },
+            );
+        }
+    }
+
+    let flat: Vec<(String, String)> = messages.iter().map(flatten_message_for_template).collect();
+
+    let mut prompt = entry.engine.apply_chat_template(&flat).unwrap_or_else(|_| {
+        flat.iter()
+            .map(|(r, c)| format!("{r}: {c}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+
+    if show_thinking {
+        prompt.push_str("<think>\n");
+    }
+
+    prompt
 }
 
 // ---------------------------------------------------------------------------
@@ -689,6 +791,7 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            image_data: None,
         };
         let (role, content) = flatten_message_for_template(&msg);
         assert_eq!(role, "assistant");
@@ -703,6 +806,7 @@ mod tests {
             content: Some("Sunny, 22°C".to_string()),
             tool_calls: None,
             tool_call_id: Some("call_abc".to_string()),
+            image_data: None,
         };
         let (role, content) = flatten_message_for_template(&msg);
         assert_eq!(role, "tool");

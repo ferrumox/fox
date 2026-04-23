@@ -34,6 +34,8 @@ use anyhow::anyhow;
 use crate::engine::ffi;
 #[cfg(not(fox_stub))]
 use crate::engine::model::{InferenceRequestForModel, Logits, Model, ModelConfig};
+#[cfg(not(fox_stub))]
+use crate::engine::mtmd_ffi;
 
 /// SentencePiece uses U+2581 (▁) for word boundaries.
 #[cfg(not(fox_stub))]
@@ -170,12 +172,21 @@ pub struct LlamaCppModel {
     /// Whether this instance owns the model pointer and should free it on drop.
     /// `false` when sharing weights with another `LlamaCppModel` (e.g. bench-kv).
     owns_model: bool,
+    /// Multimodal (vision) context, created from an mmproj GGUF file.
+    /// None when no multimodal projector is loaded.
+    mtmd_ctx: Option<std::sync::Mutex<NonNull<mtmd_ffi::mtmd_context>>>,
 }
 
 #[cfg(not(fox_stub))]
 impl Drop for LlamaCppModel {
     fn drop(&mut self) {
-        // Free the context first (must happen before model is freed).
+        // Free the mtmd context first (uses the model internally).
+        if let Some(ref mtmd) = self.mtmd_ctx {
+            if let Ok(ctx) = mtmd.lock() {
+                unsafe { mtmd_ffi::mtmd_free(ctx.as_ptr()) };
+            }
+        }
+        // Free the llama context (must happen before model is freed).
         if let Ok(ctx) = self._ctx.lock() {
             unsafe { ffi::llama_free(ctx.as_ptr()) };
         }
@@ -201,6 +212,7 @@ impl LlamaCppModel {
         split_mode: u32,
         tensor_split: &[f32],
         moe_offload_cpu: bool,
+        mmproj_path: Option<&std::path::Path>,
     ) -> Result<Self> {
         // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
         // Fox shows its own clean progress spinner instead.
@@ -365,6 +377,38 @@ impl LlamaCppModel {
         // across clone (e.g. future multi-backend); the unsafe impls guarantee thread safety.
         #[allow(clippy::arc_with_non_send_sync)]
         let ctx_arc = Arc::new(std::sync::Mutex::new(ctx));
+
+        // Load multimodal projector (vision/CLIP encoder) if provided.
+        let mtmd_ctx = if let Some(mmproj) = mmproj_path {
+            let mmproj_cstr = std::ffi::CString::new(
+                mmproj
+                    .to_str()
+                    .ok_or_else(|| anyhow!("mmproj path not valid UTF-8"))?,
+            )?;
+            let mut mtmd_params = unsafe { mtmd_ffi::mtmd_context_params_default() };
+            mtmd_params.use_gpu = true;
+            // Suppress mtmd logging (fox handles its own logging).
+            unsafe {
+                mtmd_ffi::mtmd_log_set(Some(noop_log), std::ptr::null_mut());
+            }
+            let raw = unsafe {
+                mtmd_ffi::mtmd_init_from_file(
+                    mmproj_cstr.as_ptr(),
+                    model.as_ptr() as *const _,
+                    mtmd_params,
+                )
+            };
+            match NonNull::new(raw) {
+                Some(ptr) => Some(std::sync::Mutex::new(ptr)),
+                None => {
+                    tracing::warn!(mmproj = ?mmproj, "failed to load multimodal projector");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             _model: model,
             _ctx: ctx_arc,
@@ -373,6 +417,7 @@ impl LlamaCppModel {
             eos_token,
             effective_ctx: effective_max_ctx,
             owns_model: true,
+            mtmd_ctx,
         })
     }
 
@@ -443,6 +488,7 @@ impl LlamaCppModel {
             eos_token: self.eos_token,
             effective_ctx: effective_max_ctx,
             owns_model: false, // weights are owned by the original LlamaCppModel
+            mtmd_ctx: None,    // new_context is for bench-kv; vision not needed
         })
     }
 }
@@ -605,6 +651,23 @@ impl Model for LlamaCppModel {
             }
         }
         result
+    }
+
+    fn supports_vision(&self) -> bool {
+        self.mtmd_ctx.is_some()
+    }
+
+    fn vision_prefill_sync(&self, params: &super::VisionPrefillParams) -> Result<(usize, Logits)> {
+        self.do_vision_prefill(
+            params.seq_id,
+            &params.text_prompt,
+            &params.image_bytes,
+            params.temperature,
+            params.top_p,
+            params.top_k,
+            params.repetition_penalty,
+            params.seed,
+        )
     }
 }
 

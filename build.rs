@@ -48,6 +48,11 @@ fn main() {
             "// Stub — llama.cpp not built.\n#[allow(dead_code)] const _STUB: () = ();\n",
         )
         .unwrap();
+        std::fs::write(
+            out.join("mtmd_bindings.rs"),
+            "// Stub — mtmd not built.\n#[allow(dead_code)] const _MTMD_STUB: () = ();\n",
+        )
+        .unwrap();
         println!("cargo:rustc-cfg=fox_stub");
         return;
     }
@@ -100,6 +105,7 @@ fn main() {
         if std::path::Path::new(nvcc_path).exists() {
             println!("cargo:warning=CUDA found at {nvcc_path} — building libggml-cuda.so");
             cmake_config.define("GGML_CUDA", "ON");
+            cmake_config.define("GGML_CUDA_GRAPHS", "ON");
             cmake_config.define("CMAKE_CUDA_COMPILER", nvcc_path);
             true
         } else {
@@ -315,9 +321,9 @@ fn main() {
     let ggml_include = llama_root.join("ggml").join("include");
     let ggml_build_include = build_dir.join("ggml").join("include");
 
-    let mut include_paths = vec![llama_include.clone(), ggml_include];
+    let mut include_paths = vec![llama_include.clone(), ggml_include.clone()];
     if ggml_build_include.exists() {
-        include_paths.push(ggml_build_include);
+        include_paths.push(ggml_build_include.clone());
     }
 
     let clang_args: Vec<String> = include_paths
@@ -327,7 +333,7 @@ fn main() {
 
     let bindings = bindgen::Builder::default()
         .header(llama_include.join("llama.h").to_string_lossy())
-        .clang_args(clang_args)
+        .clang_args(&clang_args)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .allowlist_function("llama_.*")
         .allowlist_type("llama_.*")
@@ -340,4 +346,86 @@ fn main() {
     bindings
         .write_to_file(out_path.join("llama_bindings.rs"))
         .expect("Couldn't write bindings");
+
+    // ── mtmd (multimodal/vision) library ─────────────────────────────────────
+    // Compile the mtmd sources as a static library linked into the fox binary.
+    // mtmd provides CLIP image encoding for vision models (LLaVA, Qwen-VL, etc.).
+    let mtmd_dir = llama_root.join("tools").join("mtmd");
+    let mtmd_models_dir = mtmd_dir.join("models");
+
+    let mtmd_sources: Vec<PathBuf> = vec![
+        mtmd_dir.join("mtmd.cpp"),
+        mtmd_dir.join("mtmd-audio.cpp"),
+        mtmd_dir.join("mtmd-image.cpp"),
+        mtmd_dir.join("mtmd-helper.cpp"),
+        mtmd_dir.join("clip.cpp"),
+        mtmd_models_dir.join("cogvlm.cpp"),
+        mtmd_models_dir.join("conformer.cpp"),
+        mtmd_models_dir.join("deepseekocr.cpp"),
+        mtmd_models_dir.join("gemma4v.cpp"),
+        mtmd_models_dir.join("glm4v.cpp"),
+        mtmd_models_dir.join("internvl.cpp"),
+        mtmd_models_dir.join("kimik25.cpp"),
+        mtmd_models_dir.join("kimivl.cpp"),
+        mtmd_models_dir.join("llama4.cpp"),
+        mtmd_models_dir.join("llava.cpp"),
+        mtmd_models_dir.join("minicpmv.cpp"),
+        mtmd_models_dir.join("mobilenetv5.cpp"),
+        mtmd_models_dir.join("nemotron-v2-vl.cpp"),
+        mtmd_models_dir.join("paddleocr.cpp"),
+        mtmd_models_dir.join("pixtral.cpp"),
+        mtmd_models_dir.join("qwen2vl.cpp"),
+        mtmd_models_dir.join("qwen3vl.cpp"),
+        mtmd_models_dir.join("siglip.cpp"),
+        mtmd_models_dir.join("whisper-enc.cpp"),
+        mtmd_models_dir.join("youtuvl.cpp"),
+    ];
+
+    let mut mtmd_build = cc::Build::new();
+    mtmd_build
+        .cpp(true)
+        .std("c++17")
+        .files(&mtmd_sources)
+        .include(&mtmd_dir) // mtmd.h, clip.h, clip-impl.h, etc.
+        .include(&llama_include) // llama.h
+        .include(&ggml_include) // ggml.h, ggml-alloc.h, gguf.h, etc.
+        .include(&llama_root) // for tools/mtmd/ ../../vendor relative paths
+        .include(llama_root.join("vendor")) // stb/stb_image.h, miniaudio/miniaudio.h
+        .define("LLAMA_SHARED", None)
+        .define("LLAMA_BUILD", None)
+        .warnings(false)
+        .pic(true);
+
+    // The cmake build may generate ggml-config.h into the build output.
+    if ggml_build_include.exists() {
+        mtmd_build.include(&ggml_build_include);
+    }
+
+    // Suppress -Wcast-qual for stb_image.h and miniaudio.h (matches CMakeLists).
+    mtmd_build.flag_if_supported("-Wno-cast-qual");
+    mtmd_build.flag_if_supported("-Wno-unused-function");
+    mtmd_build.flag_if_supported("-Wno-deprecated-declarations");
+
+    mtmd_build.compile("mtmd");
+
+    // ── mtmd bindgen ─────────────────────────────────────────────────────────
+    let mut mtmd_clang_args = clang_args.clone();
+    mtmd_clang_args.push("-I".to_string());
+    mtmd_clang_args.push(mtmd_dir.to_string_lossy().into_owned());
+
+    let mtmd_bindings = bindgen::Builder::default()
+        .header(mtmd_dir.join("mtmd.h").to_string_lossy())
+        .header(mtmd_dir.join("mtmd-helper.h").to_string_lossy())
+        .clang_args(&mtmd_clang_args)
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .allowlist_function("mtmd_.*")
+        .allowlist_type("mtmd_.*")
+        .allowlist_var("MTMD_.*")
+        .size_t_is_usize(true)
+        .generate()
+        .expect("Unable to generate mtmd bindings");
+
+    mtmd_bindings
+        .write_to_file(out_path.join("mtmd_bindings.rs"))
+        .expect("Couldn't write mtmd bindings");
 }

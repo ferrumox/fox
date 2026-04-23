@@ -13,8 +13,10 @@ use uuid::Uuid;
 
 use crate::api::error::{load_model_or_respond, AppError};
 use crate::api::router::AppState;
+use crate::api::shared::image::resolve_image_bytes;
 use crate::api::shared::inference::{
-    prepare_prompt, resolve_tool_choice, try_parse_tool_call, MessageForTemplate,
+    prepare_prompt, prepare_vision_prompt, resolve_tool_choice, try_parse_tool_call,
+    MessageForTemplate,
 };
 use crate::api::shared::streaming::finish_reason_str;
 use crate::api::types::{
@@ -44,18 +46,59 @@ pub async fn chat_completions(
         .as_secs();
 
     // Build MessageForTemplate, extracting text from MessageContent (multimodal → text).
+    // Also detect image_url blocks for vision routing.
+    let first_image_url: Option<String> = req
+        .messages
+        .iter()
+        .filter_map(|m| m.content.as_ref()?.first_image_url().map(String::from))
+        .next();
+
+    let has_image = first_image_url.is_some();
+    let is_vision = has_image && entry.engine.supports_vision();
+
+    if has_image && !entry.engine.supports_vision() {
+        return AppError::BadRequest(
+            "this model does not support images (no multimodal projector loaded)".to_string(),
+        )
+        .into_response();
+    }
+
+    // Resolve image bytes if needed.
+    let image_bytes = if let Some(ref url) = first_image_url {
+        match resolve_image_bytes(url).await {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                return AppError::BadRequest(format!("failed to load image: {e}")).into_response();
+            }
+        }
+    } else {
+        None
+    };
+
     let messages: Vec<MessageForTemplate> = req
         .messages
         .iter()
-        .map(|m| MessageForTemplate {
-            role: m.role.clone(),
-            content: m
+        .map(|m| {
+            let has_this_image = m
                 .content
                 .as_ref()
-                .map(|c| c.as_text())
-                .filter(|s| !s.is_empty()),
-            tool_calls: m.tool_calls.clone(),
-            tool_call_id: m.tool_call_id.clone(),
+                .and_then(|c| c.first_image_url())
+                .is_some();
+            MessageForTemplate {
+                role: m.role.clone(),
+                content: m
+                    .content
+                    .as_ref()
+                    .map(|c| c.as_text())
+                    .filter(|s| !s.is_empty()),
+                tool_calls: m.tool_calls.clone(),
+                tool_call_id: m.tool_call_id.clone(),
+                image_data: if has_this_image {
+                    image_bytes.clone()
+                } else {
+                    None
+                },
+            }
         })
         .collect();
 
@@ -65,16 +108,34 @@ pub async fn chat_completions(
     let tool_required = tc.required;
     let specific_tool = tc.specific.as_deref();
 
-    let (prompt_tokens, prompt_tokens_len) = prepare_prompt(
-        &entry,
-        messages,
-        state.system_prompt.as_deref(),
-        eff_tools,
-        tool_required,
-        specific_tool,
-        req.response_format.as_ref(),
-        entry.engine.supports_thinking(),
-    );
+    let (prompt_tokens, prompt_tokens_len, vision_prompt) = if is_vision {
+        let vp = prepare_vision_prompt(
+            &entry,
+            messages.clone(),
+            state.system_prompt.as_deref(),
+            eff_tools,
+            tool_required,
+            specific_tool,
+            req.response_format.as_ref(),
+            entry.engine.supports_thinking(),
+        );
+        // Estimate token count for block allocation and usage reporting.
+        // Image tokens will add more, but this provides a reasonable lower bound.
+        let estimate = entry.engine.tokenize(&vp).map(|t| t.len()).unwrap_or(256);
+        (vec![0i32; estimate], estimate, Some(vp))
+    } else {
+        let (tokens, len) = prepare_prompt(
+            &entry,
+            messages,
+            state.system_prompt.as_deref(),
+            eff_tools,
+            tool_required,
+            specific_tool,
+            req.response_format.as_ref(),
+            entry.engine.supports_thinking(),
+        );
+        (tokens, len, None)
+    };
 
     let max_tokens = req.max_tokens.or(req.max_completion_tokens).unwrap_or(256) as usize;
 
@@ -93,13 +154,12 @@ pub async fn chat_completions(
 
     let req_id = entry.engine.next_request_id();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
-    entry.engine.submit_request(InferenceRequest::new(
-        req_id,
-        prompt_tokens,
-        max_tokens,
-        sampling,
-        tx,
-    ));
+    let mut inference_req = InferenceRequest::new(req_id, prompt_tokens, max_tokens, sampling, tx);
+    if is_vision {
+        inference_req.vision_image = image_bytes;
+        inference_req.vision_prompt = vision_prompt;
+    }
+    entry.engine.submit_request(inference_req);
 
     let has_tools = eff_tools.is_some();
     let allow_parallel = req.parallel_tool_calls.unwrap_or(true);

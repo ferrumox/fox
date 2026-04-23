@@ -27,6 +27,7 @@ impl LlamaCppModel {
         split_mode: u32,
         tensor_split: &[f32],
         moe_offload_cpu: bool,
+        mmproj_path: Option<&std::path::Path>,
     ) -> Result<Self> {
         let _ = (
             model_path,
@@ -40,6 +41,7 @@ impl LlamaCppModel {
             split_mode,
             tensor_split,
             moe_offload_cpu,
+            mmproj_path,
         );
         let config = ModelConfig {
             num_layers: 32,

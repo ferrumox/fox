@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::scheduler::StopReason;
 
-use super::model::{InferenceRequestForModel, Logits};
+use super::model::{InferenceRequestForModel, Logits, VisionPrefillParams};
 use super::InferenceEngine;
 
 impl InferenceEngine {
@@ -96,57 +96,111 @@ impl InferenceEngine {
 
     pub(super) async fn run_prefill(&self, req_ids: &[u64]) -> Result<Vec<(u64, Logits)>> {
         let requests = self.scheduler.get_running(req_ids);
-        let model_requests: Vec<InferenceRequestForModel> = requests
-            .iter()
-            .map(|r| InferenceRequestForModel {
-                id: r.id,
-                prompt_tokens: r.prompt_tokens.clone(),
-                last_token: r.last_token,
-                generated_tokens: r.generated_tokens,
-                max_new_tokens: r.max_new_tokens,
-                context_len: r.context_len(),
-                kv_seq_id: r.kv_seq_id,
-                temperature: r.sampling.temperature,
-                top_p: r.sampling.top_p,
-                top_k: r.sampling.top_k,
-                repetition_penalty: r.sampling.repetition_penalty,
-                seed: r.sampling.seed,
-                generated_token_ids: r.generated_token_ids.clone(),
-                skip_prefix_tokens: r.skip_prefix_tokens,
-                prefix_seq_id: r.prefix_seq_id,
-            })
-            .collect();
 
-        let prefix_cleanup: Vec<i32> = model_requests
-            .iter()
-            .filter_map(|r| r.prefix_seq_id)
-            .collect();
+        // Partition into vision and text-only requests.
+        let mut vision_ids: Vec<u64> = Vec::new();
+        let mut vision_params: Vec<VisionPrefillParams> = Vec::new();
+        let mut text_ids: Vec<u64> = Vec::new();
+        let mut text_model_requests: Vec<InferenceRequestForModel> = Vec::new();
 
-        let model = self.model.clone();
-        let req_ids_vec = req_ids.to_vec();
-        let raw =
-            tokio::task::spawn_blocking(move || model.prefill_sync(&req_ids_vec, &model_requests))
-                .await
-                .map_err(|e| anyhow::anyhow!("prefill spawn_blocking: {}", e))??;
-
-        for prefix_seq_id in prefix_cleanup {
-            self.model.clear_sequence(prefix_seq_id);
-            self.scheduler.return_prefix_seq_id(prefix_seq_id);
+        for r in &requests {
+            if r.vision_image.is_some() && r.vision_prompt.is_some() {
+                vision_ids.push(r.id);
+                // If this vision request got a false prefix cache hit (prompt_tokens
+                // are dummy zeros that matched a prior entry), clean up the prefix
+                // seq_id — the cached KV is invalid for vision prefill.
+                if let Some(prefix_sid) = r.prefix_seq_id {
+                    self.model.clear_sequence(prefix_sid);
+                    self.scheduler.return_prefix_seq_id(prefix_sid);
+                }
+                // Clear any stale KV data on this sequence before vision prefill.
+                self.model.clear_sequence(r.kv_seq_id);
+                vision_params.push(VisionPrefillParams {
+                    seq_id: r.kv_seq_id,
+                    text_prompt: r.vision_prompt.clone().unwrap(),
+                    image_bytes: r.vision_image.clone().unwrap(),
+                    temperature: r.sampling.temperature,
+                    top_p: r.sampling.top_p,
+                    top_k: r.sampling.top_k,
+                    repetition_penalty: r.sampling.repetition_penalty,
+                    seed: r.sampling.seed,
+                });
+            } else {
+                text_ids.push(r.id);
+                text_model_requests.push(InferenceRequestForModel {
+                    id: r.id,
+                    prompt_tokens: r.prompt_tokens.clone(),
+                    last_token: r.last_token,
+                    generated_tokens: r.generated_tokens,
+                    max_new_tokens: r.max_new_tokens,
+                    context_len: r.context_len(),
+                    kv_seq_id: r.kv_seq_id,
+                    temperature: r.sampling.temperature,
+                    top_p: r.sampling.top_p,
+                    top_k: r.sampling.top_k,
+                    repetition_penalty: r.sampling.repetition_penalty,
+                    seed: r.sampling.seed,
+                    generated_token_ids: r.generated_token_ids.clone(),
+                    skip_prefix_tokens: r.skip_prefix_tokens,
+                    prefix_seq_id: r.prefix_seq_id,
+                });
+            }
         }
 
-        // Register how many tokens were actually placed in the KV for each request so
-        // decode positions are consecutive (no gaps for recurrent/hybrid models).
-        let result = raw
-            .into_iter()
-            .map(|(id, logits, tokens_in_kv)| {
+        let mut all_results: Vec<(u64, Logits)> = Vec::new();
+
+        // Vision requests: process sequentially via vision_prefill_sync.
+        if !vision_ids.is_empty() {
+            let model = self.model.clone();
+            let vision_ids_clone = vision_ids.clone();
+            let vision_results = tokio::task::spawn_blocking(move || {
+                let mut results = Vec::new();
+                for (i, id) in vision_ids_clone.iter().enumerate() {
+                    match model.vision_prefill_sync(&vision_params[i]) {
+                        Ok((n_past, logits)) => results.push((*id, n_past, logits)),
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(results)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("vision prefill spawn_blocking: {}", e))??;
+
+            for (id, n_past, logits) in vision_results {
+                self.scheduler.set_prefilled_tokens(id, n_past);
+                all_results.push((id, logits));
+            }
+        }
+
+        // Text-only requests: existing batched prefill path.
+        if !text_ids.is_empty() {
+            let prefix_cleanup: Vec<i32> = text_model_requests
+                .iter()
+                .filter_map(|r| r.prefix_seq_id)
+                .collect();
+
+            let model = self.model.clone();
+            let text_ids_clone = text_ids.clone();
+            let raw = tokio::task::spawn_blocking(move || {
+                model.prefill_sync(&text_ids_clone, &text_model_requests)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("prefill spawn_blocking: {}", e))??;
+
+            for prefix_seq_id in prefix_cleanup {
+                self.model.clear_sequence(prefix_seq_id);
+                self.scheduler.return_prefix_seq_id(prefix_seq_id);
+            }
+
+            for (id, logits, tokens_in_kv) in raw {
                 if tokens_in_kv > 0 {
                     self.scheduler.set_prefilled_tokens(id, tokens_in_kv);
                 }
-                (id, logits)
-            })
-            .collect();
+                all_results.push((id, logits));
+            }
+        }
 
-        Ok(result)
+        Ok(all_results)
     }
 
     pub(super) async fn run_decode(&self, req_ids: &[u64]) -> Result<Vec<(u64, Logits)>> {
