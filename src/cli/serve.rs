@@ -21,6 +21,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 use crate::api::router;
 use crate::metrics::Metrics;
+use crate::model_discovery::{discover_models, parse_model_dirs};
 use crate::model_registry::{ModelRegistry, RegistryConfig};
 
 use super::get_gpu_memory_bytes;
@@ -138,6 +139,11 @@ pub struct ServeArgs {
     /// Attention layers remain on GPU; expert weights are read from RAM on demand.
     #[arg(long, env = "FOX_MOE_CPU")]
     pub moe_cpu: bool,
+
+    /// Semicolon-separated list of additional directories to scan for GGUF models.
+    /// Example: --model-dirs "/path/one;/path/two"
+    #[arg(long, env = "FOX_MODEL_DIRS")]
+    pub model_dirs: Option<String>,
 }
 
 fn parse_kv_type(s: &str) -> u32 {
@@ -239,6 +245,19 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
 
     let models_dir = default_models_dir();
 
+    let extra_dirs: Vec<std::path::PathBuf> = args
+        .model_dirs
+        .as_deref()
+        .map(parse_model_dirs)
+        .unwrap_or_default();
+    let discovered = discover_models(&extra_dirs);
+    if !discovered.is_empty() {
+        tracing::info!(
+            count = discovered.len(),
+            "discovered models from external sources"
+        );
+    }
+
     let registry_cfg = RegistryConfig {
         models_dir: models_dir.clone(),
         max_models: args.max_models.max(1),
@@ -259,6 +278,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             .map(parse_tensor_split)
             .unwrap_or_default(),
         moe_offload_cpu: args.moe_cpu,
+        discovered_models: discovered,
     };
 
     let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use crate::cli::list_models;
+use crate::model_discovery::resolve_discovered;
 
 use self::loader::load_model;
 
@@ -196,8 +197,27 @@ impl ModelRegistry {
             }
         }
 
+        // 5. Fallback: check discovered models from well-known directories
+        if !self.config.discovered_models.is_empty() {
+            if let Some((disc_name, disc_path)) =
+                resolve_discovered(resolved, &self.config.discovered_models)
+            {
+                let stem = disc_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&disc_name)
+                    .to_string();
+                tracing::info!(
+                    name = %disc_name,
+                    path = %disc_path.display(),
+                    "resolved model from discovered sources"
+                );
+                return Ok((stem, disc_path));
+            }
+        }
+
         anyhow::bail!(
-            "model '{}' not found in {}",
+            "model '{}' not found in {} or discovered sources",
             name,
             self.config.models_dir.display()
         )
@@ -244,6 +264,7 @@ mod tests {
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
+            discovered_models: vec![],
         }
     }
 

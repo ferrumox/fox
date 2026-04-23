@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::metrics::Metrics;
+use crate::model_discovery::DiscoveredModel;
 
 /// GGML type IDs for KV cache element types.
 pub mod kv_type {
@@ -43,4 +44,6 @@ pub struct RegistryConfig {
     /// When true, MoE expert tensors are pinned to CPU RAM (via `tensor_buft_overrides`).
     /// Useful for MoE models (e.g. DeepSeek, Mixtral) where expert weights don't fit in VRAM.
     pub moe_offload_cpu: bool,
+    /// Models discovered from well-known directories (HuggingFace, Ollama, LM Studio, etc.).
+    pub discovered_models: Vec<DiscoveredModel>,
 }
