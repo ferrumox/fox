@@ -5,6 +5,7 @@ pub mod bench;
 pub mod bench_kv;
 pub mod discover;
 pub mod list;
+pub mod mcp;
 pub mod models;
 pub mod ps;
 pub mod pull;
@@ -61,12 +62,14 @@ pub enum Command {
     Alias(alias::AliasArgs),
     /// Discover GGUF models across well-known directories
     Discover(discover::DiscoverArgs),
+    /// Start an MCP (Model Context Protocol) server over stdio
+    Mcp(mcp::McpArgs),
 }
 
 /// Known subcommand names — anything else is treated as `fox run <arg>`.
 const SUBCOMMANDS: &[&str] = &[
     "serve", "run", "bench", "bench-kv", "pull", "list", "rm", "show", "ps", "models", "search",
-    "alias", "discover", "help",
+    "alias", "discover", "mcp", "help",
 ];
 
 pub async fn run() -> anyhow::Result<()> {
@@ -101,5 +104,6 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Search(args) => search::run_search(args).await,
         Command::Alias(args) => alias::run_alias(args).await,
         Command::Discover(args) => discover::run_discover(args).await,
+        Command::Mcp(args) => mcp::run_mcp(args).await,
     }
 }
