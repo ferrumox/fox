@@ -42,6 +42,7 @@ toml = "0.8"
 bytes = "1"
 dirs = "5"
 base64 = "0.22"
+walkdir = "2"
 
 # Optional (enabled via test-helpers feature)
 tower = { version = "0.4", features = ["util"], optional = true }

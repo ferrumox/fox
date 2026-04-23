@@ -169,6 +169,7 @@ mod tests {
             tensor_split: vec![],
             moe_offload_cpu: false,
             mmproj_path: None,
+            discovered_models: vec![],
         };
         let reg = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
         let app = router(

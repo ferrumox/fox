@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::metrics::Metrics;
+use crate::model_discovery::DiscoveredModel;
 
 /// GGML type IDs for KV cache element types.
 pub mod kv_type {
@@ -46,4 +47,6 @@ pub struct RegistryConfig {
     /// Explicit path to a multimodal projector GGUF file for vision models.
     /// None = auto-detect *mmproj*.gguf in the same directory as the model.
     pub mmproj_path: Option<PathBuf>,
+    /// Models discovered from well-known directories (HuggingFace, Ollama, LM Studio, etc.).
+    pub discovered_models: Vec<DiscoveredModel>,
 }
