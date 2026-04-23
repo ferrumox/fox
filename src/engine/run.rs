@@ -107,7 +107,9 @@ impl InferenceEngine {
         let mut text_model_requests: Vec<InferenceRequestForModel> = Vec::new();
 
         for r in &requests {
-            if r.vision_image.is_some() && r.vision_prompt.is_some() {
+            if let (Some(vision_image), Some(vision_prompt)) =
+                (&r.vision_image, &r.vision_prompt)
+            {
                 vision_ids.push(r.id);
                 // If this vision request got a false prefix cache hit (prompt_tokens
                 // are dummy zeros that matched a prior entry), clean up the prefix
@@ -120,8 +122,8 @@ impl InferenceEngine {
                 self.model.clear_sequence(r.kv_seq_id);
                 vision_params.push(VisionPrefillParams {
                     seq_id: r.kv_seq_id,
-                    text_prompt: r.vision_prompt.clone().unwrap(),
-                    image_bytes: Arc::clone(r.vision_image.as_ref().unwrap()),
+                    text_prompt: vision_prompt.clone(),
+                    image_bytes: Arc::clone(vision_image),
                     temperature: r.sampling.temperature,
                     top_p: r.sampling.top_p,
                     top_k: r.sampling.top_k,
