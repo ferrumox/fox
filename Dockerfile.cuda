@@ -1,12 +1,11 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Stage 1: builder (CPU-only)
-# For CUDA, use Dockerfile.cuda. For ROCm, use Dockerfile.rocm.
+# Stage 1: builder
+# Uses the CUDA devel image so nvcc is available and libggml-cuda.so is built.
 # ──────────────────────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim AS builder
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl make cmake clang libclang-dev ninja-build \
-    libgomp1 \
+    curl cmake clang libclang-dev ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -22,18 +21,21 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
 COPY . .
 RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/app/target-cpu,id=fox-cpu \
-    CARGO_TARGET_DIR=/app/target-cpu \
+    --mount=type=cache,target=/app/target-cuda,id=fox-cuda \
+    CARGO_TARGET_DIR=/app/target-cuda \
     cargo build --release --bin fox --bin fox-bench && \
     mkdir -p /bundle && \
-    cp /app/target-cpu/release/fox /app/target-cpu/release/fox-bench /bundle/ && \
-    find /app/target-cpu/release -maxdepth 1 \( -name 'lib*.so*' -o -name 'lib*.dylib' \) \
+    cp /app/target-cuda/release/fox /app/target-cuda/release/fox-bench /bundle/ && \
+    find /app/target-cuda/release -maxdepth 1 \( -name 'lib*.so*' -o -name 'lib*.dylib' \) \
          -exec cp {} /bundle/ \;
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Stage 2: minimal runtime image (CPU-only)
+# Stage 2: CUDA runtime image
+#
+# Uses the CUDA runtime base so libcudart and libcublas are available for the
+# ggml CUDA backend. GPU access requires: docker run --gpus all
 # ──────────────────────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl \

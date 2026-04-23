@@ -2,8 +2,7 @@ services:
   ferrumox:
     build:
       context: .
-      args:
-        - FEATURES=   # cpu by default; change to "cuda" for GPU
+      dockerfile: Dockerfile
     ports:
       - "8080:8080"
     volumes:
@@ -12,6 +11,34 @@ services:
       FOX_HOST: 0.0.0.0
       FOX_PORT: "8080"
       FOX_MAX_MODELS: "1"
+      FOX_MAX_CONTEXT_LEN: "4096"
+      NVIDIA_VISIBLE_DEVICES: ""
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  ferrumox-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    ports:
+      - "8080:8080"
+    volumes:
+      - ferrumox-models:/root/.cache/ferrumox/models
+    environment:
+      FOX_HOST: 0.0.0.0
+      FOX_PORT: "8080"
+      FOX_MAX_MODELS: "1"
+      FOX_MAX_CONTEXT_LEN: "4096"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 5s
@@ -24,6 +51,27 @@ services:
       - "11434:11434"
     volumes:
       - ollama-models:/root/.ollama
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ""
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  ollama-gpu:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
       interval: 5s
@@ -44,7 +92,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              count: 1
               capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
