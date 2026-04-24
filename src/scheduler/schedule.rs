@@ -156,29 +156,26 @@ impl Scheduler {
                 self.prefix_misses.fetch_add(1, Ordering::Relaxed);
                 let needed = self.blocks_needed(&req);
                 if self.kv_cache.can_allocate(needed) {
-                    match self.kv_cache.allocate(needed) {
-                        Ok(ids) => {
-                            let Some(seq_id) = pool.pop() else {
-                                self.kv_cache.free_blocks(&ids);
-                                waiting.push_front(req);
-                                break 'admit;
-                            };
-                            let id = req.id;
-                            req.page_table = PageTable::new(ids);
-                            req.kv_seq_id = seq_id;
-                            req.stop_reason = None;
-                            req.state = batch::RequestState::Prefilling;
-                            info!(
-                                request_id = id,
-                                seq_id = req.kv_seq_id,
-                                "request admitted to batch"
-                            );
-                            running.push(req);
-                            prefill.push(id);
-                            skipped = 0;
-                            continue 'admit;
-                        }
-                        Err(_) => {}
+                    if let Ok(ids) = self.kv_cache.allocate(needed) {
+                        let Some(seq_id) = pool.pop() else {
+                            self.kv_cache.free_blocks(&ids);
+                            waiting.push_front(req);
+                            break 'admit;
+                        };
+                        let id = req.id;
+                        req.page_table = PageTable::new(ids);
+                        req.kv_seq_id = seq_id;
+                        req.stop_reason = None;
+                        req.state = batch::RequestState::Prefilling;
+                        info!(
+                            request_id = id,
+                            seq_id = req.kv_seq_id,
+                            "request admitted to batch"
+                        );
+                        running.push(req);
+                        prefill.push(id);
+                        skipped = 0;
+                        continue 'admit;
                     }
                 }
             };
