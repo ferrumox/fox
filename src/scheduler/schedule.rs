@@ -83,6 +83,11 @@ impl Scheduler {
         let mut preempted_seq_ids = Vec::new();
         let block_size = self.kv_cache.block_size();
 
+        // Try to admit each waiting request. When one can't fit, skip it and
+        // try the next — smaller requests may fit in the remaining space.
+        let initial_waiting = waiting.len();
+        let mut skipped = 0usize;
+
         'admit: while let Some(mut req) = waiting.pop_front() {
             if pool.is_empty() {
                 waiting.push_front(req);
@@ -90,12 +95,6 @@ impl Scheduler {
             }
 
             // --- Block-level prefix cache lookup ---
-            //
-            // Compute the chain hash for each complete block of the prompt.
-            // Then search from the longest matching prefix down to 1 block.
-            // This allows two requests that share a common prefix (e.g. the same
-            // system prompt) to reuse each other's cached KV blocks even when the
-            // rest of the prompt differs.
             let block_hashes = prompt_block_hashes(&req.prompt_tokens, block_size);
             let mut prefix_hit: Option<(usize, PrefixCacheEntry)> = None;
             for i in (0..block_hashes.len()).rev() {
@@ -107,9 +106,6 @@ impl Scheduler {
 
             if let Some((matched_blocks, hit)) = prefix_hit {
                 // --- Prefix cache hit path ---
-                //
-                // Allocate only the blocks needed beyond the cached prefix:
-                // remaining prompt tokens (partial last block) + max_new_tokens.
                 let cached_tokens = matched_blocks * block_size;
                 let remaining_tokens = req.prompt_tokens.len().saturating_sub(cached_tokens);
                 let new_blocks = (remaining_tokens + req.max_new_tokens).div_ceil(block_size);
@@ -119,10 +115,13 @@ impl Scheduler {
                         match self.kv_cache.allocate(new_blocks) {
                             Ok(ids) => ids,
                             Err(_) => {
-                                // Allocation failed — restore entry and fall through to preemption
                                 pcache.put(block_hashes[matched_blocks - 1], hit);
-                                waiting.push_front(req);
-                                break 'admit;
+                                waiting.push_back(req);
+                                skipped += 1;
+                                if skipped >= initial_waiting {
+                                    break 'admit;
+                                }
+                                continue 'admit;
                             }
                         }
                     } else {
@@ -147,12 +146,10 @@ impl Scheduler {
                     );
                     running.push(req);
                     prefill.push(id);
+                    skipped = 0;
                     continue 'admit;
                 } else {
-                    // No room for new blocks — restore entry and fall through to preemption.
                     pcache.put(block_hashes[matched_blocks - 1], hit);
-                    waiting.push_front(req);
-                    // Fall through to LIFO preemption below.
                 }
             } else {
                 // --- Normal admission path (no prefix match) ---
@@ -162,7 +159,6 @@ impl Scheduler {
                     match self.kv_cache.allocate(needed) {
                         Ok(ids) => {
                             let Some(seq_id) = pool.pop() else {
-                                // Defensive: pool should be non-empty (checked at loop start).
                                 self.kv_cache.free_blocks(&ids);
                                 waiting.push_front(req);
                                 break 'admit;
@@ -179,39 +175,39 @@ impl Scheduler {
                             );
                             running.push(req);
                             prefill.push(id);
+                            skipped = 0;
                             continue 'admit;
                         }
-                        Err(_) => {
-                            waiting.push_front(req);
-                            // Fall through to LIFO preemption.
-                        }
+                        Err(_) => {}
                     }
-                } else {
-                    waiting.push_front(req);
-                    // Fall through to LIFO preemption.
                 }
-            }
+            };
 
-            // 3. No blocks available: LIFO preempt last admitted running request.
-            if let Some(mut evicted) = running.pop() {
-                evicted.state = batch::RequestState::Waiting;
-                evicted.stop_reason = Some(batch::StopReason::Preempt);
-                if !evicted.page_table.is_empty() {
-                    self.kv_cache.free_blocks(evicted.page_table.block_ids());
-                    evicted.page_table.clear();
+            // Can't allocate this request — skip it and try the next one.
+            waiting.push_back(req);
+            skipped += 1;
+            if skipped >= initial_waiting {
+                // Tried all waiting requests; none fit. LIFO preempt to free space.
+                if let Some(mut evicted) = running.pop() {
+                    evicted.state = batch::RequestState::Waiting;
+                    evicted.stop_reason = Some(batch::StopReason::Preempt);
+                    if !evicted.page_table.is_empty() {
+                        self.kv_cache.free_blocks(evicted.page_table.block_ids());
+                        evicted.page_table.clear();
+                    }
+                    if evicted.kv_seq_id >= 0 {
+                        preempted_seq_ids.push(evicted.kv_seq_id);
+                        pool.push(evicted.kv_seq_id);
+                        evicted.kv_seq_id = -1;
+                    }
+                    info!(
+                        request_id = evicted.id,
+                        "LIFO preemption: evicted from batch"
+                    );
+                    waiting.push_front(evicted);
                 }
-                if evicted.kv_seq_id >= 0 {
-                    preempted_seq_ids.push(evicted.kv_seq_id);
-                    pool.push(evicted.kv_seq_id);
-                    evicted.kv_seq_id = -1;
-                }
-                info!(
-                    request_id = evicted.id,
-                    "LIFO preemption: evicted from batch"
-                );
-                waiting.push_front(evicted);
+                break;
             }
-            break;
         }
 
         // 4. Build decode list

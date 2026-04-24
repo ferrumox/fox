@@ -9,6 +9,7 @@ mod run;
 
 use output_filter::PerRequestState;
 
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -40,6 +41,9 @@ pub struct InferenceEngine {
     supports_prefix_cache: bool,
     /// Text forms of the model's EOS and EOT tokens, used as base stop sequences.
     model_stop_tokens: Vec<String>,
+    /// LRU cache for CLIP embeddings, keyed by image content hash.
+    /// Avoids re-encoding identical images across requests.
+    clip_cache: std::sync::Mutex<lru::LruCache<u64, Vec<f32>>>,
 }
 
 impl InferenceEngine {
@@ -72,6 +76,7 @@ impl InferenceEngine {
             metrics,
             supports_prefix_cache,
             model_stop_tokens,
+            clip_cache: std::sync::Mutex::new(lru::LruCache::new(NonZeroUsize::new(128).unwrap())),
         }
     }
 
@@ -145,5 +150,12 @@ impl InferenceEngine {
 
     pub fn prefix_cache_misses(&self) -> u64 {
         self.scheduler.prefix_misses.load(Ordering::Relaxed)
+    }
+
+    fn hash_image_bytes(bytes: &[u8]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        hasher.finish()
     }
 }

@@ -60,7 +60,7 @@ impl Logits {
 #[derive(Debug, Clone)]
 pub struct InferenceRequestForModel {
     pub id: u64,
-    pub prompt_tokens: Vec<i32>,
+    pub prompt_tokens: std::sync::Arc<Vec<i32>>,
     pub last_token: Option<i32>,
     pub generated_tokens: usize,
     pub max_new_tokens: usize,
@@ -217,11 +217,32 @@ pub trait Model: Send + Sync {
         anyhow::bail!("vision not supported by this model backend")
     }
 
+    /// Preprocess with cached CLIP embeddings — skips the expensive encode step.
+    fn vision_preprocess_sync_with_cache(
+        &self,
+        _params: &VisionPreprocessParams,
+        _cached_embeddings: Option<Vec<f32>>,
+    ) -> Result<PreprocessedVision> {
+        anyhow::bail!("vision not supported by this model backend")
+    }
+
     /// Decode a preprocessed vision request into the LLM's KV cache.
     /// Uses pre-encoded CLIP embeddings — only needs the llama_context.
     /// Returns (n_tokens_in_kv, logits).
     fn vision_decode_prefill_sync(&self, _params: &VisionDecodeParams) -> Result<(usize, Logits)> {
         anyhow::bail!("vision not supported by this model backend")
+    }
+
+    /// Batch decode multiple preprocessed vision requests, acquiring locks once.
+    fn vision_decode_prefill_batch_sync(
+        &self,
+        params: Vec<VisionDecodeParams>,
+    ) -> Result<Vec<(usize, Logits)>> {
+        let mut results = Vec::with_capacity(params.len());
+        for p in params {
+            results.push(self.vision_decode_prefill_sync(&p)?);
+        }
+        Ok(results)
     }
 }
 

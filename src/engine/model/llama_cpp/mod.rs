@@ -763,6 +763,18 @@ impl Model for LlamaCppModel {
         self.do_vision_preprocess(&params.text_prompt, &params.image_bytes)
     }
 
+    fn vision_preprocess_sync_with_cache(
+        &self,
+        params: &super::VisionPreprocessParams,
+        cached_embeddings: Option<Vec<f32>>,
+    ) -> Result<super::PreprocessedVision> {
+        self.do_vision_preprocess_with_cache(
+            &params.text_prompt,
+            &params.image_bytes,
+            cached_embeddings,
+        )
+    }
+
     fn vision_decode_prefill_sync(
         &self,
         params: &super::VisionDecodeParams,
@@ -776,6 +788,13 @@ impl Model for LlamaCppModel {
             params.repetition_penalty,
             params.seed,
         )
+    }
+
+    fn vision_decode_prefill_batch_sync(
+        &self,
+        params: Vec<super::VisionDecodeParams>,
+    ) -> Result<Vec<(usize, Logits)>> {
+        self.do_vision_decode_prefill_batch(params)
     }
 }
 

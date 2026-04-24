@@ -117,7 +117,7 @@ pub enum RequestState {
 #[derive(Debug, Clone)]
 pub struct InferenceRequest {
     pub id: u64,
-    pub prompt_tokens: Vec<i32>,
+    pub prompt_tokens: Arc<Vec<i32>>,
     pub last_token: Option<i32>,
     pub generated_tokens: usize,
     /// Token IDs produced so far (used for repetition penalty).
@@ -164,7 +164,7 @@ impl InferenceRequest {
     ) -> Self {
         Self {
             id,
-            prompt_tokens,
+            prompt_tokens: Arc::new(prompt_tokens),
             last_token: None,
             generated_tokens: 0,
             generated_token_ids: Vec::new(),
