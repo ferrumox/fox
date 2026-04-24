@@ -442,9 +442,8 @@ impl LlamaCppModel {
 
             if chunk_type == 0 {
                 let mut n_tokens_out: usize = 0;
-                let tokens_ptr = unsafe {
-                    mtmd_ffi::mtmd_input_chunk_get_tokens_text(chunk, &mut n_tokens_out)
-                };
+                let tokens_ptr =
+                    unsafe { mtmd_ffi::mtmd_input_chunk_get_tokens_text(chunk, &mut n_tokens_out) };
                 if tokens_ptr.is_null() || n_tokens_out == 0 {
                     continue;
                 }
@@ -456,9 +455,7 @@ impl LlamaCppModel {
                 while ti < n_tokens_out {
                     let batch_ptr = &text_batch as *const _ as *mut ffi::llama_batch;
                     unsafe { (*batch_ptr).n_tokens = 0 };
-                    while ti < n_tokens_out
-                        && (unsafe { (*batch_ptr).n_tokens } as i32) < n_batch
-                    {
+                    while ti < n_tokens_out && (unsafe { (*batch_ptr).n_tokens } as i32) < n_batch {
                         let j = unsafe { (*batch_ptr).n_tokens } as usize;
                         unsafe {
                             *(*batch_ptr).token.add(j) = tokens[ti];
@@ -489,8 +486,7 @@ impl LlamaCppModel {
                 let embd = embd_map
                     .get(&i)
                     .ok_or_else(|| anyhow!("missing pre-encoded embeddings for chunk {}", i))?;
-                let n_tokens =
-                    unsafe { mtmd_ffi::mtmd_input_chunk_get_n_tokens(chunk) } as i32;
+                let n_tokens = unsafe { mtmd_ffi::mtmd_input_chunk_get_n_tokens(chunk) } as i32;
 
                 if self.vision_use_non_causal {
                     unsafe { ffi::llama_set_causal_attn(lctx, false) };
@@ -508,9 +504,10 @@ impl LlamaCppModel {
                     let batch = ffi::llama_batch {
                         n_tokens: batch_len,
                         token: std::ptr::null_mut(),
-                        embd: embd.as_ptr().wrapping_add(
-                            (embd_offset as usize) * n_mmproj_embd,
-                        ) as *mut f32,
+                        embd: embd
+                            .as_ptr()
+                            .wrapping_add((embd_offset as usize) * n_mmproj_embd)
+                            as *mut f32,
                         pos: pos_arr.as_mut_ptr(),
                         n_seq_id: n_seq_arr.as_mut_ptr(),
                         seq_id: seq_ptrs.as_mut_ptr(),
@@ -711,8 +708,7 @@ impl LlamaCppModel {
                     }
 
                     let text_batch = unsafe { ffi::llama_batch_init(n_batch, 0, 1) };
-                    let tokens =
-                        unsafe { std::slice::from_raw_parts(tokens_ptr, n_tokens_out) };
+                    let tokens = unsafe { std::slice::from_raw_parts(tokens_ptr, n_tokens_out) };
 
                     let mut ti = 0usize;
                     while ti < n_tokens_out {
@@ -756,12 +752,11 @@ impl LlamaCppModel {
                     }
                     unsafe { ffi::llama_batch_free(text_batch) };
                 } else {
-                    let embd = embd_map.get(&i).ok_or_else(|| {
-                        anyhow!("missing pre-encoded embeddings for chunk {}", i)
-                    })?;
+                    let embd = embd_map
+                        .get(&i)
+                        .ok_or_else(|| anyhow!("missing pre-encoded embeddings for chunk {}", i))?;
 
-                    let n_tokens =
-                        unsafe { mtmd_ffi::mtmd_input_chunk_get_n_tokens(chunk) } as i32;
+                    let n_tokens = unsafe { mtmd_ffi::mtmd_input_chunk_get_n_tokens(chunk) } as i32;
 
                     if self.vision_use_non_causal {
                         unsafe { ffi::llama_set_causal_attn(lctx, false) };
@@ -774,9 +769,10 @@ impl LlamaCppModel {
                         let embd_batch = ffi::llama_batch {
                             n_tokens: batch_len,
                             token: std::ptr::null_mut(),
-                            embd: embd.as_ptr().wrapping_add(
-                                (embd_offset as usize) * n_mmproj_embd,
-                            ) as *mut f32,
+                            embd: embd
+                                .as_ptr()
+                                .wrapping_add((embd_offset as usize) * n_mmproj_embd)
+                                as *mut f32,
                             pos: std::ptr::null_mut(),
                             n_seq_id: std::ptr::null_mut(),
                             seq_id: std::ptr::null_mut(),
@@ -795,9 +791,10 @@ impl LlamaCppModel {
                         let batch_with_meta = ffi::llama_batch {
                             n_tokens: batch_len,
                             token: std::ptr::null_mut(),
-                            embd: embd.as_ptr().wrapping_add(
-                                (embd_offset as usize) * n_mmproj_embd,
-                            ) as *mut f32,
+                            embd: embd
+                                .as_ptr()
+                                .wrapping_add((embd_offset as usize) * n_mmproj_embd)
+                                as *mut f32,
                             pos: pos_arr.as_mut_ptr(),
                             n_seq_id: n_seq_arr.as_mut_ptr(),
                             seq_id: seq_ptrs.as_mut_ptr(),
@@ -829,8 +826,7 @@ impl LlamaCppModel {
             if logits_ptr.is_null() {
                 return Err(anyhow!("no logits after vision decode prefill"));
             }
-            let logits_slice =
-                unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
+            let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
 
             let sampled = sample_token(
                 logits_slice,

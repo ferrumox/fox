@@ -505,9 +505,8 @@ impl LlamaCppModel {
             if let Some(ref pool) = mtmd_pool {
                 let tmp = pool.acquire();
                 let mrope = unsafe { mtmd_ffi::mtmd_decode_use_mrope(tmp.as_ptr()) };
-                let non_causal = unsafe {
-                    mtmd_ffi::mtmd_decode_use_non_causal(tmp.as_ptr(), std::ptr::null())
-                };
+                let non_causal =
+                    unsafe { mtmd_ffi::mtmd_decode_use_non_causal(tmp.as_ptr(), std::ptr::null()) };
                 let embd = pool.n_embd_inp;
                 pool.release(tmp);
                 (mrope, non_causal, embd)
