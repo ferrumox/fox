@@ -68,7 +68,7 @@ echo " done"
 
 # Warm up with a single request
 echo -n "Warming up (loading model)..."
-curl -s "$URL/v1/chat/completions" \
+curl -s --connect-timeout 5 --max-time 30 "$URL/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d @"$TMPDIR/req_1.json" -o /dev/null
 echo " done"
@@ -81,7 +81,7 @@ START=$(date +%s%N)
 
 ACTIVE=0
 for i in $(seq 1 "$REQUESTS"); do
-    curl -s -o "$TMPDIR/resp_$i.json" \
+    curl -s --connect-timeout 5 --max-time 30 -o "$TMPDIR/resp_$i.json" \
         -w "%{time_total}\n" \
         "$URL/v1/chat/completions" \
         -H "Content-Type: application/json" \

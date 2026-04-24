@@ -101,7 +101,7 @@ run_bench() {
 
     # Warmup
     echo -n "  Warming up..."
-    curl -s "$url/v1/chat/completions" \
+    curl -s --connect-timeout 5 --max-time 30 "$url/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d @"$TMPDIR/req_${req_prefix}_1.json" -o /dev/null
     echo " done"
@@ -112,7 +112,7 @@ run_bench() {
 
     local ACTIVE=0
     for i in $(seq 1 "$REQUESTS"); do
-        curl -s -o "$outdir/resp_$i.json" \
+        curl -s --connect-timeout 5 --max-time 30 -o "$outdir/resp_$i.json" \
             -w "%{time_total}\n" \
             "$url/v1/chat/completions" \
             -H "Content-Type: application/json" \
@@ -125,6 +125,12 @@ run_bench() {
         fi
     done
     wait
+
+    # Check if server is still alive after benchmark
+    if ! curl -s --connect-timeout 2 --max-time 5 "$url/health" >/dev/null 2>&1 \
+       && ! curl -s --connect-timeout 2 --max-time 5 "$url/v1/models" >/dev/null 2>&1; then
+        echo -e "  ${RED}WARNING: server appears to have crashed during benchmark${NC}"
+    fi
 
     END=$(date +%s%N)
     ELAPSED_MS=$(( (END - START) / 1000000 ))
@@ -177,7 +183,8 @@ if [ ! -f "$FOX_BIN" ]; then
 else
     FOX_SKIP=0
     $FOX_BIN serve --model-path "$MODEL_DIR/$TEXT_MODEL" \
-        --port "$FOX_PORT" --max-context-len 2048 > /dev/null 2>&1 &
+        --port "$FOX_PORT" --max-context-len 2048 \
+        --vision-contexts "$CONCURRENCY" > /dev/null 2>&1 &
     FOX_PID=$!
     sleep 5
     if run_bench "fox" "http://localhost:$FOX_PORT" "default"; then
