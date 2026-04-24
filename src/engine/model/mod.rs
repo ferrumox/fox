@@ -221,7 +221,7 @@ pub trait Model: Send + Sync {
     fn vision_preprocess_sync_with_cache(
         &self,
         _params: &VisionPreprocessParams,
-        _cached_embeddings: Option<Vec<f32>>,
+        _cached_embeddings: Option<std::sync::Arc<Vec<f32>>>,
     ) -> Result<PreprocessedVision> {
         anyhow::bail!("vision not supported by this model backend")
     }
@@ -269,7 +269,7 @@ pub struct VisionPreprocessParams {
 pub struct PreprocessedVision {
     pub(crate) chunks: *mut std::ffi::c_void,
     /// Pre-encoded CLIP embeddings for each image/audio chunk, keyed by chunk index.
-    pub(crate) image_embeddings: Vec<(usize, Vec<f32>)>,
+    pub(crate) image_embeddings: Vec<(usize, std::sync::Arc<Vec<f32>>)>,
 }
 
 unsafe impl Send for PreprocessedVision {}

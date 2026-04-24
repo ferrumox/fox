@@ -172,10 +172,10 @@ impl InferenceEngine {
 
         let mut all_results: Vec<(u64, Logits)> = Vec::new();
 
-        // Vision requests: parallel CLIP preprocess, then batched decode.
+        // Vision requests: parallel CLIP preprocess, pipelined decode.
+        // CLIP results are decoded as soon as they're ready (overlapping CLIP and decode).
         if !vision_ids.is_empty() {
-            // Phase 1: Preprocess in parallel (off inference thread).
-            // Check CLIP embedding cache before encoding.
+            // Fire all CLIP preprocess tasks in parallel.
             let mut preprocess_handles = Vec::new();
             for (i, _id) in vision_ids.iter().enumerate() {
                 let image_bytes = Arc::clone(&vision_preprocess_params[i].image_bytes);
@@ -184,7 +184,7 @@ impl InferenceEngine {
                     .clip_cache
                     .lock()
                     .ok()
-                    .and_then(|mut c| c.get(&image_hash).cloned());
+                    .and_then(|mut c| c.get(&image_hash).map(Arc::clone));
 
                 let model = self.model.clone();
                 let params = VisionPreprocessParams {
@@ -192,53 +192,62 @@ impl InferenceEngine {
                     image_bytes: Arc::clone(&vision_preprocess_params[i].image_bytes),
                 };
 
-                preprocess_handles.push(tokio::task::spawn_blocking(move || {
-                    let pp = model
-                        .vision_preprocess_sync_with_cache(&params, cached)
-                        .or_else(|_| model.vision_preprocess_sync(&params))?;
-                    Ok::<_, anyhow::Error>((image_hash, pp))
-                }));
+                preprocess_handles.push((
+                    i,
+                    tokio::task::spawn_blocking(move || {
+                        let pp = model
+                            .vision_preprocess_sync_with_cache(&params, cached)
+                            .or_else(|_| model.vision_preprocess_sync(&params))?;
+                        Ok::<_, anyhow::Error>((image_hash, pp))
+                    }),
+                ));
             }
 
-            let mut decode_params: Vec<VisionDecodeParams> = Vec::new();
-            let mut decode_req_ids: Vec<u64> = Vec::new();
-            for (i, handle) in preprocess_handles.into_iter().enumerate() {
-                let (image_hash, pp) = handle
-                    .await
+            // Process CLIP results as they complete, immediately starting decode.
+            // FuturesUnordered yields results in completion order, so fast CLIP
+            // results get decoded while slower ones are still encoding.
+            use futures::stream::{FuturesUnordered, StreamExt};
+            let mut futs: FuturesUnordered<_> = preprocess_handles
+                .into_iter()
+                .map(|(idx, handle)| async move { (idx, handle.await) })
+                .collect();
+
+            while let Some((idx, join_result)) = futs.next().await {
+                let (image_hash, pp) = join_result
                     .map_err(|e| anyhow::anyhow!("vision preprocess spawn_blocking: {}", e))??;
 
-                // Store CLIP embeddings in cache for future reuse.
+                // Store CLIP embeddings in cache.
                 if let Ok(mut cache) = self.clip_cache.lock() {
                     if let Some((_, embd)) = pp.image_embeddings.first() {
-                        cache.put(image_hash, embd.clone());
+                        cache.put(image_hash, Arc::clone(embd));
                     }
                 }
 
-                let (temp, top_p, top_k, rep_pen, seed) = vision_sampling[i];
-                decode_params.push(VisionDecodeParams {
-                    seq_id: vision_seq_ids[i],
+                let (temp, top_p, top_k, rep_pen, seed) = vision_sampling[idx];
+                let decode_params = vec![VisionDecodeParams {
+                    seq_id: vision_seq_ids[idx],
                     preprocessed: pp,
                     temperature: temp,
                     top_p,
                     top_k,
                     repetition_penalty: rep_pen,
                     seed,
-                });
-                decode_req_ids.push(vision_ids[i]);
-            }
+                }];
+                let req_id = vision_ids[idx];
 
-            // Phase 2: Batch decode — acquires locks once for all requests.
-            let model = self.model.clone();
-            let vision_results = tokio::task::spawn_blocking(move || {
-                model.vision_decode_prefill_batch_sync(decode_params)
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("vision decode spawn_blocking: {}", e))??;
+                // Decode immediately — acquires llama_context mutex.
+                // While this decode runs, other CLIP tasks continue on separate threads.
+                let model = self.model.clone();
+                let mut results = tokio::task::spawn_blocking(move || {
+                    model.vision_decode_prefill_batch_sync(decode_params)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("vision decode spawn_blocking: {}", e))??;
 
-            for (i, (n_past, logits)) in vision_results.into_iter().enumerate() {
-                let id = decode_req_ids[i];
-                self.scheduler.set_prefilled_tokens(id, n_past);
-                all_results.push((id, logits));
+                if let Some((n_past, logits)) = results.pop() {
+                    self.scheduler.set_prefilled_tokens(req_id, n_past);
+                    all_results.push((req_id, logits));
+                }
             }
         }
 

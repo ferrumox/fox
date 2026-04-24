@@ -43,7 +43,7 @@ pub struct InferenceEngine {
     model_stop_tokens: Vec<String>,
     /// LRU cache for CLIP embeddings, keyed by image content hash.
     /// Avoids re-encoding identical images across requests.
-    clip_cache: std::sync::Mutex<lru::LruCache<u64, Vec<f32>>>,
+    clip_cache: std::sync::Mutex<lru::LruCache<u64, Arc<Vec<f32>>>>,
 }
 
 impl InferenceEngine {
