@@ -111,9 +111,14 @@ impl InferenceEngine {
         self.model.context_len()
     }
 
-    /// Whether the loaded model has native thinking support (`<think>` special token).
+    /// Whether the loaded model has native thinking support.
     pub fn supports_thinking(&self) -> bool {
         self.model.supports_thinking()
+    }
+
+    /// Whether the model uses `<|channel>` markers for thinking (Gemma 4 style).
+    pub fn uses_channel_thinking(&self) -> bool {
+        self.model.uses_channel_thinking()
     }
 
     /// Sampling parameters recommended by the model's GGUF metadata, if any.

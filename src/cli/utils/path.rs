@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 
+use crate::registry::Registry;
+
 /// Expand a leading `~` to the user's home directory (cross-platform).
 pub fn expand_tilde(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
@@ -107,6 +109,7 @@ pub fn resolve_model_path(
     // 2. Alias lookup
     let aliases = load_aliases(alias_file.map(|p| p.to_path_buf()));
     let resolved = aliases.get(name).map(String::as_str).unwrap_or(name);
+    let registry_stem = Registry::load().resolve_file_stem(resolved);
 
     let dir = models_dir();
     let entries = list_models(&dir).unwrap_or_default();
@@ -114,11 +117,16 @@ pub fn resolve_model_path(
     // matching works against filenames that use dashes as separators.
     let normalized = resolved.replace(':', "-");
     let lower = normalized.to_lowercase();
+    let registry_lower = registry_stem.as_ref().map(|stem| stem.to_lowercase());
 
     // Exact match
     for (path, _) in &entries {
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            if stem.eq_ignore_ascii_case(&normalized) {
+            if stem.eq_ignore_ascii_case(&normalized)
+                || registry_stem
+                    .as_deref()
+                    .is_some_and(|registry| stem.eq_ignore_ascii_case(registry))
+            {
                 return Ok((stem.to_string(), path.clone()));
             }
         }
@@ -127,7 +135,12 @@ pub fn resolve_model_path(
     // Starts-with
     for (path, _) in &entries {
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            if stem.to_lowercase().starts_with(&lower) {
+            let stem_lower = stem.to_lowercase();
+            if stem_lower.starts_with(&lower)
+                || registry_lower
+                    .as_deref()
+                    .is_some_and(|registry| stem_lower.starts_with(registry))
+            {
                 return Ok((stem.to_string(), path.clone()));
             }
         }
@@ -136,7 +149,12 @@ pub fn resolve_model_path(
     // Contains
     for (path, _) in &entries {
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            if stem.to_lowercase().contains(&lower) {
+            let stem_lower = stem.to_lowercase();
+            if stem_lower.contains(&lower)
+                || registry_lower
+                    .as_deref()
+                    .is_some_and(|registry| stem_lower.contains(registry))
+            {
                 return Ok((stem.to_string(), path.clone()));
             }
         }

@@ -80,6 +80,14 @@
       "size_gb": 16.5,
       "tags": ["chat", "reasoning", "coding"]
     },
+    "gemma4": {
+      "aliases": ["gemma-4", "gemma4:26b", "gemma4:26b-a4b", "gemma:26b"],
+      "repo": "bartowski/google_gemma-4-26B-A4B-it-GGUF",
+      "recommended": "google_gemma-4-26B-A4B-it-Q4_K_M.gguf",
+      "description": "Google Gemma 4 26B-A4B — multimodal instruct model",
+      "size_gb": 10.0,
+      "tags": ["chat", "multimodal", "reasoning"]
+    },
     "qwen2.5": {
       "aliases": ["qwen", "qwen2.5:7b"],
       "repo": "bartowski/Qwen2.5-7B-Instruct-GGUF",

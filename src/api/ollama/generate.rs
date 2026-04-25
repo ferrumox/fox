@@ -60,8 +60,8 @@ pub async fn ollama_generate(
     let supports_thinking = entry.engine.supports_thinking();
 
     // /api/generate always suppresses thinking from output (no `thinking` field in response).
-    let (mut sampling, max_tokens) = sampling_from_ollama(req.options.as_ref(), false);
-    sampling.initial_in_thinking = supports_thinking;
+    let (mut sampling, max_tokens) = sampling_from_ollama(req.options.as_ref(), false, entry.engine.uses_channel_thinking());
+    sampling.initial_in_thinking = supports_thinking && !entry.engine.uses_channel_thinking();
 
     let (prompt_tokens, prompt_tokens_len) = prepare_prompt(
         &entry,

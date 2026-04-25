@@ -96,9 +96,12 @@ pub(super) async fn load_model(
     };
 
     let supports_thinking = engine.supports_thinking();
+    let uses_channel = engine.uses_channel_thinking();
     tracing::info!(
         model = %engine.model_name(),
         thinking = supports_thinking,
+        channel_thinking = uses_channel,
+        context = engine.context_len(),
         "model ready"
     );
 

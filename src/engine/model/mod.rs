@@ -148,10 +148,16 @@ pub trait Model: Send + Sync {
         4096
     }
 
-    /// Returns `true` when the model has native thinking support — i.e. `<think>` is a
-    /// single special token in the vocabulary (Qwen3, DeepSeek-R1, etc.).
-    /// Models without native thinking always return `false`.
+    /// Returns `true` when the model has native thinking support — either `<think>`-prefix
+    /// style (Qwen3, DeepSeek-R1) or `<|channel>`-based style (Gemma 4).
     fn supports_thinking(&self) -> bool {
+        false
+    }
+
+    /// Returns `true` for models that use `<|channel>thought` / `<|channel>final` markers
+    /// (Gemma 4). These support thinking but must NOT have `<think>` injected into the prompt
+    /// and must NOT start generation with `initial_in_thinking=true`.
+    fn uses_channel_thinking(&self) -> bool {
         false
     }
 

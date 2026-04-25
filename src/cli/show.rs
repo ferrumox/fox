@@ -34,6 +34,7 @@ static ARCH_TAGS: &[&str] = &[
     "mistral",
     "vicuna",
     "alpaca",
+    "gemma-4",
     "gemma",
     "llama",
     "qwen",

@@ -97,8 +97,8 @@ pub async fn ollama_chat(
     let show_thinking_in_output = use_thinking && !stream_mode;
 
     let (mut sampling, max_tokens) =
-        sampling_from_ollama(req.options.as_ref(), show_thinking_in_output);
-    sampling.initial_in_thinking = use_thinking;
+        sampling_from_ollama(req.options.as_ref(), show_thinking_in_output, entry.engine.uses_channel_thinking());
+    sampling.initial_in_thinking = use_thinking && !entry.engine.uses_channel_thinking();
 
     let (prompt_tokens, prompt_tokens_len) = prepare_prompt(
         &entry,

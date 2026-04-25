@@ -246,7 +246,9 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
 
     let effective_ctx = engine.context_len();
     let supports_thinking = engine.supports_thinking();
-    let mut show_thinking = supports_thinking;
+    // Channel-thinking models (Gemma 4) respond directly via <|channel>model — no <think>
+    // injection needed, so show_thinking defaults to false to avoid the dim-mode display.
+    let mut show_thinking = supports_thinking && !engine.uses_channel_thinking();
 
     theme::print_banner(model_name, effective_ctx, supports_thinking);
     let startup_gpu = get_gpu_info();
@@ -417,12 +419,24 @@ async fn stream_turn_collecting(
             .join("\n")
     });
 
-    // For models that require an explicit thinking activation (e.g. Qwen3-Instruct),
-    // append the opening <think> tag to the prompt so the model starts in reasoning
-    // mode.  The engine state is also initialised with in_thinking=true so the output
-    // filter knows the first generated tokens are reasoning content, not regular output.
-    if show_thinking {
+    let uses_channel = engine.uses_channel_thinking();
+    if show_thinking && !uses_channel {
+        // <think>-prefix style (Qwen3, DeepSeek): inject opening tag so model starts in
+        // reasoning mode.
         prompt.push_str("<think>\n");
+    } else if uses_channel {
+        const THOUGHT_SUPPRESSION: &str = "<|channel>thought\n<channel|>";
+        if show_thinking {
+            // Thinking enabled: strip the template's suppression block so the model can
+            // generate <|channel>thought...<channel|> naturally.
+            if let Some(idx) = prompt.rfind(THOUGHT_SUPPRESSION) {
+                prompt.truncate(idx);
+            }
+        } else if prompt.trim_end().ends_with("<channel|>") {
+            // Thinking disabled: explicitly open the model-response channel so the model
+            // generates a reply immediately instead of treating <channel|> as end-of-turn.
+            prompt.push_str("\n<|channel>model\n");
+        }
     }
 
     let prompt_tokens = engine
@@ -432,7 +446,7 @@ async fn stream_turn_collecting(
     let recommended = engine.recommended_sampling();
     let mut sampling = build_sampling_params(args, recommended.as_ref());
     sampling.show_thinking = show_thinking;
-    sampling.initial_in_thinking = show_thinking;
+    sampling.initial_in_thinking = show_thinking && !uses_channel;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let req_id = engine.next_request_id();
@@ -448,17 +462,24 @@ async fn stream_turn_collecting(
     let mut in_thinking_display = show_thinking;
 
     while let Some(token) = rx.recv().await {
+        tracing::debug!(text = %token.text, stop = token.stop_reason.is_some(), "token");
         if !token.text.is_empty() {
             if first_token {
                 spinner.finish_and_clear();
                 eprintln!();
                 theme::print_fox_label();
                 let _ = std::io::stderr().flush();
-                // The <think> tag was injected into the prompt; emit it
-                // synthetically with dim styling so the user sees it.
-                if show_thinking {
+                // For <think>-prefix models the tag was injected into the prompt, so
+                // emit it synthetically. Channel models (Gemma 4) emit <think> themselves
+                // via the output filter — no synthetic tag needed.
+                if show_thinking && !engine.uses_channel_thinking() {
                     println!("\x1b[2m<think>");
                     let _ = stdout.lock().flush();
+                }
+                // Channel models start outside of thinking; dim mode activates when the
+                // filter emits the <think> token from <|channel>thought.
+                if engine.uses_channel_thinking() {
+                    in_thinking_display = false;
                 }
                 first_token = false;
             }
@@ -506,8 +527,18 @@ async fn stream_turn(
             .join("\n")
     });
 
-    if args.show_thinking {
+    let uses_channel = engine.uses_channel_thinking();
+    if args.show_thinking && !uses_channel {
         prompt.push_str("<think>\n");
+    } else if uses_channel {
+        const THOUGHT_SUPPRESSION: &str = "<|channel>thought\n<channel|>";
+        if args.show_thinking {
+            if let Some(idx) = prompt.rfind(THOUGHT_SUPPRESSION) {
+                prompt.truncate(idx);
+            }
+        } else if prompt.trim_end().ends_with("<channel|>") {
+            prompt.push_str("\n<|channel>model\n");
+        }
     }
 
     let prompt_tokens = engine
@@ -516,7 +547,7 @@ async fn stream_turn(
 
     let recommended = engine.recommended_sampling();
     let mut sampling = build_sampling_params(args, recommended.as_ref());
-    sampling.initial_in_thinking = args.show_thinking;
+    sampling.initial_in_thinking = args.show_thinking && !uses_channel;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let req_id = engine.next_request_id();

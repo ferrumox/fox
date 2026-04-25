@@ -16,6 +16,9 @@ pub(super) const CONTROL_TOKEN_PATTERNS: &[&str] = &[
     "<|endofthought|>",
 ];
 
+const GEMMA_CHANNEL_MARKER: &str = "<|channel>";
+const GEMMA_CHANNEL_CLOSE: &str = "<channel|>";
+
 // ---------------------------------------------------------------------------
 // Per-request output state
 // ---------------------------------------------------------------------------
@@ -90,10 +93,8 @@ pub(crate) fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (St
         }
     }
 
-    // Build combined pattern list: static patterns + model-native stop token strings.
-    // SAFETY: the Vec<&str> borrows from `state.model_control_patterns` which lives for
-    // the duration of this call.  We reborrow `state` fields individually below to
-    // avoid a borrow-checker conflict with `state.pending_output`.
+    // Build an owned combined pattern list so the filter can mutate `state`
+    // without borrowing `state.model_control_patterns` for the whole call.
     let patterns = all_control_patterns(&state.model_control_patterns);
 
     // 1. Enter <think> block (usually a single special token like 248068 for Qwen3.5).
@@ -140,19 +141,23 @@ pub(crate) fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (St
 
     // 3. Inside a thinking block.
     if state.in_thinking {
-        // Budget enforcement: force-close the block when the character limit is reached.
-        // This prevents infinite thinking loops where the model never generates `</think>`.
+        // Budget enforcement runs before flushing so the overflowing token is discarded
+        // and the synthetic </think> tag is returned immediately regardless of show_thinking.
         if state.max_thinking_chars > 0 {
             state.thinking_chars += raw.chars().count();
             if state.thinking_chars >= state.max_thinking_chars {
                 state.in_thinking = false;
-                // Emit a synthetic closing tag so show_thinking output is well-formed,
-                // then let subsequent tokens flow through as normal response content.
                 if state.show_thinking {
                     return ("</think>\n".to_string(), false);
                 }
                 return (String::new(), false);
             }
+        }
+
+        state.pending_output.push_str(raw);
+        let (text, stop) = flush_pending_output_with_channels(state, &patterns);
+        if !text.is_empty() || stop {
+            return (text, stop);
         }
         if state.show_thinking {
             // Emit thinking tokens directly (no holdback needed — control patterns
@@ -165,7 +170,110 @@ pub(crate) fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (St
     // 4. Normal text: push through the pending buffer; hold back any partial
     //    control-token prefix (e.g. `<` that could be the start of `<|im_end|>`).
     state.pending_output.push_str(raw);
-    flush_pending_output(&mut state.pending_output, &patterns)
+    flush_pending_output_with_channels(state, &patterns)
+}
+
+fn flush_pending_output_with_channels(
+    state: &mut PerRequestState,
+    patterns: &[String],
+) -> (String, bool) {
+    let mut visible = String::new();
+
+    loop {
+        let open_pos = state.pending_output.find(GEMMA_CHANNEL_MARKER);
+        let close_pos = state.pending_output.find(GEMMA_CHANNEL_CLOSE);
+
+        // Determine which marker comes first (open <|channel>NAME or close <channel|>).
+        let (is_close, marker_idx) = match (open_pos, close_pos) {
+            (None, None) => {
+                // No markers — normal holdback + flush.
+                if state.in_thinking && !state.show_thinking {
+                    let hold = find_marker_holdback_start(&state.pending_output);
+                    state.pending_output = state.pending_output[hold..].to_string();
+                    return (visible, false);
+                }
+                let channel_hold = find_marker_holdback_start(&state.pending_output);
+                if channel_hold < state.pending_output.len() {
+                    let held_channel = state.pending_output[channel_hold..].to_string();
+                    let mut safe = state.pending_output[..channel_hold].to_string();
+                    let (text, stop) = flush_pending_output(&mut safe, patterns);
+                    visible.push_str(&text);
+                    state.pending_output = format!("{safe}{held_channel}");
+                    return (visible, stop);
+                }
+                let (text, stop) = flush_pending_output(&mut state.pending_output, patterns);
+                visible.push_str(&text);
+                return (visible, stop);
+            }
+            (Some(o), Some(c)) => (c < o, o.min(c)),
+            (Some(o), None) => (false, o),
+            (None, Some(c)) => (true, c),
+        };
+
+        // Emit (or discard) text before the marker.
+        if marker_idx > 0 {
+            let before = state.pending_output[..marker_idx].to_string();
+            state.pending_output.drain(..marker_idx);
+            if !state.in_thinking || state.show_thinking {
+                visible.push_str(&before);
+            }
+        }
+
+        if is_close {
+            // <channel|> — universal channel close (exits thinking if we are in it).
+            state.pending_output.drain(..GEMMA_CHANNEL_CLOSE.len());
+            if state.in_thinking {
+                state.in_thinking = false;
+                if state.show_thinking {
+                    visible.push_str("</think>\n");
+                }
+            }
+            continue;
+        }
+
+        // <|channel>NAME — open a named channel.
+        let after_marker = &state.pending_output[GEMMA_CHANNEL_MARKER.len()..];
+        let after_trimmed = after_marker.trim_start_matches(|c: char| c.is_whitespace());
+        let skipped_ws = after_marker.len() - after_trimmed.len();
+        let channel_len = after_trimmed
+            .find(|c: char| c.is_whitespace())
+            .unwrap_or(after_trimmed.len());
+
+        if channel_len == 0 {
+            // Incomplete — wait for more tokens.
+            return (visible, false);
+        }
+
+        let channel = &after_trimmed[..channel_len];
+        let consumed = GEMMA_CHANNEL_MARKER.len() + skipped_ws + channel_len;
+        match channel {
+            "thought" | "analysis" => {
+                state.in_thinking = true;
+                state.thinking_chars = 0;
+                state.pending_output.drain(..consumed);
+                if state.show_thinking {
+                    visible.push_str("<think>\n");
+                }
+            }
+            "final" | "model" | "response" => {
+                state.in_thinking = false;
+                state.pending_output.drain(..consumed);
+                if state.show_thinking {
+                    visible.push_str("</think>\n");
+                }
+            }
+            _ => {
+                // Unknown channel: consume and exit thinking to avoid trapping output.
+                state.pending_output.drain(..consumed);
+                if state.in_thinking {
+                    state.in_thinking = false;
+                    if state.show_thinking {
+                        visible.push_str("</think>\n");
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Flush as much of `pending` as is safe.
@@ -177,10 +285,10 @@ pub(crate) fn apply_output_filter(state: &mut PerRequestState, raw: &str) -> (St
 ///
 /// `patterns` is the combined list of static `CONTROL_TOKEN_PATTERNS` plus any
 /// model-native stop token strings for the current request.
-pub(super) fn flush_pending_output(pending: &mut String, patterns: &[&str]) -> (String, bool) {
+pub(super) fn flush_pending_output(pending: &mut String, patterns: &[String]) -> (String, bool) {
     // Check for complete control-token patterns.
-    for &pat in patterns {
-        if let Some(idx) = pending.find(pat) {
+    for pat in patterns {
+        if let Some(idx) = pending.find(pat.as_str()) {
             let emit = pending[..idx].to_string();
             pending.clear();
             return (emit, true); // stop generation
@@ -197,7 +305,7 @@ pub(super) fn flush_pending_output(pending: &mut String, patterns: &[&str]) -> (
 /// Returns the byte offset of the first `<` in `text` from which a control-token
 /// pattern *could* still begin (i.e. some pattern starts with the suffix
 /// `text[offset..]`).  Returns `text.len()` when nothing needs to be held back.
-fn find_holdback_start(text: &str, patterns: &[&str]) -> usize {
+fn find_holdback_start(text: &str, patterns: &[String]) -> usize {
     for (i, c) in text.char_indices() {
         if c != '<' {
             continue;
@@ -210,13 +318,26 @@ fn find_holdback_start(text: &str, patterns: &[&str]) -> usize {
     text.len()
 }
 
+fn find_marker_holdback_start(text: &str) -> usize {
+    for (i, _) in text.char_indices() {
+        let suffix = &text[i..];
+        if GEMMA_CHANNEL_MARKER.starts_with(suffix) || GEMMA_CHANNEL_CLOSE.starts_with(suffix) {
+            return i;
+        }
+    }
+    text.len()
+}
+
 /// Build the combined pattern list for a request: static CONTROL_TOKEN_PATTERNS
 /// plus any model-native stop token strings stored in state.
-pub(super) fn all_control_patterns(model_pats: &[String]) -> Vec<&str> {
-    let mut v: Vec<&str> = CONTROL_TOKEN_PATTERNS.to_vec();
+pub(super) fn all_control_patterns(model_pats: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = CONTROL_TOKEN_PATTERNS
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
     for p in model_pats {
-        if !v.contains(&p.as_str()) {
-            v.push(p.as_str());
+        if !v.iter().any(|existing| existing == p) {
+            v.push(p.clone());
         }
     }
     v
@@ -403,6 +524,69 @@ mod tests {
         let (text, stop) = apply_output_filter(&mut s, "<|im_end|>");
         assert_eq!(text, "");
         assert!(stop);
+    }
+
+    #[test]
+    fn test_gemma4_thought_channel_hidden_until_final() {
+        let mut s = PerRequestState::default();
+
+        assert_eq!(aof(&mut s, "<|channel>thought\n"), "");
+        assert!(s.in_thinking);
+        assert_eq!(aof(&mut s, "hidden reasoning"), "");
+        assert_eq!(aof(&mut s, "<|channel>final\nHola"), "\nHola");
+        assert!(!s.in_thinking);
+        assert_eq!(aof(&mut s, " mundo"), " mundo");
+    }
+
+    #[test]
+    fn test_gemma4_channel_marker_split_across_tokens() {
+        let mut s = PerRequestState::default();
+
+        for part in ["<|channel", ">thought", "\ninternal"] {
+            assert_eq!(aof(&mut s, part), "");
+        }
+        assert!(s.in_thinking);
+
+        for part in ["<|channel", ">final", "\nAnswer"] {
+            let out = aof(&mut s, part);
+            if part == "\nAnswer" {
+                assert_eq!(out, "\nAnswer");
+            } else {
+                assert_eq!(out, "");
+            }
+        }
+        assert!(!s.in_thinking);
+    }
+
+    #[test]
+    fn test_gemma4_channel_close_exits_thinking() {
+        // <channel|> is the universal close token; must exit thinking mode.
+        let mut s = PerRequestState::default();
+        assert_eq!(aof(&mut s, "<|channel>thought\n"), "");
+        assert!(s.in_thinking);
+        assert_eq!(aof(&mut s, "hidden"), "");
+        assert_eq!(aof(&mut s, "<channel|>\nResponse"), "\nResponse");
+        assert!(!s.in_thinking);
+    }
+
+    #[test]
+    fn test_gemma4_response_channel_exits_thinking() {
+        // <|channel>response is an alternative to <|channel>model.
+        let mut s = PerRequestState::default();
+        assert_eq!(aof(&mut s, "<|channel>thought\n"), "");
+        assert_eq!(aof(&mut s, "hidden"), "");
+        assert_eq!(aof(&mut s, "<|channel>response\nVisible"), "\nVisible");
+        assert!(!s.in_thinking);
+    }
+
+    #[test]
+    fn test_gemma4_unknown_channel_exits_thinking() {
+        // An unknown channel name must consume the marker and exit thinking to avoid trapping output.
+        let mut s = PerRequestState::default();
+        assert_eq!(aof(&mut s, "<|channel>thought\n"), "");
+        assert_eq!(aof(&mut s, "hidden"), "");
+        assert_eq!(aof(&mut s, "<|channel>unknown\nVisible"), "\nVisible");
+        assert!(!s.in_thinking);
     }
 
     // --- check_stop_sequences ---

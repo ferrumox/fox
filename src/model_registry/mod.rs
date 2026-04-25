@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use crate::cli::list_models;
+use crate::registry::Registry;
 
 use self::loader::load_model;
 
@@ -165,14 +166,20 @@ impl ModelRegistry {
         }
 
         let resolved = self.aliases.get(name).map(String::as_str).unwrap_or(name);
+        let registry_stem = Registry::load().resolve_file_stem(resolved);
 
         let entries = list_models(&self.config.models_dir)?;
         let lower = resolved.to_lowercase();
+        let registry_lower = registry_stem.as_ref().map(|stem| stem.to_lowercase());
 
         // 1. Exact match (case-insensitive)
         for (path, _) in &entries {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if stem.eq_ignore_ascii_case(resolved) {
+                if stem.eq_ignore_ascii_case(resolved)
+                    || registry_stem
+                        .as_deref()
+                        .is_some_and(|registry| stem.eq_ignore_ascii_case(registry))
+                {
                     return Ok((stem.to_string(), path.clone()));
                 }
             }
@@ -181,7 +188,12 @@ impl ModelRegistry {
         // 2. Starts with
         for (path, _) in &entries {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if stem.to_lowercase().starts_with(&lower) {
+                let stem_lower = stem.to_lowercase();
+                if stem_lower.starts_with(&lower)
+                    || registry_lower
+                        .as_deref()
+                        .is_some_and(|registry| stem_lower.starts_with(registry))
+                {
                     return Ok((stem.to_string(), path.clone()));
                 }
             }
@@ -190,7 +202,12 @@ impl ModelRegistry {
         // 3. Contains
         for (path, _) in &entries {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if stem.to_lowercase().contains(&lower) {
+                let stem_lower = stem.to_lowercase();
+                if stem_lower.contains(&lower)
+                    || registry_lower
+                        .as_deref()
+                        .is_some_and(|registry| stem_lower.contains(registry))
+                {
                     return Ok((stem.to_string(), path.clone()));
                 }
             }
@@ -405,6 +422,20 @@ mod tests {
         let registry = ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), aliases);
         let (stem, _) = registry.resolve_model_name("llama3").unwrap();
         assert_eq!(stem, "Llama-3.2-3B");
+    }
+
+    #[test]
+    fn test_resolve_curated_registry_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("google_gemma-4-26B-A4B-it-Q4_K_M.gguf"),
+            b"",
+        )
+        .unwrap();
+
+        let registry = ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), HashMap::new());
+        let (stem, _) = registry.resolve_model_name("gemma4").unwrap();
+        assert_eq!(stem, "google_gemma-4-26B-A4B-it-Q4_K_M");
     }
 
     #[test]

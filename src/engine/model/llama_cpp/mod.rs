@@ -27,13 +27,15 @@ use std::ptr::NonNull;
 #[cfg(not(fox_stub))]
 use std::sync::Arc;
 
-#[cfg(not(fox_stub))]
+#[cfg(any(test, not(fox_stub)))]
 use anyhow::anyhow;
 
 #[cfg(not(fox_stub))]
 use crate::engine::ffi;
+#[cfg(any(test, not(fox_stub)))]
+use crate::engine::model::ModelConfig;
 #[cfg(not(fox_stub))]
-use crate::engine::model::{InferenceRequestForModel, Logits, Model, ModelConfig};
+use crate::engine::model::{InferenceRequestForModel, Logits, Model};
 
 /// SentencePiece uses U+2581 (▁) for word boundaries.
 #[cfg(not(fox_stub))]
@@ -152,9 +154,183 @@ fn diagnose_load_failure(model_path: &std::path::Path) -> anyhow::Error {
 ///
 /// Returns `user_limit` when the user specified one explicitly, otherwise
 /// falls back to `model_train_ctx` (the context the model was trained with).
-#[cfg(not(fox_stub))]
+#[cfg(any(test, not(fox_stub)))]
 pub(crate) fn resolve_context_len(user_limit: Option<u32>, model_train_ctx: u32) -> u32 {
     user_limit.unwrap_or(model_train_ctx)
+}
+
+#[cfg(any(test, not(fox_stub)))]
+#[derive(Debug, Clone, Copy)]
+struct ContextSizing {
+    requested_ctx: u32,
+    effective_ctx: u32,
+    n_ctx: u32,
+    n_seq: u32,
+    max_tokens_by_mem: u32,
+    budget_bytes: usize,
+    bytes_per_token: u64,
+}
+
+#[cfg(any(test, not(fox_stub)))]
+fn kv_bytes_per_token(config: &ModelConfig, type_k: u32, type_v: u32) -> u64 {
+    let elems_per_token = (config.num_heads_kv * config.head_dim * config.num_layers) as u64;
+    let (k_num, k_den) = crate::kv_cache::kv_type_bytes(type_k);
+    let (v_num, v_den) = crate::kv_cache::kv_type_bytes(type_v);
+    (elems_per_token * k_num).div_ceil(k_den) + (elems_per_token * v_num).div_ceil(v_den)
+}
+
+#[cfg(any(test, not(fox_stub)))]
+fn kv_type_name(t: u32) -> &'static str {
+    use crate::model_registry::kv_type;
+    match t {
+        kv_type::F16 => "f16",
+        kv_type::Q8_0 => "q8_0",
+        kv_type::Q4_0 => "q4_0",
+        kv_type::TURBO3 => "turbo3",
+        kv_type::TURBO4 => "turbo4",
+        kv_type::TURBO2 => "turbo2",
+        _ => "unknown",
+    }
+}
+
+#[cfg(any(test, not(fox_stub)))]
+fn compute_context_sizing(
+    max_batch_size: usize,
+    max_context_len: Option<u32>,
+    model_train_ctx: u32,
+    budget_bytes: usize,
+    config: &ModelConfig,
+    type_k: u32,
+    type_v: u32,
+) -> anyhow::Result<ContextSizing> {
+    let n_seq = (max_batch_size as u32).max(1);
+    let requested_ctx = resolve_context_len(max_context_len, model_train_ctx).max(1);
+    let bytes_per_token = kv_bytes_per_token(config, type_k, type_v);
+    let max_tokens_by_mem = if bytes_per_token > 0 && budget_bytes > 0 {
+        (budget_bytes as u64 / bytes_per_token).min(u32::MAX as u64) as u32
+    } else {
+        requested_ctx.saturating_mul(n_seq)
+    };
+    let max_ctx_per_seq = max_tokens_by_mem / n_seq;
+
+    if max_ctx_per_seq == 0 {
+        anyhow::bail!(
+            "not enough memory to allocate KV cache for even 1 token per sequence\n\
+             Requested: {requested_ctx} tokens/sequence × {n_seq} sequence(s)\n\
+             KV budget: {:.2} GiB, KV/token: {:.2} MiB (K={}, V={})\n\
+             Try: --max-batch-size 1, a smaller model quantization, or --type-kv q4_0",
+            budget_bytes as f64 / 1_073_741_824.0,
+            bytes_per_token as f64 / 1_048_576.0,
+            kv_type_name(type_k),
+            kv_type_name(type_v),
+        );
+    }
+
+    let effective_ctx = requested_ctx.min(max_ctx_per_seq);
+    let n_ctx = effective_ctx.checked_mul(n_seq).ok_or_else(|| {
+        anyhow!("context allocation overflow: {effective_ctx} tokens × {n_seq} sequence(s)")
+    })?;
+
+    Ok(ContextSizing {
+        requested_ctx,
+        effective_ctx,
+        n_ctx,
+        n_seq,
+        max_tokens_by_mem,
+        budget_bytes,
+        bytes_per_token,
+    })
+}
+
+#[cfg(test)]
+mod context_sizing_tests {
+    use super::*;
+    use crate::model_registry::kv_type;
+
+    fn test_config() -> ModelConfig {
+        ModelConfig {
+            num_layers: 2,
+            num_heads: 4,
+            num_heads_kv: 4,
+            head_dim: 8,
+            vocab_size: 128,
+        }
+    }
+
+    #[test]
+    fn uses_requested_single_sequence_without_extra_slots() {
+        let config = test_config();
+        let bytes_per_token = kv_bytes_per_token(&config, kv_type::F16, kv_type::F16);
+        let sizing = compute_context_sizing(
+            1,
+            Some(4096),
+            262_144,
+            (bytes_per_token * 4096) as usize,
+            &config,
+            kv_type::F16,
+            kv_type::F16,
+        )
+        .unwrap();
+
+        assert_eq!(sizing.n_seq, 1);
+        assert_eq!(sizing.requested_ctx, 4096);
+        assert_eq!(sizing.effective_ctx, 4096);
+        assert_eq!(sizing.n_ctx, 4096);
+        assert_eq!(sizing.bytes_per_token, bytes_per_token);
+    }
+
+    #[test]
+    fn caps_context_per_sequence_to_memory_budget() {
+        let config = test_config();
+        let bytes_per_token = kv_bytes_per_token(&config, kv_type::F16, kv_type::F16);
+        let sizing = compute_context_sizing(
+            4,
+            Some(4096),
+            262_144,
+            (bytes_per_token * 8192) as usize,
+            &config,
+            kv_type::F16,
+            kv_type::F16,
+        )
+        .unwrap();
+
+        assert_eq!(sizing.n_seq, 4);
+        assert_eq!(sizing.effective_ctx, 2048);
+        assert_eq!(sizing.n_ctx, 8192);
+        assert_eq!(sizing.max_tokens_by_mem, 8192);
+        assert_eq!(sizing.budget_bytes, (bytes_per_token * 8192) as usize);
+    }
+
+    #[test]
+    fn kv_quantization_changes_context_budget() {
+        let config = test_config();
+        let q4_bytes_per_token = kv_bytes_per_token(&config, kv_type::Q4_0, kv_type::Q4_0);
+        let budget = (q4_bytes_per_token * 4096) as usize;
+
+        let q4 = compute_context_sizing(
+            1,
+            Some(4096),
+            262_144,
+            budget,
+            &config,
+            kv_type::Q4_0,
+            kv_type::Q4_0,
+        )
+        .unwrap();
+        let f16 = compute_context_sizing(
+            1,
+            Some(4096),
+            262_144,
+            budget,
+            &config,
+            kv_type::F16,
+            kv_type::F16,
+        )
+        .unwrap();
+
+        assert_eq!(q4.effective_ctx, 4096);
+        assert!(f16.effective_ctx < q4.effective_ctx);
+    }
 }
 
 /// Llama.cpp model via FFI.
@@ -313,42 +489,52 @@ impl LlamaCppModel {
         };
 
         let mut ctx_params = unsafe { ffi::llama_context_default_params() };
-        // n_seq_max controls how many concurrent sequences the KV cache tracks.
-        let n_seq = (max_batch_size as u32).max(4);
-
         // Resolve effective per-sequence context: use the user's explicit limit, or
         // auto-detect from the model's trained context length (llama_model_n_ctx_train).
         let model_train_ctx = unsafe { ffi::llama_model_n_ctx_train(model.as_ptr()) } as u32;
-        let effective_max_ctx = resolve_context_len(max_context_len, model_train_ctx);
-        if max_context_len.is_none() {
-            tracing::info!(
-                model_train_ctx,
-                effective_ctx = effective_max_ctx,
-                "auto context: using model's trained context length"
-            );
-        }
-
-        // Cap total KV context to fit in available GPU (or RAM) memory.
         // Query FREE memory now (after model weights are loaded) so we don't OOM.
         // Falls back to gpu_memory_bytes * fraction if nvidia-smi is unavailable.
         let free_bytes = query_gpu_free_bytes()
             .unwrap_or((gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize);
         let budget_bytes = (free_bytes as f64 * gpu_memory_fraction as f64) as usize;
-        // bytes_per_token = 2 (K+V) * n_head_kv * head_dim * 2 (fp16) * n_layer
-        let bytes_per_token = 2 * n_head_kv * head_dim * 2 * n_layer;
-        let max_tokens_by_mem = if bytes_per_token > 0 && budget_bytes > 0 {
-            (budget_bytes / bytes_per_token) as u32
-        } else {
-            effective_max_ctx * n_seq
-        };
-        // Honour the effective_max_ctx per sequence, but don't exceed memory budget.
-        let n_ctx = (effective_max_ctx * n_seq)
-            .min(max_tokens_by_mem)
-            .max(effective_max_ctx);
-        ctx_params.n_ctx = n_ctx;
-        // n_batch must be at least as large as n_ctx to handle full prompts in one pass
-        ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
-        ctx_params.n_seq_max = n_seq;
+
+        let context = compute_context_sizing(
+            max_batch_size,
+            max_context_len,
+            model_train_ctx,
+            budget_bytes,
+            &config,
+            type_k,
+            type_v,
+        )?;
+
+        if max_context_len.is_none() {
+            tracing::info!(
+                model_train_ctx,
+                requested_ctx = context.requested_ctx,
+                effective_ctx = context.effective_ctx,
+                n_seq = context.n_seq,
+                "auto context: using model context capped by available KV memory"
+            );
+        }
+        if context.effective_ctx < context.requested_ctx {
+            tracing::warn!(
+                requested_ctx = context.requested_ctx,
+                effective_ctx = context.effective_ctx,
+                n_seq = context.n_seq,
+                max_tokens_by_mem = context.max_tokens_by_mem,
+                kv_budget_gib = format!("{:.2}", context.budget_bytes as f64 / 1_073_741_824.0),
+                kv_mib_per_token = format!("{:.2}", context.bytes_per_token as f64 / 1_048_576.0),
+                type_k = kv_type_name(type_k),
+                type_v = kv_type_name(type_v),
+                "context reduced to fit available KV memory; lower --max-batch-size or --max-context-len for tighter control"
+            );
+        }
+
+        ctx_params.n_ctx = context.n_ctx;
+        // n_batch should cover one full prompt for a single sequence.
+        ctx_params.n_batch = context.effective_ctx.max(max_batch_size as u32);
+        ctx_params.n_seq_max = context.n_seq;
         ctx_params.flash_attn_type = 1; // LLAMA_FLASH_ATTN_TYPE_ENABLED
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;
@@ -357,7 +543,22 @@ impl LlamaCppModel {
         let ctx = unsafe { ffi::llama_init_from_model(model.as_ptr(), ctx_params) };
         let ctx = NonNull::new(ctx).ok_or_else(|| {
             unsafe { ffi::llama_model_free(model.as_ptr()) };
-            anyhow!("llama_init_from_model failed")
+            anyhow!(
+                "llama_init_from_model failed while allocating KV cache\n\
+                 Requested: {} tokens/sequence × {} sequence(s)\n\
+                 Effective: {} tokens/sequence (n_ctx={})\n\
+                 KV budget: {:.2} GiB, KV/token: {:.2} MiB (K={}, V={})\n\
+                 Try: --max-context-len 2048 --max-batch-size 1 --type-kv q8_0, \
+                 or use a smaller GGUF quantization.",
+                context.requested_ctx,
+                context.n_seq,
+                context.effective_ctx,
+                context.n_ctx,
+                context.budget_bytes as f64 / 1_073_741_824.0,
+                context.bytes_per_token as f64 / 1_048_576.0,
+                kv_type_name(type_k),
+                kv_type_name(type_v),
+            )
         })?;
 
         // SAFETY: We manually implement Send + Sync for LlamaCppModel below.
@@ -371,7 +572,7 @@ impl LlamaCppModel {
             vocab,
             config,
             eos_token,
-            effective_ctx: effective_max_ctx,
+            effective_ctx: context.effective_ctx,
             owns_model: true,
         })
     }
@@ -394,44 +595,61 @@ impl LlamaCppModel {
     ) -> Result<Self> {
         let model = self._model;
 
-        let mut ctx_params = unsafe { ffi::llama_context_default_params() };
-        let n_seq = (max_batch_size as u32).max(4);
-
         let model_train_ctx = unsafe { ffi::llama_model_n_ctx_train(model.as_ptr()) } as u32;
-        let effective_max_ctx = resolve_context_len(max_context_len, model_train_ctx);
-
         let free_bytes = query_gpu_free_bytes()
             .unwrap_or((gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize);
         let budget_bytes = (free_bytes as f64 * gpu_memory_fraction as f64) as usize;
-        let n_head_kv = self.config.num_heads_kv;
-        let head_dim = self.config.head_dim;
-        let n_layer = self.config.num_layers;
-        // Use the actual KV type byte ratios rather than assuming F16.
-        let (k_num, k_den) = crate::kv_cache::kv_type_bytes(type_k);
-        let (v_num, v_den) = crate::kv_cache::kv_type_bytes(type_v);
-        let elems_per_token = (n_head_kv * head_dim * n_layer) as u64;
-        let bytes_per_token_u64 =
-            (elems_per_token * k_num).div_ceil(k_den) + (elems_per_token * v_num).div_ceil(v_den);
-        let max_tokens_by_mem = if bytes_per_token_u64 > 0 && budget_bytes > 0 {
-            (budget_bytes as u64 / bytes_per_token_u64) as u32
-        } else {
-            effective_max_ctx * n_seq
-        };
-        let n_ctx = (effective_max_ctx * n_seq)
-            .min(max_tokens_by_mem)
-            .max(effective_max_ctx);
 
-        ctx_params.n_ctx = n_ctx;
-        ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
-        ctx_params.n_seq_max = n_seq;
+        let context = compute_context_sizing(
+            max_batch_size,
+            max_context_len,
+            model_train_ctx,
+            budget_bytes,
+            &self.config,
+            type_k,
+            type_v,
+        )?;
+
+        if context.effective_ctx < context.requested_ctx {
+            tracing::warn!(
+                requested_ctx = context.requested_ctx,
+                effective_ctx = context.effective_ctx,
+                n_seq = context.n_seq,
+                max_tokens_by_mem = context.max_tokens_by_mem,
+                kv_budget_gib = format!("{:.2}", context.budget_bytes as f64 / 1_073_741_824.0),
+                kv_mib_per_token = format!("{:.2}", context.bytes_per_token as f64 / 1_048_576.0),
+                type_k = kv_type_name(type_k),
+                type_v = kv_type_name(type_v),
+                "context reduced to fit available KV memory"
+            );
+        }
+
+        let mut ctx_params = unsafe { ffi::llama_context_default_params() };
+        ctx_params.n_ctx = context.n_ctx;
+        ctx_params.n_batch = context.effective_ctx.max(max_batch_size as u32);
+        ctx_params.n_seq_max = context.n_seq;
         ctx_params.flash_attn_type = 1;
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;
         ctx_params.type_v = type_v as _;
 
         let ctx = unsafe { ffi::llama_init_from_model(model.as_ptr(), ctx_params) };
-        let ctx = NonNull::new(ctx)
-            .ok_or_else(|| anyhow!("llama_init_from_model failed for new_context"))?;
+        let ctx = NonNull::new(ctx).ok_or_else(|| {
+            anyhow!(
+                "llama_init_from_model failed for new_context\n\
+                 Requested: {} tokens/sequence × {} sequence(s)\n\
+                 Effective: {} tokens/sequence (n_ctx={})\n\
+                 KV budget: {:.2} GiB, KV/token: {:.2} MiB (K={}, V={})",
+                context.requested_ctx,
+                context.n_seq,
+                context.effective_ctx,
+                context.n_ctx,
+                context.budget_bytes as f64 / 1_073_741_824.0,
+                context.bytes_per_token as f64 / 1_048_576.0,
+                kv_type_name(type_k),
+                kv_type_name(type_v),
+            )
+        })?;
 
         #[allow(clippy::arc_with_non_send_sync)]
         let ctx_arc = Arc::new(std::sync::Mutex::new(ctx));
@@ -441,7 +659,7 @@ impl LlamaCppModel {
             vocab: self.vocab,
             config: self.config.clone(),
             eos_token: self.eos_token,
-            effective_ctx: effective_max_ctx,
+            effective_ctx: context.effective_ctx,
             owns_model: false, // weights are owned by the original LlamaCppModel
         })
     }
@@ -503,12 +721,19 @@ impl Model for LlamaCppModel {
     }
 
     fn supports_thinking(&self) -> bool {
-        // Reasoning models (Qwen3, DeepSeek-R1, …) have `<think>` as a single
-        // special token.  Tokenising it with add_special=true produces at most
-        // [BOS, <think>] (2 tokens).  Non-reasoning models split it into many
-        // character/subword pieces, so the count will be higher.
-        self.tokenize_impl("<think>")
-            .map(|t| t.len() <= 2)
+        // <think>-prefix style (Qwen3, DeepSeek-R1): single special token, at most [BOS, <think>].
+        if self.tokenize_impl("<think>").map(|t| t.len() <= 2).unwrap_or(false) {
+            return true;
+        }
+        self.uses_channel_thinking()
+    }
+
+    fn uses_channel_thinking(&self) -> bool {
+        // Detect via GGUF architecture metadata. Tokenization is not reliable here because
+        // <|channel> requires parse_special=true to appear as a single token, but
+        // tokenize_impl uses parse_special=false to avoid injecting specials in user text.
+        self.read_meta_str("general.architecture")
+            .map(|arch| arch.starts_with("gemma4"))
             .unwrap_or(false)
     }
 
@@ -578,12 +803,11 @@ impl Model for LlamaCppModel {
 
     fn stop_tokens(&self) -> Vec<String> {
         let mut result: Vec<String> = Vec::new();
-        // Collect the text form of every control OR EOG token in the vocabulary.
+        // Collect the text form of every EOG token in the vocabulary.
         //
-        // This covers:
-        //   - Control tokens: role separators (`<|user|>`, `<|system|>`, …)
-        //   - EOG tokens: EOS/EOT variants (`<|endoftext|>`, `<|im_end|>`, model-specific
-        //     stop markers like `,<!__EOF teleport>`, etc.)
+        // Do not include every control token here: Gemma 4 uses ordinary control
+        // markers such as `<|channel>` while generating. Treating those as stop
+        // tokens ends generation immediately with an empty response.
         //
         // `is_eog_token()` suppresses these by token ID when llama.cpp recognises them
         // correctly.  Adding their text forms here ensures the text-based filter also
@@ -591,9 +815,8 @@ impl Model for LlamaCppModel {
         // (which happens on some quants where the EOG flag is missing from metadata).
         let n_tokens = unsafe { ffi::llama_vocab_n_tokens(self.vocab) };
         for token_id in 0..n_tokens {
-            let is_control = unsafe { ffi::llama_vocab_is_control(self.vocab, token_id) };
             let is_eog = unsafe { ffi::llama_vocab_is_eog(self.vocab, token_id) };
-            if !is_control && !is_eog {
+            if !is_eog {
                 continue;
             }
             if let Ok(s) = self.token_to_piece_impl(token_id) {

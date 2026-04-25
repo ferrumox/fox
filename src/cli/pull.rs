@@ -15,6 +15,8 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 
+use crate::registry::Registry;
+
 use super::theme;
 
 const HF_API_BASE: &str = "https://huggingface.co/api/models";
@@ -165,10 +167,23 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
 
     let client = build_client(args.hf_token.as_deref())?;
     let spec = parse_model_spec(&args.model_id);
+    let registry_match = spec
+        .raw_repo
+        .is_none()
+        .then(|| Registry::load().resolve_input(&args.model_id))
+        .flatten();
+    let registry_recommended = registry_match
+        .as_ref()
+        .map(|(_, model)| model.recommended.clone());
 
     // Resolve HF repo: raw input or search.
     let hf_repo = match spec.raw_repo {
         Some(repo) => repo,
+        None if registry_match.is_some() => {
+            let (name, model) = registry_match.expect("checked is_some");
+            eprintln!("Using curated registry entry: {}", name);
+            model.repo
+        }
         None => {
             eprintln!("Searching HuggingFace for \"{}\"…", spec.search_query);
             let repo = search_top_repo(&spec.search_query, &client).await?;
@@ -247,6 +262,21 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
             );
         }
         pick_balanced(&matches).to_string()
+    } else if let Some(recommended) = registry_recommended {
+        if gguf_files.contains(&recommended) {
+            recommended
+        } else {
+            anyhow::bail!(
+                "Registry recommended `{}` but it was not found in `{}`.\nAvailable files:\n{}",
+                recommended,
+                hf_repo,
+                gguf_files
+                    .iter()
+                    .map(|s| format!("  - {}", s))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
     } else {
         let all: Vec<&String> = gguf_files.iter().collect();
         pick_balanced(&all).to_string()
@@ -364,4 +394,19 @@ fn pick_balanced<'a>(files: &[&'a String]) -> &'a String {
         }
     }
     files[0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_raw_hf_repo_keeps_quant_suffix_out_of_registry() {
+        let spec = parse_model_spec("bartowski/google_gemma-4-26B-A4B-it-GGUF:q4");
+        assert_eq!(
+            spec.raw_repo.as_deref(),
+            Some("bartowski/google_gemma-4-26B-A4B-it-GGUF")
+        );
+        assert_eq!(spec.quant.as_deref(), Some("Q4"));
+    }
 }

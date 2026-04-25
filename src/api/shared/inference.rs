@@ -139,6 +139,7 @@ pub fn resolve_tool_choice(
 pub fn sampling_from_ollama(
     opts: Option<&OllamaOptions>,
     show_thinking: bool,
+    uses_channel: bool,
 ) -> (SamplingParams, usize) {
     let (temp, top_p, top_k, rep, seed, max_tokens, stop) = match opts {
         Some(o) => (
@@ -170,7 +171,7 @@ pub fn sampling_from_ollama(
             seed,
             stop,
             show_thinking,
-            initial_in_thinking: show_thinking,
+            initial_in_thinking: show_thinking && !uses_channel,
             max_thinking_chars: 8192,
         },
         max_tokens,
@@ -434,7 +435,7 @@ mod tests {
 
     #[test]
     fn test_sampling_from_ollama_defaults() {
-        let (params, max_tokens) = sampling_from_ollama(None, false);
+        let (params, max_tokens) = sampling_from_ollama(None, false, false);
         assert_eq!(max_tokens, 512);
         assert!((params.temperature - 0.8).abs() < f32::EPSILON);
         assert!((params.top_p - 0.9).abs() < f32::EPSILON);
@@ -453,7 +454,7 @@ mod tests {
             num_predict: Some(64),
             stop: None,
         };
-        let (params, max_tokens) = sampling_from_ollama(Some(&opts), false);
+        let (params, max_tokens) = sampling_from_ollama(Some(&opts), false, false);
         assert_eq!(max_tokens, 64);
         assert!((params.temperature - 0.3).abs() < f32::EPSILON);
         assert_eq!(params.seed, Some(42));

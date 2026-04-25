@@ -87,7 +87,7 @@ pub async fn chat_completions(
         seed: req.seed,
         stop: req.stop.clone(),
         show_thinking: false,
-        initial_in_thinking: supports_thinking,
+        initial_in_thinking: supports_thinking && !entry.engine.uses_channel_thinking(),
         max_thinking_chars: 8192,
     };
 
