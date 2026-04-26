@@ -176,6 +176,8 @@ pub fn sampling_from_ollama(
             show_thinking,
             initial_in_thinking: show_thinking && !uses_channel,
             max_thinking_chars: 8192,
+            mirostat_tau: 0.0,
+            mirostat_eta: 0.1,
         },
         max_tokens,
     )

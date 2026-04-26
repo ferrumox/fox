@@ -11,6 +11,8 @@ use anyhow::Result;
 pub(crate) mod candle;
 pub(crate) mod llama_cpp;
 #[cfg(not(fox_stub))]
+pub(crate) mod mirostat;
+#[cfg(not(fox_stub))]
 pub(crate) mod sampling;
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod stub;
@@ -90,6 +92,12 @@ pub struct InferenceRequestForModel {
     pub generated_token_ids: Vec<i32>,
     /// Per-token occurrence counts for presence/frequency penalty.
     pub token_counts: std::collections::HashMap<i32, usize>,
+    /// Mirostat v2 target surprise (τ). 0 = mirostat disabled (default
+    /// stochastic sampler is used). Typical value ≈ 5.0 for chat.
+    pub mirostat_tau: f32,
+    /// Mirostat v2 learning rate (η). Ignored when `mirostat_tau == 0`.
+    /// Typical value ≈ 0.1.
+    pub mirostat_eta: f32,
     /// Number of prompt tokens already in the KV cache from a prefix hit.
     /// `do_prefill` submits only `prompt_tokens[skip_prefix_tokens..]` starting at
     /// position `skip_prefix_tokens`.

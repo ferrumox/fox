@@ -14,11 +14,13 @@ use std::sync::Mutex;
 
 use anyhow::{anyhow, Result};
 use candle_core::Device;
+use dashmap::DashMap;
 
 use super::chat_template::apply_chat_template;
 use super::gguf_metadata::{self, GgufMetadata};
 use super::llama_arch::LlamaArch;
 use super::tokenizer::{vocab_from_metadata, ByteBpeTokenizer, Vocab};
+use crate::engine::model::mirostat::{self, MirostatV2};
 use crate::engine::model::sampling::{sample_token, SamplerParams};
 use crate::engine::model::{
     InferenceRequestForModel, Logits, Model, ModelConfig, RecommendedSampling,
@@ -34,6 +36,9 @@ pub struct CandleLlamaModel {
     /// Absolute position of the next token to write into the KV cache.
     /// Bumped by `prefill_sync` (by prompt length) and `decode_sync` (by 1).
     cursor: Mutex<usize>,
+    /// Mirostat v2 state per request id. Populated lazily on the first
+    /// sample for a given request and dropped on `clear_sequence`.
+    mirostat_states: DashMap<u64, MirostatV2>,
 }
 
 impl CandleLlamaModel {
@@ -60,6 +65,7 @@ impl CandleLlamaModel {
             context_len,
             eos_token_id: eos,
             cursor: Mutex::new(0),
+            mirostat_states: DashMap::new(),
         })
     }
 
@@ -84,12 +90,26 @@ impl CandleLlamaModel {
 
 /// Apply the shared sampling pipeline (the same one llama.cpp goes through)
 /// to the raw logits, using the per-request parameters carried in
-/// `InferenceRequestForModel`. When `temperature <= 0` the sampler short-
+/// `InferenceRequestForModel`. Dispatches to Mirostat v2 when
+/// `mirostat_tau > 0` and falls back to the regular stochastic / greedy
+/// pipeline otherwise. When `temperature <= 0` the regular path short-
 /// circuits to greedy regardless of the other knobs, so the candle backend
 /// still produces deterministic output for the default zero-temperature
 /// requests our parity tests use.
-fn sample_with_request(logits: &[f32], req: &InferenceRequestForModel) -> i32 {
+fn sample_with_request(
+    logits: &[f32],
+    req: &InferenceRequestForModel,
+    mirostat_states: &DashMap<u64, MirostatV2>,
+) -> i32 {
     let token_count = req.generated_tokens + req.prompt_tokens.len();
+
+    if req.mirostat_tau > 0.0 {
+        let mut state = mirostat_states
+            .entry(req.id)
+            .or_insert_with(|| MirostatV2::new(req.mirostat_tau, req.mirostat_eta));
+        return mirostat::sample(logits, state.value_mut(), req.seed, token_count);
+    }
+
     let counts: Option<&_> = if req.token_counts.is_empty() {
         None
     } else {
@@ -171,7 +191,7 @@ impl Model for CandleLlamaModel {
         let position = *cursor;
         let tokens: Vec<i32> = req.prompt_tokens.clone();
         let logits = self.forward_logits(&tokens, position)?;
-        let sampled = sample_with_request(&logits, req);
+        let sampled = sample_with_request(&logits, req, &self.mirostat_states);
         *cursor = position + tokens.len();
         Ok(vec![(id, Logits::new(Vec::new(), sampled), tokens.len())])
     }
@@ -194,7 +214,7 @@ impl Model for CandleLlamaModel {
             .map_err(|e| anyhow!("candle cursor mutex poisoned: {e}"))?;
         let position = *cursor;
         let logits = self.forward_logits(&[last], position)?;
-        let sampled = sample_with_request(&logits, req);
+        let sampled = sample_with_request(&logits, req, &self.mirostat_states);
         *cursor = position + 1;
         Ok(vec![(id, Logits::new(Vec::new(), sampled))])
     }
@@ -283,6 +303,9 @@ impl Model for CandleLlamaModel {
         if let Ok(mut c) = self.cursor.lock() {
             *c = 0;
         }
+        // Drop any per-request Mirostat state — reuse of the same model
+        // instance for a new conversation should start from μ = 2τ again.
+        self.mirostat_states.clear();
     }
 
     fn copy_sequence_range(&self, _src_seq_id: i32, _dst_seq_id: i32, _token_count: i32) {
@@ -342,6 +365,8 @@ mod tests {
             seed,
             generated_token_ids: Vec::new(),
             token_counts: std::collections::HashMap::new(),
+            mirostat_tau: 0.0,
+            mirostat_eta: 0.1,
             skip_prefix_tokens: 0,
             prefix_seq_id: None,
         }
@@ -351,16 +376,36 @@ mod tests {
     fn sample_with_request_is_greedy_at_zero_temperature() {
         let logits = [0.1, 0.5, -0.2, 0.7, 0.3];
         let req = fake_request(0.0, None);
-        assert_eq!(sample_with_request(&logits, &req), 3);
+        let states = DashMap::new();
+        assert_eq!(sample_with_request(&logits, &req, &states), 3);
     }
 
     #[test]
     fn sample_with_request_is_reproducible_with_a_seed() {
         let logits = [0.1, 0.4, 0.3, 0.2];
         let req = fake_request(1.0, Some(42));
-        let a = sample_with_request(&logits, &req);
-        let b = sample_with_request(&logits, &req);
+        let states = DashMap::new();
+        let a = sample_with_request(&logits, &req, &states);
+        let b = sample_with_request(&logits, &req, &states);
         assert_eq!(a, b, "same seed must produce the same draw");
+    }
+
+    #[test]
+    fn mirostat_path_takes_over_when_tau_is_set() {
+        let logits = [0.5, 0.4, 0.3, 0.2, 0.1];
+        let mut req = fake_request(1.0, Some(7));
+        req.id = 99;
+        req.mirostat_tau = 5.0;
+        req.mirostat_eta = 0.1;
+        let states: DashMap<u64, MirostatV2> = DashMap::new();
+        let token = sample_with_request(&logits, &req, &states);
+        assert!(token >= 0 && (token as usize) < logits.len());
+        assert!(
+            states.contains_key(&99),
+            "mirostat state should be created on first sample"
+        );
+        let after = states.get(&99).unwrap().mu;
+        assert!(after.is_finite());
     }
 
     #[test]
@@ -468,5 +513,30 @@ mod tests {
         }
 
         eprintln!("greedy={greedy_a}, seeded(1.5,42)={seeded_a}");
+
+        // Mirostat path: distinct from greedy, deterministic with same seed.
+        let mut req_mirostat = fake_request(1.0, Some(99));
+        req_mirostat.id = 100;
+        req_mirostat.prompt_tokens = prompt.clone();
+        req_mirostat.mirostat_tau = 5.0;
+        req_mirostat.mirostat_eta = 0.1;
+
+        model.clear_sequence(0);
+        let r5 = model
+            .prefill_sync(&[100], std::slice::from_ref(&req_mirostat))
+            .expect("mirostat prefill");
+        let mirostat_a = r5[0].1.sampled_token;
+
+        model.clear_sequence(0); // also drops the mirostat state
+        let r6 = model
+            .prefill_sync(&[100], std::slice::from_ref(&req_mirostat))
+            .expect("mirostat prefill again");
+        let mirostat_b = r6[0].1.sampled_token;
+        assert_eq!(
+            mirostat_a, mirostat_b,
+            "mirostat with the same seed must reproduce"
+        );
+        assert!(mirostat_a >= 0 && (mirostat_a as usize) < model.config.vocab_size);
+        eprintln!("mirostat(τ=5,η=0.1,seed=99)={mirostat_a}");
     }
 }

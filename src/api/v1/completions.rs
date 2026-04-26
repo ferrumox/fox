@@ -37,6 +37,8 @@ pub async fn completions(
         min_p: None,
         frequency_penalty: None,
         presence_penalty: None,
+        mirostat_tau: None,
+        mirostat_eta: None,
         user: None,
     };
     chat_completions(State(state), Json(chat_req)).await

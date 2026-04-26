@@ -92,6 +92,8 @@ pub async fn chat_completions(
         show_thinking: false,
         initial_in_thinking: supports_thinking && !entry.engine.uses_channel_thinking(),
         max_thinking_chars: 8192,
+        mirostat_tau: req.mirostat_tau.unwrap_or(0.0),
+        mirostat_eta: req.mirostat_eta.unwrap_or(0.1),
     };
 
     let req_id = entry.engine.next_request_id();

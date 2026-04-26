@@ -125,6 +125,15 @@ pub struct ChatCompletionRequest {
     /// Presence penalty: subtract from logit for tokens seen at least once (0.0 = disabled).
     #[serde(default)]
     pub presence_penalty: Option<f32>,
+    /// Mirostat v2 target surprise τ. When > 0 the backend uses Mirostat v2
+    /// instead of the regular top-p / top-k pipeline. Ollama-compatible knob;
+    /// typical chat values: 5.0. 0.0 = disabled.
+    #[serde(default)]
+    pub mirostat_tau: Option<f32>,
+    /// Mirostat v2 learning rate η. Used only when `mirostat_tau > 0`.
+    /// Typical value: 0.1.
+    #[serde(default)]
+    pub mirostat_eta: Option<f32>,
     /// Caller identifier — accepted for API compatibility, not used.
     #[serde(default)]
     pub user: Option<String>,

@@ -39,6 +39,12 @@ pub struct SamplingParams {
     /// loops where the model never generates `</think>`.
     /// 0 = no limit.  Default: 8192 (roughly 2 000–3 000 tokens).
     pub max_thinking_chars: usize,
+    /// Mirostat v2 target surprise (τ). 0 = disabled (regular sampler used).
+    /// When > 0 the backend ignores top-p / top-k / temperature and uses
+    /// Mirostat v2 with the supplied target. Ollama-compatible knob.
+    pub mirostat_tau: f32,
+    /// Mirostat v2 learning rate (η). Used only when `mirostat_tau > 0`.
+    pub mirostat_eta: f32,
 }
 
 impl Default for SamplingParams {
@@ -56,6 +62,8 @@ impl Default for SamplingParams {
             show_thinking: false,
             initial_in_thinking: false,
             max_thinking_chars: 8192,
+            mirostat_tau: 0.0,
+            mirostat_eta: 0.1,
         }
     }
 }

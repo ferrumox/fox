@@ -116,6 +116,8 @@ impl InferenceEngine {
                 seed: r.sampling.seed,
                 generated_token_ids: r.generated_token_ids.clone(),
                 token_counts: r.token_counts.clone(),
+                mirostat_tau: r.sampling.mirostat_tau,
+                mirostat_eta: r.sampling.mirostat_eta,
                 skip_prefix_tokens: r.skip_prefix_tokens,
                 prefix_seq_id: r.prefix_seq_id,
             })
@@ -204,6 +206,8 @@ impl InferenceEngine {
                 seed: r.sampling.seed,
                 generated_token_ids: r.generated_token_ids.clone(),
                 token_counts: r.token_counts.clone(),
+                mirostat_tau: r.sampling.mirostat_tau,
+                mirostat_eta: r.sampling.mirostat_eta,
                 skip_prefix_tokens: 0,
                 prefix_seq_id: None,
             })
