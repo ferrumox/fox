@@ -4,7 +4,7 @@ mod config;
 mod entry;
 mod loader;
 
-pub use config::{kv_type, RegistryConfig};
+pub use config::{kv_type, FlashAttnMode, RegistryConfig};
 pub use entry::EngineEntry;
 
 use dashmap::DashMap;
@@ -261,6 +261,7 @@ mod tests {
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
+            flash_attn: FlashAttnMode::Auto,
         }
     }
 

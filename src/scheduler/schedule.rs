@@ -269,6 +269,7 @@ impl Scheduler {
                 req.last_token = Some(token_id);
                 req.generated_tokens += 1;
                 req.generated_token_ids.push(token_id);
+                *req.token_counts.entry(token_id).or_insert(0) += 1;
                 if from_prefill && req.state == batch::RequestState::Prefilling {
                     req.state = batch::RequestState::Decoding;
                 }

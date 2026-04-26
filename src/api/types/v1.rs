@@ -116,10 +116,13 @@ pub struct ChatCompletionRequest {
     /// Options for the streaming response (include_usage etc.).
     #[serde(default)]
     pub stream_options: Option<StreamOptions>,
-    /// Frequency penalty — accepted, not applied (no llama.cpp equivalent).
+    /// Min-p filter: remove tokens with prob < min_p × max_prob (0.0 = disabled).
+    #[serde(default)]
+    pub min_p: Option<f32>,
+    /// Frequency penalty: subtract penalty × count from logit per token (0.0 = disabled).
     #[serde(default)]
     pub frequency_penalty: Option<f32>,
-    /// Presence penalty — accepted, not applied.
+    /// Presence penalty: subtract from logit for tokens seen at least once (0.0 = disabled).
     #[serde(default)]
     pub presence_penalty: Option<f32>,
     /// Caller identifier — accepted for API compatibility, not used.

@@ -387,6 +387,7 @@ mod tests {
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
+            flash_attn: crate::model_registry::FlashAttnMode::Auto,
         };
         Arc::new(ModelRegistry::new(cfg, HashMap::new()))
     }

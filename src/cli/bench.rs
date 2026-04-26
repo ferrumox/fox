@@ -119,6 +119,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         split_mode,
         &tensor_split_parsed,
         args.moe_cpu,
+        crate::model_registry::FlashAttnMode::Auto,
     )?;
     let model_config = model.model_config();
     let load_elapsed = load_start.elapsed();
@@ -185,7 +186,10 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
             temperature: 1.0,
             top_p: 1.0,
             top_k: 0,
+            min_p: 0.0,
             repetition_penalty: 1.0,
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
             seed: Some(42),
             stop: None,
             show_thinking: false,

@@ -3,6 +3,29 @@ use std::sync::Arc;
 
 use crate::metrics::Metrics;
 
+/// Controls when Flash Attention is enabled for context creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FlashAttnMode {
+    /// Let llama.cpp decide based on model architecture (head_dim % 128 == 0).
+    #[default]
+    Auto,
+    /// Always enable Flash Attention.
+    On,
+    /// Always disable Flash Attention.
+    Off,
+}
+
+impl FlashAttnMode {
+    /// Maps to llama.cpp's `llama_flash_attn_type` enum values.
+    pub fn to_llama_type(self) -> i32 {
+        match self {
+            FlashAttnMode::Auto => -1, // LLAMA_FLASH_ATTN_TYPE_AUTO
+            FlashAttnMode::On => 1,   // LLAMA_FLASH_ATTN_TYPE_ENABLED
+            FlashAttnMode::Off => 0,  // LLAMA_FLASH_ATTN_TYPE_DISABLED
+        }
+    }
+}
+
 /// GGML type IDs for KV cache element types.
 pub mod kv_type {
     pub const F16: u32 = 1;
@@ -43,4 +66,6 @@ pub struct RegistryConfig {
     /// When true, MoE expert tensors are pinned to CPU RAM (via `tensor_buft_overrides`).
     /// Useful for MoE models (e.g. DeepSeek, Mixtral) where expert weights don't fit in VRAM.
     pub moe_offload_cpu: bool,
+    /// Flash Attention mode. Default: Auto (llama.cpp decides based on model architecture).
+    pub flash_attn: FlashAttnMode,
 }

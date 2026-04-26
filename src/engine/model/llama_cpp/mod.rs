@@ -36,6 +36,8 @@ use crate::engine::ffi;
 use crate::engine::model::ModelConfig;
 #[cfg(not(fox_stub))]
 use crate::engine::model::{InferenceRequestForModel, Logits, Model};
+#[cfg(not(fox_stub))]
+use crate::model_registry::FlashAttnMode;
 
 /// SentencePiece uses U+2581 (▁) for word boundaries.
 #[cfg(not(fox_stub))]
@@ -377,6 +379,7 @@ impl LlamaCppModel {
         split_mode: u32,
         tensor_split: &[f32],
         moe_offload_cpu: bool,
+        flash_attn: FlashAttnMode,
     ) -> Result<Self> {
         // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
         // Fox shows its own clean progress spinner instead.
@@ -535,7 +538,7 @@ impl LlamaCppModel {
         // n_batch should cover one full prompt for a single sequence.
         ctx_params.n_batch = context.effective_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = context.n_seq;
-        ctx_params.flash_attn_type = 1; // LLAMA_FLASH_ATTN_TYPE_ENABLED
+        ctx_params.flash_attn_type = flash_attn.to_llama_type() as _;
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;
         ctx_params.type_v = type_v as _;
@@ -628,7 +631,7 @@ impl LlamaCppModel {
         ctx_params.n_ctx = context.n_ctx;
         ctx_params.n_batch = context.effective_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = context.n_seq;
-        ctx_params.flash_attn_type = 1;
+        ctx_params.flash_attn_type = FlashAttnMode::Auto.to_llama_type() as _;
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;
         ctx_params.type_v = type_v as _;

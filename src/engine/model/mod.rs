@@ -76,10 +76,18 @@ pub struct InferenceRequestForModel {
     pub top_k: u32,
     /// Repetition penalty (1.0 = disabled).
     pub repetition_penalty: f32,
+    /// Min-p filter: remove tokens with prob < min_p × max_prob (0.0 = disabled).
+    pub min_p: f32,
+    /// Presence penalty: subtract from logit for tokens seen at least once (0.0 = disabled).
+    pub presence_penalty: f32,
+    /// Frequency penalty: subtract penalty × count per token (0.0 = disabled).
+    pub frequency_penalty: f32,
     /// RNG seed for reproducible sampling (None = random).
     pub seed: Option<u64>,
     /// Previously generated token IDs (for repetition penalty).
     pub generated_token_ids: Vec<i32>,
+    /// Per-token occurrence counts for presence/frequency penalty.
+    pub token_counts: std::collections::HashMap<i32, usize>,
     /// Number of prompt tokens already in the KV cache from a prefix hit.
     /// `do_prefill` submits only `prompt_tokens[skip_prefix_tokens..]` starting at
     /// position `skip_prefix_tokens`.

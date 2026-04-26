@@ -138,7 +138,15 @@ impl LlamaCppModel {
                         temperature: r.temperature,
                         top_p: r.top_p,
                         top_k: r.top_k,
+                        min_p: r.min_p,
                         repetition_penalty: r.repetition_penalty,
+                        token_counts: if r.presence_penalty != 0.0 || r.frequency_penalty != 0.0 {
+                            Some(&r.token_counts)
+                        } else {
+                            None
+                        },
+                        presence_penalty: r.presence_penalty,
+                        frequency_penalty: r.frequency_penalty,
                         generated_ids: &r.generated_token_ids,
                         seed: r.seed,
                         token_count: r.generated_tokens,
@@ -219,7 +227,15 @@ impl LlamaCppModel {
                         temperature: r.temperature,
                         top_p: r.top_p,
                         top_k: r.top_k,
+                        min_p: r.min_p,
                         repetition_penalty: r.repetition_penalty,
+                        token_counts: if r.presence_penalty != 0.0 || r.frequency_penalty != 0.0 {
+                            Some(&r.token_counts)
+                        } else {
+                            None
+                        },
+                        presence_penalty: r.presence_penalty,
+                        frequency_penalty: r.frequency_penalty,
                         generated_ids: &r.generated_token_ids,
                         seed: r.seed,
                         token_count: r.generated_tokens,

@@ -4,6 +4,7 @@ models/
 
 # Rust / Cargo
 /target/
+/target-check/
 **/*.rs.bk
 
 # Build artifacts

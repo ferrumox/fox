@@ -195,6 +195,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         split_mode,
         &tensor_split_parsed,
         args.moe_cpu,
+        crate::model_registry::FlashAttnMode::Auto,
     )?;
     let model_config = model.model_config();
 
@@ -603,7 +604,10 @@ fn build_sampling_params(
         temperature,
         top_p,
         top_k,
+        min_p: 0.0,
         repetition_penalty: args.repetition_penalty,
+        presence_penalty: 0.0,
+        frequency_penalty: 0.0,
         seed: args.seed,
         stop: None,
         show_thinking: args.show_thinking,

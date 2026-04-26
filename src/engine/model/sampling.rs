@@ -1,4 +1,4 @@
-// Token sampling: greedy, temperature, top-K, top-P, repetition penalty.
+// Token sampling: greedy, temperature, top-K, top-P, min-p, repetition/presence/frequency penalty.
 // This module is excluded entirely when fox_stub is set (no llama.cpp builds).
 
 use std::cmp::Ordering;
@@ -31,13 +31,21 @@ pub(crate) struct SamplerParams<'a> {
     pub(crate) temperature: f32,
     pub(crate) top_p: f32,
     pub(crate) top_k: u32,
+    /// Min-p filter: remove tokens with prob < min_p × max_prob (0.0 = disabled).
+    pub(crate) min_p: f32,
     pub(crate) repetition_penalty: f32,
+    /// Per-token count map for presence/frequency penalty (None = skip penalty).
+    pub(crate) token_counts: Option<&'a std::collections::HashMap<i32, usize>>,
+    /// Presence penalty: subtract from logit for any token seen at least once (0.0 = disabled).
+    pub(crate) presence_penalty: f32,
+    /// Frequency penalty: subtract penalty × count from logit for each token (0.0 = disabled).
+    pub(crate) frequency_penalty: f32,
     pub(crate) generated_ids: &'a [i32],
     pub(crate) seed: Option<u64>,
     pub(crate) token_count: usize,
 }
 
-/// Full stochastic sampler: repetition penalty → temperature → top-K → top-P → weighted draw.
+/// Full stochastic sampler: repetition/presence/frequency penalty → temperature → top-K → top-P → min-p → weighted draw.
 ///
 /// When `temperature` ≤ 0 the function falls back to greedy regardless of other parameters.
 /// The RNG is seeded per-request for reproducibility when `seed` is provided.
@@ -46,7 +54,11 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         temperature,
         top_p,
         top_k,
+        min_p,
         repetition_penalty,
+        token_counts,
+        presence_penalty,
+        frequency_penalty,
         generated_ids,
         seed,
         token_count,
@@ -58,17 +70,33 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         apply_repetition_penalty(&mut logits, generated_ids, repetition_penalty);
     }
 
-    // 2. Greedy shortcut
+    // 2. Presence / frequency penalty
+    if presence_penalty != 0.0 || frequency_penalty != 0.0 {
+        if let Some(counts) = token_counts {
+            for (&tid, &count) in counts.iter() {
+                if tid >= 0 && (tid as usize) < logits.len() {
+                    if presence_penalty != 0.0 {
+                        logits[tid as usize] -= presence_penalty;
+                    }
+                    if frequency_penalty != 0.0 {
+                        logits[tid as usize] -= frequency_penalty * count as f32;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Greedy shortcut
     if temperature <= 0.0 {
         return sample_greedy(&logits);
     }
 
-    // 3. Temperature scaling
+    // 4. Temperature scaling
     for l in &mut logits {
         *l /= temperature;
     }
 
-    // 4. Top-K masking
+    // 5. Top-K masking
     let k = top_k as usize;
     if k > 0 && k < logits.len() {
         let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
@@ -81,7 +109,7 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         }
     }
 
-    // 5. Softmax + sort by descending probability
+    // 6. Softmax + sort by descending probability
     let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let exp_sum: f32 = logits.iter().map(|&l| (l - max_l).exp()).sum();
     let mut probs: Vec<(usize, f32)> = logits
@@ -91,7 +119,22 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         .collect();
     probs.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(Ordering::Equal));
 
-    // 6. Top-P nucleus truncation
+    // 7. Min-p filter: remove tokens with prob < min_p × max_prob
+    if min_p > 0.0 {
+        let max_prob = probs.first().map(|(_, p)| *p).unwrap_or(0.0);
+        let threshold = min_p * max_prob;
+        probs.retain(|(_, p)| *p >= threshold);
+        if probs.is_empty() {
+            return logits
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+                .map(|(i, _)| i as i32)
+                .unwrap_or(0);
+        }
+    }
+
+    // 8. Top-P nucleus truncation
     if top_p < 1.0 {
         let mut cum = 0.0f32;
         let mut end = probs.len();
@@ -105,7 +148,7 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         probs.truncate(end);
     }
 
-    // 7. Weighted random draw
+    // 9. Weighted random draw
     let mut rng: Box<dyn rand::RngCore> = match seed {
         Some(s) => Box::new(StdRng::seed_from_u64(s ^ (token_count as u64))),
         None => Box::new(rand::thread_rng()),
@@ -212,7 +255,11 @@ mod tests {
                 temperature: 0.0,
                 top_p: 1.0,
                 top_k: 0,
+                min_p: 0.0,
                 repetition_penalty: 1.0,
+                token_counts: None,
+                presence_penalty: 0.0,
+                frequency_penalty: 0.0,
                 generated_ids: &[],
                 seed: None,
                 token_count: 0,
@@ -230,7 +277,11 @@ mod tests {
                 temperature: -1.0,
                 top_p: 1.0,
                 top_k: 0,
+                min_p: 0.0,
                 repetition_penalty: 1.0,
+                token_counts: None,
+                presence_penalty: 0.0,
+                frequency_penalty: 0.0,
                 generated_ids: &[],
                 seed: None,
                 token_count: 0,
@@ -250,7 +301,11 @@ mod tests {
             temperature: 1.0,
             top_p: 1.0,
             top_k: 0,
+            min_p: 0.0,
             repetition_penalty: 1.0,
+            token_counts: None,
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
             generated_ids: &[],
             seed: Some(42),
             token_count: 0,
@@ -274,7 +329,11 @@ mod tests {
                     temperature: 1.0,
                     top_p: 1.0,
                     top_k: 2,
+                    min_p: 0.0,
                     repetition_penalty: 1.0,
+                    token_counts: None,
+                    presence_penalty: 0.0,
+                    frequency_penalty: 0.0,
                     generated_ids: &[],
                     seed: Some(seed),
                     token_count: 0,
@@ -301,7 +360,11 @@ mod tests {
                     temperature: 1.0,
                     top_p: 0.5,
                     top_k: 0,
+                    min_p: 0.0,
                     repetition_penalty: 1.0,
+                    token_counts: None,
+                    presence_penalty: 0.0,
+                    frequency_penalty: 0.0,
                     generated_ids: &[],
                     seed: Some(seed),
                     token_count: 0,
@@ -325,7 +388,11 @@ mod tests {
                 temperature: 0.0, // greedy so result is deterministic
                 top_p: 1.0,
                 top_k: 0,
+                min_p: 0.0,
                 repetition_penalty: 10.0,
+                token_counts: None,
+                presence_penalty: 0.0,
+                frequency_penalty: 0.0,
                 generated_ids: &[0], // token 0 was already generated
                 seed: None,
                 token_count: 1,

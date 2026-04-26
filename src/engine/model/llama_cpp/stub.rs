@@ -27,6 +27,7 @@ impl LlamaCppModel {
         split_mode: u32,
         tensor_split: &[f32],
         moe_offload_cpu: bool,
+        flash_attn: crate::model_registry::FlashAttnMode,
     ) -> Result<Self> {
         let _ = (
             model_path,
@@ -40,6 +41,7 @@ impl LlamaCppModel {
             split_mode,
             tensor_split,
             moe_offload_cpu,
+            flash_attn,
         );
         let config = ModelConfig {
             num_layers: 32,

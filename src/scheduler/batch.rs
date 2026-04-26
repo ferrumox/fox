@@ -12,8 +12,14 @@ pub struct SamplingParams {
     pub top_p: f32,
     /// Top-K filter (0 = disabled).
     pub top_k: u32,
+    /// Min-p filter: remove tokens with prob < min_p × max_prob (0.0 = disabled).
+    pub min_p: f32,
     /// Repetition penalty applied to already-generated tokens (1.0 = disabled).
     pub repetition_penalty: f32,
+    /// Presence penalty: subtract from logit for any token seen at least once (0.0 = disabled).
+    pub presence_penalty: f32,
+    /// Frequency penalty: subtract penalty × count from logit per token (0.0 = disabled).
+    pub frequency_penalty: f32,
     /// Optional RNG seed for reproducible sampling.
     pub seed: Option<u64>,
     /// Stop generation when the output ends with any of these strings.
@@ -41,7 +47,10 @@ impl Default for SamplingParams {
             temperature: 1.0,
             top_p: 1.0,
             top_k: 0,
+            min_p: 0.0,
             repetition_penalty: 1.0,
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
             seed: None,
             stop: None,
             show_thinking: false,
@@ -111,6 +120,8 @@ pub struct InferenceRequest {
     pub generated_tokens: usize,
     /// Token IDs produced so far (used for repetition penalty).
     pub generated_token_ids: Vec<i32>,
+    /// Occurrence count per token ID (used for presence/frequency penalty).
+    pub token_counts: std::collections::HashMap<i32, usize>,
     pub max_new_tokens: usize,
     pub state: RequestState,
     /// Logical-to-physical page table for this request's KV cache blocks.
@@ -151,6 +162,7 @@ impl InferenceRequest {
             last_token: None,
             generated_tokens: 0,
             generated_token_ids: Vec::new(),
+            token_counts: std::collections::HashMap::new(),
             max_new_tokens,
             state: RequestState::Waiting,
             page_table: PageTable::default(),

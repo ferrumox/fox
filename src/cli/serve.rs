@@ -138,6 +138,13 @@ pub struct ServeArgs {
     /// Attention layers remain on GPU; expert weights are read from RAM on demand.
     #[arg(long, env = "FOX_MOE_CPU")]
     pub moe_cpu: bool,
+
+    /// Flash Attention mode: auto (default), on, off.
+    /// auto — llama.cpp decides based on model architecture (head_dim % 128 == 0).
+    /// on   — always enable (required for TurboQuant KV types).
+    /// off  — always disable (useful for debugging or unsupported models).
+    #[arg(long, default_value = "auto", env = "FOX_FLASH_ATTN")]
+    pub flash_attn: String,
 }
 
 fn parse_kv_type(s: &str) -> u32 {
@@ -149,6 +156,14 @@ fn parse_kv_type(s: &str) -> u32 {
         "turbo4" => kv_type::TURBO4,
         "turbo2" => kv_type::TURBO2,
         _ => kv_type::F16,
+    }
+}
+
+fn parse_flash_attn(s: &str) -> crate::model_registry::FlashAttnMode {
+    match s {
+        "on" | "true" | "1" => crate::model_registry::FlashAttnMode::On,
+        "off" | "false" | "0" => crate::model_registry::FlashAttnMode::Off,
+        _ => crate::model_registry::FlashAttnMode::Auto,
     }
 }
 
@@ -259,6 +274,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             .map(parse_tensor_split)
             .unwrap_or_default(),
         moe_offload_cpu: args.moe_cpu,
+        flash_attn: parse_flash_attn(&args.flash_attn),
     };
 
     let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));
