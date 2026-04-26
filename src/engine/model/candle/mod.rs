@@ -13,4 +13,6 @@
 pub mod chat_template;
 pub mod gguf_loader;
 pub mod gguf_metadata;
+pub mod llama_arch;
+pub mod llama_model;
 pub mod tokenizer;

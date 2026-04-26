@@ -1,24 +1,23 @@
 //! [`InferenceBackend`] adapter for the in-process candle implementation.
 //!
-//! At this rollout stage (C.1) the backend is *registered* on the router but
-//! declines every model. That keeps the router's decision tree exercised by
-//! real flows without fooling users into thinking candle can yet serve their
-//! prompts.
-//!
-//! Subsequent rollout phases (C.2–C.5) replace the placeholder bodies with
-//! real capability checks and a working `instantiate`.
+//! Phase C.3.2 status: the backend serves the **Llama family natively** (Llama
+//! 1/2/3) on CPU, single-sequence-per-instance. Other architectures fall
+//! through to llama.cpp via the router. CUDA, multi-sequence batching and
+//! the Gemma 4 / Qwen 3.5 native architectures arrive in C.3.4 / C.5.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use candle_core::Device;
 
-use crate::engine::model::candle::gguf_loader;
+use crate::engine::model::candle::llama_model::CandleLlamaModel;
 use crate::model_registry::{ModelProfile, RegistryConfig};
 
 use super::{ids, BackendInstance, Compatibility, InferenceBackend};
 
-/// Stub indicating where future capability logic will live. Distinct from
-/// `LlamaCppBackend` so binaries can opt into candle without paying for it.
+/// Stateless wrapper. The real state lives inside the `CandleLlamaModel`
+/// produced by [`Self::instantiate`].
 pub struct CandleBackend;
 
 impl CandleBackend {
@@ -33,52 +32,77 @@ impl Default for CandleBackend {
     }
 }
 
-const NOT_READY_MESSAGE: &str =
-    "candle backend is registered but its model loaders are not yet implemented; \
-     fall back to --backend llama-cpp until phase C.4 lands";
-
 impl InferenceBackend for CandleBackend {
     fn id(&self) -> &'static str {
         ids::CANDLE
     }
 
-    fn supports(&self, _profile: &ModelProfile) -> Compatibility {
-        Compatibility::Unsupported(NOT_READY_MESSAGE.to_string())
+    fn supports(&self, profile: &ModelProfile) -> Compatibility {
+        // Quirks are evaluated before architecture lookup so a multimodal
+        // Llama (e.g. LLaVA-Llama-3) is correctly declined even though its
+        // architecture string starts with "llama".
+        if profile.quirks.multimodal.is_some() {
+            return Compatibility::Unsupported(
+                "candle backend does not yet handle multimodal inputs (C.5 work)".to_string(),
+            );
+        }
+        // C.3.2 ships native support for the Llama family only. Other
+        // architectures fall through to llama.cpp via the router.
+        let arch = profile.architecture.to_lowercase();
+        if arch == "llama" || arch.starts_with("llama") {
+            return Compatibility::Native;
+        }
+        Compatibility::Unsupported(format!(
+            "candle backend supports only the Llama family in phase C.3.2; \
+             architecture '{}' arrives in C.5",
+            profile.architecture
+        ))
     }
 
     fn instantiate(
         &self,
         path: &Path,
-        _profile: Option<&ModelProfile>,
+        profile: Option<&ModelProfile>,
         _cfg: &RegistryConfig,
     ) -> Result<BackendInstance> {
-        // Even though we cannot yet load weights, we *can* validate that the
-        // file is a parseable GGUF — that exercises the new tensor-index
-        // reader on every real `--backend candle` invocation and produces a
-        // helpful error before the user-facing failure.
-        match gguf_loader::load_index(path) {
-            Ok(idx) => {
-                tracing::info!(
-                    tensor_count = idx.len(),
-                    alignment = idx.alignment,
-                    "candle tensor index parsed (no weight loading yet)"
-                );
-            }
-            Err(err) => {
-                tracing::warn!(
-                    "candle tensor index reader rejected the file: {}",
-                    err
-                );
+        if let Some(p) = profile {
+            if !matches!(self.supports(p), Compatibility::Native | Compatibility::Workable) {
+                return Err(anyhow!(
+                    "candle backend declined to instantiate '{}'; the router \
+                     should have picked another backend",
+                    p.architecture
+                ));
             }
         }
-        Err(anyhow!(NOT_READY_MESSAGE))
+
+        // CPU device for the C.3.2 milestone — deterministic, no CUDA setup
+        // required. CUDA selection lands in C.3.4 once the multi-sequence KV
+        // cache lives in fox rather than inside ModelWeights.
+        let device = Device::Cpu;
+        let model = CandleLlamaModel::load(path, device).map_err(|e| {
+            anyhow!(
+                "candle backend failed to load model: {e}. \
+                 If you saw this for a non-Llama architecture, force \
+                 --backend llama-cpp; that path stays fully supported."
+            )
+        })?;
+
+        Ok(BackendInstance {
+            model: Arc::new(model),
+            effective_context_len: None,
+            // KV-cache element types are llama.cpp specific; candle ignores
+            // them. Reporting f16 (1) keeps downstream consumers (metrics,
+            // logging) reasonable.
+            effective_type_k: 1,
+            effective_type_v: 1,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_registry::{ArchQuirks, ModelProfile};
+    use crate::model_registry::{ArchQuirks, Modality, ModelProfile};
 
     fn baseline(arch: &str) -> ModelProfile {
         ModelProfile {
@@ -102,19 +126,40 @@ mod tests {
     }
 
     #[test]
-    fn declines_every_architecture_during_rollout() {
+    fn supports_llama_family_natively() {
         let backend = CandleBackend::new();
-        for arch in ["llama", "gemma4", "qwen35", "mistral", "acme-unknown"] {
-            let verdict = backend.supports(&baseline(arch));
-            match verdict {
+        assert!(matches!(
+            backend.supports(&baseline("llama")),
+            Compatibility::Native
+        ));
+    }
+
+    #[test]
+    fn declines_non_llama_architectures_with_explanation() {
+        let backend = CandleBackend::new();
+        for arch in ["gemma4", "qwen35", "mistral", "acme-unknown"] {
+            match backend.supports(&baseline(arch)) {
                 Compatibility::Unsupported(reason) => {
                     assert!(
-                        reason.contains("not yet implemented"),
-                        "expected pending message, got: {reason}"
+                        reason.contains("phase") || reason.contains("Llama"),
+                        "expected explanation for '{arch}', got: {reason}"
                     );
                 }
-                other => panic!("expected Unsupported during rollout, got {other:?}"),
+                other => panic!("expected Unsupported for '{arch}', got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn declines_multimodal_with_dedicated_message() {
+        let backend = CandleBackend::new();
+        let mut p = baseline("llama");
+        p.quirks.multimodal = Some(Modality::Vision);
+        match backend.supports(&p) {
+            Compatibility::Unsupported(reason) => {
+                assert!(reason.contains("multimodal"));
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
         }
     }
 }
