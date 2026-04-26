@@ -19,6 +19,7 @@ use super::chat_template::apply_chat_template;
 use super::gguf_metadata::{self, GgufMetadata};
 use super::llama_arch::LlamaArch;
 use super::tokenizer::{vocab_from_metadata, ByteBpeTokenizer, Vocab};
+use crate::engine::model::sampling::{sample_token, SamplerParams};
 use crate::engine::model::{
     InferenceRequestForModel, Logits, Model, ModelConfig, RecommendedSampling,
 };
@@ -73,13 +74,41 @@ impl CandleLlamaModel {
         Ok(())
     }
 
-    fn forward_at(&self, tokens: &[i32], position: usize) -> Result<i32> {
-        let logits = self
-            .arch
+    /// Run the forward pass and return the raw logits for the last token.
+    fn forward_logits(&self, tokens: &[i32], position: usize) -> Result<Vec<f32>> {
+        self.arch
             .forward(tokens, position)
-            .map_err(|e| anyhow!("candle forward failed: {e}"))?;
-        Ok(greedy_argmax(&logits))
+            .map_err(|e| anyhow!("candle forward failed: {e}"))
     }
+}
+
+/// Apply the shared sampling pipeline (the same one llama.cpp goes through)
+/// to the raw logits, using the per-request parameters carried in
+/// `InferenceRequestForModel`. When `temperature <= 0` the sampler short-
+/// circuits to greedy regardless of the other knobs, so the candle backend
+/// still produces deterministic output for the default zero-temperature
+/// requests our parity tests use.
+fn sample_with_request(logits: &[f32], req: &InferenceRequestForModel) -> i32 {
+    let token_count = req.generated_tokens + req.prompt_tokens.len();
+    let counts: Option<&_> = if req.token_counts.is_empty() {
+        None
+    } else {
+        Some(&req.token_counts)
+    };
+    let params = SamplerParams {
+        temperature: req.temperature,
+        top_p: req.top_p,
+        top_k: req.top_k,
+        min_p: req.min_p,
+        repetition_penalty: req.repetition_penalty,
+        token_counts: counts,
+        presence_penalty: req.presence_penalty,
+        frequency_penalty: req.frequency_penalty,
+        generated_ids: &req.generated_token_ids,
+        seed: req.seed,
+        token_count,
+    };
+    sample_token(logits, params)
 }
 
 /// Translate a `GgufMetadata` block into the runtime `ModelConfig` shape.
@@ -125,19 +154,6 @@ fn build_model_config(meta: &GgufMetadata, vocab_size: usize) -> Result<ModelCon
     })
 }
 
-/// Greedy: pick the token id with the largest logit.
-fn greedy_argmax(logits: &[f32]) -> i32 {
-    let mut best_idx = 0i32;
-    let mut best_score = f32::NEG_INFINITY;
-    for (i, &v) in logits.iter().enumerate() {
-        if v > best_score {
-            best_score = v;
-            best_idx = i as i32;
-        }
-    }
-    best_idx
-}
-
 impl Model for CandleLlamaModel {
     fn prefill_sync(
         &self,
@@ -154,7 +170,8 @@ impl Model for CandleLlamaModel {
             .map_err(|e| anyhow!("candle cursor mutex poisoned: {e}"))?;
         let position = *cursor;
         let tokens: Vec<i32> = req.prompt_tokens.clone();
-        let sampled = self.forward_at(&tokens, position)?;
+        let logits = self.forward_logits(&tokens, position)?;
+        let sampled = sample_with_request(&logits, req);
         *cursor = position + tokens.len();
         Ok(vec![(id, Logits::new(Vec::new(), sampled), tokens.len())])
     }
@@ -176,7 +193,8 @@ impl Model for CandleLlamaModel {
             .lock()
             .map_err(|e| anyhow!("candle cursor mutex poisoned: {e}"))?;
         let position = *cursor;
-        let sampled = self.forward_at(&[last], position)?;
+        let logits = self.forward_logits(&[last], position)?;
+        let sampled = sample_with_request(&logits, req);
         *cursor = position + 1;
         Ok(vec![(id, Logits::new(Vec::new(), sampled))])
     }
@@ -251,11 +269,20 @@ impl Model for CandleLlamaModel {
     }
 
     fn clear_sequence(&self, _seq_id: i32) {
+        // Reset the cursor to 0. The KV cache itself is *not* explicitly
+        // cleared, but the next call to `prefill_sync` will pass
+        // `position = 0` to `LlamaArch::forward`, and `quantized_llama`'s
+        // attention layer treats `index_pos == 0` as an override of any
+        // stored cache rather than a concatenation. Net effect: the next
+        // conversation starts from a clean context.
+        //
+        // This works because we only ever serve ONE active sequence per
+        // model instance (single-batch limitation; see prefill/decode_sync).
+        // For concurrent multi-sequence support, the KV cache must be lifted
+        // out of `ModelWeights` into a fox-managed pool — phase C.3.4 work.
         if let Ok(mut c) = self.cursor.lock() {
             *c = 0;
         }
-        // Note: the underlying ModelWeights KV cache is *not* cleared. C.3.4
-        // will introduce an external KV cache and a real reset path.
     }
 
     fn copy_sequence_range(&self, _src_seq_id: i32, _dst_seq_id: i32, _token_count: i32) {
@@ -294,14 +321,46 @@ impl Model for CandleLlamaModel {
 mod tests {
     use super::*;
 
-    #[test]
-    fn greedy_argmax_returns_index_of_max() {
-        assert_eq!(greedy_argmax(&[0.1, 0.5, -0.2, 0.7, 0.3]), 3);
+    /// Helper that builds a default-shaped request so the sampler tests stay
+    /// concise. Mirrors `Default` semantics — `temperature: 0` selects greedy.
+    fn fake_request(temperature: f32, seed: Option<u64>) -> InferenceRequestForModel {
+        InferenceRequestForModel {
+            id: 0,
+            prompt_tokens: vec![1, 2, 3],
+            last_token: None,
+            generated_tokens: 0,
+            max_new_tokens: 1,
+            context_len: 32,
+            kv_seq_id: 0,
+            temperature,
+            top_p: 1.0,
+            top_k: 0,
+            repetition_penalty: 1.0,
+            min_p: 0.0,
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
+            seed,
+            generated_token_ids: Vec::new(),
+            token_counts: std::collections::HashMap::new(),
+            skip_prefix_tokens: 0,
+            prefix_seq_id: None,
+        }
     }
 
     #[test]
-    fn greedy_argmax_is_zero_on_empty_input() {
-        assert_eq!(greedy_argmax(&[]), 0);
+    fn sample_with_request_is_greedy_at_zero_temperature() {
+        let logits = [0.1, 0.5, -0.2, 0.7, 0.3];
+        let req = fake_request(0.0, None);
+        assert_eq!(sample_with_request(&logits, &req), 3);
+    }
+
+    #[test]
+    fn sample_with_request_is_reproducible_with_a_seed() {
+        let logits = [0.1, 0.4, 0.3, 0.2];
+        let req = fake_request(1.0, Some(42));
+        let a = sample_with_request(&logits, &req);
+        let b = sample_with_request(&logits, &req);
+        assert_eq!(a, b, "same seed must produce the same draw");
     }
 
     #[test]
@@ -343,5 +402,71 @@ mod tests {
         meta.architecture = "llama".into();
         let err = build_model_config(&meta, 32_000).unwrap_err();
         assert!(err.to_string().contains("block_count"));
+    }
+
+    /// End-to-end check that the candle backend honours the request's
+    /// sampling parameters: temperature 0 is greedy (deterministic), and
+    /// temperature > 0 with a seed is reproducible. Loads ~2GB of weights —
+    /// gated behind `#[ignore]` so the standard suite stays fast.
+    #[test]
+    #[ignore = "loads ~2GB Llama-3.2-3B; run explicitly with --ignored"]
+    fn prefill_sync_routes_request_params_through_the_sampler() {
+        use candle_core::Device;
+        use std::path::PathBuf;
+
+        let home = std::env::var("HOME").expect("HOME must be set");
+        let path = PathBuf::from(home)
+            .join(".cache/ferrumox/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf");
+        if !path.exists() {
+            eprintln!("skipping — fixture missing: {}", path.display());
+            return;
+        }
+
+        let model = CandleLlamaModel::load(&path, Device::Cpu).expect("model loads");
+        let prompt: Vec<i32> = vec![9906]; // "Hello"
+
+        // Greedy: deterministic.
+        let mut req = fake_request(0.0, None);
+        req.prompt_tokens = prompt.clone();
+        let r1 = model
+            .prefill_sync(&[1], std::slice::from_ref(&req))
+            .expect("greedy prefill");
+        let greedy_a = r1[0].1.sampled_token;
+
+        model.clear_sequence(0);
+        let r2 = model
+            .prefill_sync(&[2], std::slice::from_ref(&req))
+            .expect("greedy prefill again");
+        let greedy_b = r2[0].1.sampled_token;
+        assert_eq!(greedy_a, greedy_b, "temperature 0 must be deterministic");
+
+        // Stochastic with a seed: reproducible.
+        let mut req_seeded = fake_request(1.5, Some(42));
+        req_seeded.prompt_tokens = prompt.clone();
+        req_seeded.top_k = 0; // no truncation, exercise the full distribution
+
+        model.clear_sequence(0);
+        let r3 = model
+            .prefill_sync(&[3], std::slice::from_ref(&req_seeded))
+            .expect("seeded prefill");
+        let seeded_a = r3[0].1.sampled_token;
+
+        model.clear_sequence(0);
+        let r4 = model
+            .prefill_sync(&[4], std::slice::from_ref(&req_seeded))
+            .expect("seeded prefill again");
+        let seeded_b = r4[0].1.sampled_token;
+        assert_eq!(
+            seeded_a, seeded_b,
+            "same seed must produce the same sampled token"
+        );
+
+        // Sampled tokens must be valid vocab ids.
+        for &tok in &[greedy_a, seeded_a] {
+            assert!(tok >= 0, "token id is non-negative");
+            assert!((tok as usize) < model.config.vocab_size, "token id in range");
+        }
+
+        eprintln!("greedy={greedy_a}, seeded(1.5,42)={seeded_a}");
     }
 }
