@@ -615,5 +615,6 @@ fn build_sampling_params(
         max_thinking_chars: 8192,
         mirostat_tau: 0.0,
         mirostat_eta: 0.1,
+        logit_bias: std::collections::HashMap::new(),
     }
 }

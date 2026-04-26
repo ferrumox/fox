@@ -26,6 +26,22 @@ pub(crate) fn apply_repetition_penalty(logits: &mut [f32], token_ids: &[i32], pe
     }
 }
 
+/// Add caller-supplied biases to the corresponding logits in-place. Mirrors
+/// the OpenAI `logit_bias` knob — a positive value boosts a token, negative
+/// suppresses it (`-100` ≈ ban). Out-of-range token ids are silently
+/// ignored so a request that targets a token from a different vocabulary
+/// can't crash the sampler.
+pub(crate) fn apply_logit_bias(
+    logits: &mut [f32],
+    bias: &std::collections::HashMap<i32, f32>,
+) {
+    for (&tid, &b) in bias.iter() {
+        if tid >= 0 && (tid as usize) < logits.len() {
+            logits[tid as usize] += b;
+        }
+    }
+}
+
 /// Parameters for the full stochastic sampler.
 pub(crate) struct SamplerParams<'a> {
     pub(crate) temperature: f32,
@@ -43,6 +59,9 @@ pub(crate) struct SamplerParams<'a> {
     pub(crate) generated_ids: &'a [i32],
     pub(crate) seed: Option<u64>,
     pub(crate) token_count: usize,
+    /// Optional per-token logit adjustment (OpenAI-compatible `logit_bias`).
+    /// `None` skips the step entirely.
+    pub(crate) logit_bias: Option<&'a std::collections::HashMap<i32, f32>>,
 }
 
 /// Full stochastic sampler: repetition/presence/frequency penalty → temperature → top-K → top-P → min-p → weighted draw.
@@ -62,8 +81,15 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         generated_ids,
         seed,
         token_count,
+        logit_bias,
     } = p;
     let mut logits = logits.to_vec();
+
+    // 0. Logit bias — applied first so positive boosts compete cleanly with
+    //    repetition / presence / frequency penalties further down.
+    if let Some(bias) = logit_bias {
+        apply_logit_bias(&mut logits, bias);
+    }
 
     // 1. Repetition penalty
     if repetition_penalty != 1.0 && !generated_ids.is_empty() {
@@ -247,6 +273,45 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn apply_logit_bias_adds_to_target_tokens_only() {
+        let mut logits = vec![1.0f32, 2.0, 3.0, 4.0];
+        let mut bias = std::collections::HashMap::new();
+        bias.insert(1, 10.0);
+        bias.insert(3, -5.0);
+        bias.insert(99, 1.0); // out of range — silently ignored
+        bias.insert(-1, 1.0); // negative id — silently ignored
+        apply_logit_bias(&mut logits, &bias);
+        assert_eq!(logits, vec![1.0, 12.0, 3.0, -1.0]);
+    }
+
+    #[test]
+    fn logit_bias_can_force_a_token_under_greedy() {
+        // Without bias the greedy pick is index 1 (highest logit).
+        let logits = vec![0.1f32, 5.0, 0.3];
+        // With a +10 bias on index 2 the new max is 10.3 → index 2.
+        let mut bias = std::collections::HashMap::new();
+        bias.insert(2, 10.0);
+        let token = sample_token(
+            &logits,
+            SamplerParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                top_k: 0,
+                min_p: 0.0,
+                repetition_penalty: 1.0,
+                token_counts: None,
+                presence_penalty: 0.0,
+                frequency_penalty: 0.0,
+                generated_ids: &[],
+                seed: None,
+                token_count: 0,
+                logit_bias: Some(&bias),
+            },
+        );
+        assert_eq!(token, 2);
+    }
+
+    #[test]
     fn sample_token_greedy_at_temperature_zero() {
         let logits = vec![0.1f32, 5.0, 0.3];
         let token = sample_token(
@@ -263,6 +328,7 @@ mod tests {
                 generated_ids: &[],
                 seed: None,
                 token_count: 0,
+                logit_bias: None,
             },
         );
         assert_eq!(token, 1);
@@ -285,6 +351,7 @@ mod tests {
                 generated_ids: &[],
                 seed: None,
                 token_count: 0,
+                logit_bias: None,
             },
         );
         assert_eq!(token, 2);
@@ -309,6 +376,7 @@ mod tests {
             generated_ids: &[],
             seed: Some(42),
             token_count: 0,
+                logit_bias: None,
         };
         assert_eq!(
             sample_token(&logits, params()),
@@ -337,6 +405,7 @@ mod tests {
                     generated_ids: &[],
                     seed: Some(seed),
                     token_count: 0,
+                logit_bias: None,
                 },
             );
             seen.insert(t);
@@ -368,6 +437,7 @@ mod tests {
                     generated_ids: &[],
                     seed: Some(seed),
                     token_count: 0,
+                logit_bias: None,
                 },
             );
             assert_eq!(
@@ -396,6 +466,7 @@ mod tests {
                 generated_ids: &[0], // token 0 was already generated
                 seed: None,
                 token_count: 1,
+                logit_bias: None,
             },
         );
         assert_eq!(token, 1, "penalised token 0 should lose to token 1");

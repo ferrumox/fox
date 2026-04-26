@@ -98,6 +98,9 @@ pub struct InferenceRequestForModel {
     /// Mirostat v2 learning rate (η). Ignored when `mirostat_tau == 0`.
     /// Typical value ≈ 0.1.
     pub mirostat_eta: f32,
+    /// Per-token logit bias (OpenAI compatibility). Empty = disabled.
+    /// Positive values boost a token, negative suppress it (-100 ≈ ban).
+    pub logit_bias: std::collections::HashMap<i32, f32>,
     /// Number of prompt tokens already in the KV cache from a prefix hit.
     /// `do_prefill` submits only `prompt_tokens[skip_prefix_tokens..]` starting at
     /// position `skip_prefix_tokens`.

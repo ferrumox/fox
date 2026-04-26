@@ -12,8 +12,11 @@
 //! to roughly the entropy of natural English at the token level.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use rand::Rng;
+
+use super::sampling::apply_logit_bias;
 
 /// Mirostat v2 state carried between decode steps for the same sequence.
 #[derive(Debug, Clone)]
@@ -57,10 +60,24 @@ pub fn sample(
     state: &mut MirostatV2,
     seed: Option<u64>,
     token_count: usize,
+    logit_bias: Option<&HashMap<i32, f32>>,
 ) -> i32 {
     if logits.is_empty() {
         return 0;
     }
+
+    // 0. Apply logit bias on a private copy. The mirostat path operates on
+    //    raw logits (no temperature/top-k/top-p), so the bias step is the
+    //    only pre-softmax adjustment available.
+    let mut owned: Vec<f32>;
+    let logits: &[f32] = match logit_bias {
+        Some(bias) => {
+            owned = logits.to_vec();
+            apply_logit_bias(&mut owned, bias);
+            &owned
+        }
+        None => logits,
+    };
 
     // 1. Softmax → probabilities, with the usual numerical-stability shift.
     let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
@@ -155,8 +172,8 @@ mod tests {
         let mut s1 = MirostatV2::new(3.0, 0.1);
         let mut s2 = MirostatV2::new(3.0, 0.1);
         for step in 0..5 {
-            let a = sample(&logits, &mut s1, Some(42), step);
-            let b = sample(&logits, &mut s2, Some(42), step);
+            let a = sample(&logits, &mut s1, Some(42), step, None);
+            let b = sample(&logits, &mut s2, Some(42), step, None);
             assert_eq!(a, b, "seeded mirostat must be reproducible");
         }
     }
@@ -168,7 +185,7 @@ mod tests {
         logits[0] = 100.0;
         let mut state = MirostatV2::new(5.0, 0.5);
         for step in 0..20 {
-            let _ = sample(&logits, &mut state, Some(7), step);
+            let _ = sample(&logits, &mut state, Some(7), step, None);
             assert!(
                 state.mu >= 0.0,
                 "mu went negative at step {step}: {}",
@@ -180,7 +197,7 @@ mod tests {
     #[test]
     fn empty_logits_return_zero_without_panicking() {
         let mut state = MirostatV2::new(5.0, 0.1);
-        assert_eq!(sample(&[], &mut state, Some(1), 0), 0);
+        assert_eq!(sample(&[], &mut state, Some(1), 0, None), 0);
     }
 
     #[test]
@@ -188,7 +205,7 @@ mod tests {
         let logits: Vec<f32> = (0..1024).map(|i| (i as f32 * 0.001).sin()).collect();
         let mut state = MirostatV2::new(5.0, 0.1);
         for step in 0..100 {
-            let token = sample(&logits, &mut state, Some(99), step);
+            let token = sample(&logits, &mut state, Some(99), step, None);
             assert!(token >= 0);
             assert!((token as usize) < logits.len(), "token id out of range");
         }
@@ -202,7 +219,7 @@ mod tests {
         let logits = vec![0.0f32; 64];
         let mut state = MirostatV2::new(4.0, 0.2);
         for step in 0..200 {
-            let _ = sample(&logits, &mut state, Some(13), step);
+            let _ = sample(&logits, &mut state, Some(13), step, None);
         }
         assert!(
             state.mu < 8.0,

@@ -45,6 +45,10 @@ pub struct SamplingParams {
     pub mirostat_tau: f32,
     /// Mirostat v2 learning rate (η). Used only when `mirostat_tau > 0`.
     pub mirostat_eta: f32,
+    /// OpenAI-compatible logit bias map: token id → bias added to its logit.
+    /// Positive values boost a token, negative suppress it (-100 ≈ ban).
+    /// Empty = disabled.
+    pub logit_bias: std::collections::HashMap<i32, f32>,
 }
 
 impl Default for SamplingParams {
@@ -64,6 +68,7 @@ impl Default for SamplingParams {
             max_thinking_chars: 8192,
             mirostat_tau: 0.0,
             mirostat_eta: 0.1,
+            logit_bias: std::collections::HashMap::new(),
         }
     }
 }

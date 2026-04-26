@@ -79,6 +79,23 @@ pub async fn chat_completions(
     let max_tokens = req.max_tokens.or(req.max_completion_tokens).unwrap_or(256) as usize;
 
     let supports_thinking = entry.engine.supports_thinking();
+
+    /// Convert OpenAI's string-keyed bias map into the integer-keyed shape
+    /// the sampler consumes. Out-of-range or unparseable keys are dropped
+    /// so a request that targets tokens from a different vocabulary cannot
+    /// crash the handler.
+    fn parse_logit_bias(
+        raw: &Option<std::collections::HashMap<String, f32>>,
+    ) -> std::collections::HashMap<i32, f32> {
+        match raw {
+            None => std::collections::HashMap::new(),
+            Some(map) => map
+                .iter()
+                .filter_map(|(k, v)| k.parse::<i32>().ok().map(|id| (id, *v)))
+                .collect(),
+        }
+    }
+
     let sampling = SamplingParams {
         temperature: req.temperature.unwrap_or(0.8).max(0.0),
         top_p: req.top_p.unwrap_or(0.9).clamp(0.0, 1.0),
@@ -94,6 +111,7 @@ pub async fn chat_completions(
         max_thinking_chars: 8192,
         mirostat_tau: req.mirostat_tau.unwrap_or(0.0),
         mirostat_eta: req.mirostat_eta.unwrap_or(0.1),
+        logit_bias: parse_logit_bias(&req.logit_bias),
     };
 
     let req_id = entry.engine.next_request_id();

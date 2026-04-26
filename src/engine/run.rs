@@ -118,6 +118,7 @@ impl InferenceEngine {
                 token_counts: r.token_counts.clone(),
                 mirostat_tau: r.sampling.mirostat_tau,
                 mirostat_eta: r.sampling.mirostat_eta,
+                logit_bias: r.sampling.logit_bias.clone(),
                 skip_prefix_tokens: r.skip_prefix_tokens,
                 prefix_seq_id: r.prefix_seq_id,
             })
@@ -208,6 +209,7 @@ impl InferenceEngine {
                 token_counts: r.token_counts.clone(),
                 mirostat_tau: r.sampling.mirostat_tau,
                 mirostat_eta: r.sampling.mirostat_eta,
+                logit_bias: r.sampling.logit_bias.clone(),
                 skip_prefix_tokens: 0,
                 prefix_seq_id: None,
             })

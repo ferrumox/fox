@@ -150,6 +150,11 @@ impl LlamaCppModel {
                         generated_ids: &r.generated_token_ids,
                         seed: r.seed,
                         token_count: r.generated_tokens,
+                        logit_bias: if r.logit_bias.is_empty() {
+                            None
+                        } else {
+                            Some(&r.logit_bias)
+                        },
                     },
                 )
             } else {
@@ -239,6 +244,11 @@ impl LlamaCppModel {
                         generated_ids: &r.generated_token_ids,
                         seed: r.seed,
                         token_count: r.generated_tokens,
+                        logit_bias: if r.logit_bias.is_empty() {
+                            None
+                        } else {
+                            Some(&r.logit_bias)
+                        },
                     },
                 )
             } else {

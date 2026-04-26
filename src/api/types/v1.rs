@@ -134,6 +134,12 @@ pub struct ChatCompletionRequest {
     /// Typical value: 0.1.
     #[serde(default)]
     pub mirostat_eta: Option<f32>,
+    /// OpenAI-compatible per-token logit bias map. JSON keys are token-id
+    /// strings (e.g. `"50256"`); values are floats added to that token's
+    /// logit. `-100` ≈ ban, `+100` ≈ force. Tokens that fail to parse as
+    /// integer ids or that don't fit `i32` are silently ignored.
+    #[serde(default)]
+    pub logit_bias: Option<std::collections::HashMap<String, f32>>,
     /// Caller identifier — accepted for API compatibility, not used.
     #[serde(default)]
     pub user: Option<String>,

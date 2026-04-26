@@ -103,11 +103,23 @@ fn sample_with_request(
 ) -> i32 {
     let token_count = req.generated_tokens + req.prompt_tokens.len();
 
+    let bias_opt: Option<&_> = if req.logit_bias.is_empty() {
+        None
+    } else {
+        Some(&req.logit_bias)
+    };
+
     if req.mirostat_tau > 0.0 {
         let mut state = mirostat_states
             .entry(req.id)
             .or_insert_with(|| MirostatV2::new(req.mirostat_tau, req.mirostat_eta));
-        return mirostat::sample(logits, state.value_mut(), req.seed, token_count);
+        return mirostat::sample(
+            logits,
+            state.value_mut(),
+            req.seed,
+            token_count,
+            bias_opt,
+        );
     }
 
     let counts: Option<&_> = if req.token_counts.is_empty() {
@@ -127,6 +139,7 @@ fn sample_with_request(
         generated_ids: &req.generated_token_ids,
         seed: req.seed,
         token_count,
+        logit_bias: bias_opt,
     };
     sample_token(logits, params)
 }
@@ -367,6 +380,7 @@ mod tests {
             token_counts: std::collections::HashMap::new(),
             mirostat_tau: 0.0,
             mirostat_eta: 0.1,
+            logit_bias: std::collections::HashMap::new(),
             skip_prefix_tokens: 0,
             prefix_seq_id: None,
         }
@@ -538,5 +552,28 @@ mod tests {
         );
         assert!(mirostat_a >= 0 && (mirostat_a as usize) < model.config.vocab_size);
         eprintln!("mirostat(τ=5,η=0.1,seed=99)={mirostat_a}");
+
+        // Logit bias: force a specific token under greedy. Without bias the
+        // model picks something semantic ("Question"); with a strong bias on
+        // token 9906 ("Hello"), the sampler must pick 9906.
+        let mut req_biased = fake_request(0.0, None);
+        req_biased.id = 200;
+        req_biased.prompt_tokens = prompt.clone();
+        req_biased.logit_bias.insert(9906, 1000.0);
+
+        model.clear_sequence(0);
+        let r7 = model
+            .prefill_sync(&[200], std::slice::from_ref(&req_biased))
+            .expect("biased prefill");
+        let biased_token = r7[0].1.sampled_token;
+        assert_eq!(
+            biased_token, 9906,
+            "logit_bias=+1000 on token 9906 must force the sampler to pick it"
+        );
+        assert_ne!(
+            greedy_a, 9906,
+            "sanity: unbiased greedy should pick a different token"
+        );
+        eprintln!("logit_bias(token=9906,+1000)={biased_token}");
     }
 }
