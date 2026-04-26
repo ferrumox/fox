@@ -1,5 +1,6 @@
 // Inference engine - main loop coordinating scheduler, model, and KV cache.
 
+pub mod backend;
 mod ffi;
 mod logits;
 pub mod model;

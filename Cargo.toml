@@ -10,6 +10,12 @@ default = []
 # Exposes StubModel, EngineEntry::for_test, ModelRegistry::preload_for_test, and
 # test_helpers for use in integration tests under tests/.
 test-helpers = ["dep:tower", "dep:http-body-util"]
+# Enables the in-process candle backend. Off by default to keep the base
+# binary compile fast; turn on when shipping a binary that should serve
+# architectures llama.cpp handles poorly (Gemma 4 head_dim=512, Qwen 3.5
+# hybrid memory, etc.). This phase ships the skeleton — see CandleBackend
+# for the rollout state per architecture.
+backend-candle = ["dep:candle-core", "dep:memmap2"]
 
 [dependencies]
 tokio = { version = "1.41", features = ["rt-multi-thread", "sync", "time", "macros", "signal", "process"] }
@@ -45,6 +51,10 @@ dirs = "5"
 # Optional (enabled via test-helpers feature)
 tower = { version = "0.4", features = ["util"], optional = true }
 http-body-util = { version = "0.1", optional = true }
+
+# Optional (enabled via backend-candle feature)
+candle-core = { version = "0.9", optional = true }
+memmap2 = { version = "0.9", optional = true }
 
 [build-dependencies]
 bindgen = "0.69"

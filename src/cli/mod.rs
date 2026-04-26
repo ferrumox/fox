@@ -3,6 +3,7 @@
 pub mod alias;
 pub mod bench;
 pub mod bench_kv;
+pub mod inspect;
 pub mod list;
 pub mod models;
 pub mod ps;
@@ -50,6 +51,8 @@ pub enum Command {
     Rm(rm::RmArgs),
     /// Show details about a downloaded model
     Show(show::ShowArgs),
+    /// Inspect a GGUF model's architecture and recommend a backend
+    Inspect(inspect::InspectArgs),
     /// Show running model servers
     Ps(ps::PsArgs),
     /// List curated models available to pull
@@ -62,8 +65,8 @@ pub enum Command {
 
 /// Known subcommand names — anything else is treated as `fox run <arg>`.
 const SUBCOMMANDS: &[&str] = &[
-    "serve", "run", "bench", "bench-kv", "pull", "list", "rm", "show", "ps", "models", "search",
-    "alias", "help",
+    "serve", "run", "bench", "bench-kv", "pull", "list", "rm", "show", "inspect", "ps", "models",
+    "search", "alias", "help",
 ];
 
 pub async fn run() -> anyhow::Result<()> {
@@ -93,6 +96,7 @@ pub async fn run() -> anyhow::Result<()> {
         Command::List(args) => list::run_list(args).await,
         Command::Rm(args) => rm::run_rm(args).await,
         Command::Show(args) => show::run_show(args).await,
+        Command::Inspect(args) => inspect::run_inspect(args).await,
         Command::Ps(args) => ps::run_ps(args).await,
         Command::Models(args) => models::run_models(args).await,
         Command::Search(args) => search::run_search(args).await,

@@ -1,11 +1,17 @@
 // ModelRegistry: load models on demand, keep up to N in memory (LRU + time-based eviction).
 
+pub mod arch_table;
 mod config;
+pub mod diagnostics;
 mod entry;
+pub mod inspect;
 mod loader;
 
+pub use arch_table::{recommend_backend, BackendHint, DiagnosticLevel, DiagnosticNote};
 pub use config::{kv_type, FlashAttnMode, RegistryConfig};
+pub use diagnostics::{render_diagnostic, ModelDiagnostic};
 pub use entry::EngineEntry;
+pub use inspect::{probe, ArchQuirks, Modality, ModelProfile, ProbeError};
 
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -262,6 +268,8 @@ mod tests {
             tensor_split: vec![],
             moe_offload_cpu: false,
             flash_attn: FlashAttnMode::Auto,
+            backend_override: None,
+            backend_priority: Vec::new(),
         }
     }
 

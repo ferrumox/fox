@@ -145,6 +145,17 @@ pub struct ServeArgs {
     /// off  — always disable (useful for debugging or unsupported models).
     #[arg(long, default_value = "auto", env = "FOX_FLASH_ATTN")]
     pub flash_attn: String,
+
+    /// Force a specific inference backend (e.g. "llama-cpp"). When omitted,
+    /// the router consults the architecture table to pick automatically.
+    #[arg(long, env = "FOX_BACKEND")]
+    pub backend: Option<String>,
+
+    /// Comma-separated tie-breaker order for backend selection when no
+    /// preference can be derived from the model's architecture.
+    /// Example: "candle,llama-cpp".
+    #[arg(long, env = "FOX_BACKEND_PRIORITY")]
+    pub backend_priority: Option<String>,
 }
 
 fn parse_kv_type(s: &str) -> u32 {
@@ -173,6 +184,14 @@ fn parse_split_mode(s: &str) -> u32 {
         "none" => 0,
         _ => 1, // layer (default)
     }
+}
+
+/// Parse "candle,llama-cpp" → ["candle", "llama-cpp"].
+fn parse_backend_priority(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
 }
 
 /// Parse "3,1" → [0.75, 0.25] (normalizes so values sum to 1.0).
@@ -275,6 +294,12 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             .unwrap_or_default(),
         moe_offload_cpu: args.moe_cpu,
         flash_attn: parse_flash_attn(&args.flash_attn),
+        backend_override: args.backend.clone(),
+        backend_priority: args
+            .backend_priority
+            .as_deref()
+            .map(parse_backend_priority)
+            .unwrap_or_default(),
     };
 
     let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));

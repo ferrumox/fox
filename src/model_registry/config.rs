@@ -68,4 +68,11 @@ pub struct RegistryConfig {
     pub moe_offload_cpu: bool,
     /// Flash Attention mode. Default: Auto (llama.cpp decides based on model architecture).
     pub flash_attn: FlashAttnMode,
+    /// Forces the router to pick a specific backend (e.g. `"llama-cpp"`,
+    /// `"candle"`). When `None`, the router consults the architecture table.
+    pub backend_override: Option<String>,
+    /// Tie-breaker order when the architecture table cannot decide and no
+    /// override is set. The first registered backend that reports the model
+    /// as runnable is picked.
+    pub backend_priority: Vec<String>,
 }

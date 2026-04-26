@@ -169,6 +169,8 @@ mod tests {
             tensor_split: vec![],
             moe_offload_cpu: false,
             flash_attn: crate::model_registry::FlashAttnMode::Auto,
+            backend_override: None,
+            backend_priority: Vec::new(),
         };
         let reg = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
         let app = router(

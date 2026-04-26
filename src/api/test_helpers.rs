@@ -40,6 +40,8 @@ pub fn make_test_registry(
         tensor_split: vec![],
         moe_offload_cpu: false,
         flash_attn: crate::model_registry::FlashAttnMode::Auto,
+        backend_override: None,
+        backend_priority: Vec::new(),
     };
     let registry = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
     let entry = EngineEntry::for_test(name);
@@ -85,6 +87,8 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         tensor_split: vec![],
         moe_offload_cpu: false,
         flash_attn: crate::model_registry::FlashAttnMode::Auto,
+        backend_override: None,
+        backend_priority: Vec::new(),
     };
     let registry = Arc::new(crate::model_registry::ModelRegistry::new(
         cfg,

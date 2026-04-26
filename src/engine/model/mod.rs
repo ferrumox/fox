@@ -7,6 +7,8 @@
 
 use anyhow::Result;
 
+#[cfg(feature = "backend-candle")]
+pub(crate) mod candle;
 pub(crate) mod llama_cpp;
 #[cfg(not(fox_stub))]
 pub(crate) mod sampling;

@@ -73,6 +73,8 @@ mod tests {
                     tensor_split: vec![],
                     moe_offload_cpu: false,
                     flash_attn: crate::model_registry::FlashAttnMode::Auto,
+                    backend_override: None,
+                    backend_priority: Vec::new(),
                 },
                 Default::default(),
             )),
