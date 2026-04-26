@@ -653,6 +653,7 @@ dependencies = [
  "indicatif",
  "lru",
  "memmap2",
+ "minijinja",
  "prometheus",
  "rand 0.8.5",
  "reqwest",
@@ -1465,10 +1466,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "memo-map"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
+name = "minijinja"
+version = "2.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "805bfd7352166bae857ee569628b52bcd85a1cecf7810861ebceb1686b72b75d"
+dependencies = [
+ "memo-map",
+ "serde",
+]
 
 [[package]]
 name = "minimal-lexical"

@@ -15,7 +15,7 @@ test-helpers = ["dep:tower", "dep:http-body-util"]
 # architectures llama.cpp handles poorly (Gemma 4 head_dim=512, Qwen 3.5
 # hybrid memory, etc.). This phase ships the skeleton — see CandleBackend
 # for the rollout state per architecture.
-backend-candle = ["dep:candle-core", "dep:memmap2"]
+backend-candle = ["dep:candle-core", "dep:memmap2", "dep:minijinja"]
 
 [dependencies]
 tokio = { version = "1.41", features = ["rt-multi-thread", "sync", "time", "macros", "signal", "process"] }
@@ -55,6 +55,7 @@ http-body-util = { version = "0.1", optional = true }
 # Optional (enabled via backend-candle feature)
 candle-core = { version = "0.9", optional = true }
 memmap2 = { version = "0.9", optional = true }
+minijinja = { version = "2", optional = true, features = ["loader"] }
 
 [build-dependencies]
 bindgen = "0.69"

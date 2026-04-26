@@ -10,4 +10,7 @@
 //!   - C.4: full `Model` trait wiring + smoke generation.
 //!   - C.5: Gemma 4 and Qwen 3.5 architectures.
 
+pub mod chat_template;
 pub mod gguf_loader;
+pub mod gguf_metadata;
+pub mod tokenizer;
