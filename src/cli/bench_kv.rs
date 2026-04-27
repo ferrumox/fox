@@ -179,6 +179,8 @@ async fn run_one_type(
             mirostat_tau: 0.0,
             mirostat_eta: 0.1,
             logit_bias: std::collections::HashMap::new(),
+            dynamic_temp_low: 0.0,
+            dynamic_temp_high: 0.0,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

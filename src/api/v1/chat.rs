@@ -112,6 +112,8 @@ pub async fn chat_completions(
         mirostat_tau: req.mirostat_tau.unwrap_or(0.0),
         mirostat_eta: req.mirostat_eta.unwrap_or(0.1),
         logit_bias: parse_logit_bias(&req.logit_bias),
+        dynamic_temp_low: req.dynamic_temp_low.unwrap_or(0.0),
+        dynamic_temp_high: req.dynamic_temp_high.unwrap_or(0.0),
     };
 
     let req_id = entry.engine.next_request_id();

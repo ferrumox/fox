@@ -140,6 +140,7 @@ fn sample_with_request(
         seed: req.seed,
         token_count,
         logit_bias: bias_opt,
+        dynamic_temp: if req.dynamic_temp_high > req.dynamic_temp_low && req.dynamic_temp_low > 0.0 { Some((req.dynamic_temp_low, req.dynamic_temp_high)) } else { None },
     };
     sample_token(logits, params)
 }
@@ -381,6 +382,8 @@ mod tests {
             mirostat_tau: 0.0,
             mirostat_eta: 0.1,
             logit_bias: std::collections::HashMap::new(),
+            dynamic_temp_low: 0.0,
+            dynamic_temp_high: 0.0,
             skip_prefix_tokens: 0,
             prefix_seq_id: None,
         }

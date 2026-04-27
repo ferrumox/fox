@@ -616,5 +616,7 @@ fn build_sampling_params(
         mirostat_tau: 0.0,
         mirostat_eta: 0.1,
         logit_bias: std::collections::HashMap::new(),
+        dynamic_temp_low: 0.0,
+        dynamic_temp_high: 0.0,
     }
 }

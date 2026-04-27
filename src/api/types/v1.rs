@@ -140,6 +140,15 @@ pub struct ChatCompletionRequest {
     /// integer ids or that don't fit `i32` are silently ignored.
     #[serde(default)]
     pub logit_bias: Option<std::collections::HashMap<String, f32>>,
+    /// Dynamic temperature lower bound. When set together with
+    /// `dynamic_temp_high` (and `high > low`), the sampler blends a
+    /// per-step temperature in that range based on the entropy of the
+    /// logits — ignoring the static `temperature` field.
+    #[serde(default)]
+    pub dynamic_temp_low: Option<f32>,
+    /// Dynamic temperature upper bound. Pair with `dynamic_temp_low`.
+    #[serde(default)]
+    pub dynamic_temp_high: Option<f32>,
     /// Caller identifier — accepted for API compatibility, not used.
     #[serde(default)]
     pub user: Option<String>,

@@ -9,6 +9,7 @@ use anyhow::Result;
 
 #[cfg(feature = "backend-candle")]
 pub(crate) mod candle;
+pub mod error;
 pub(crate) mod llama_cpp;
 #[cfg(not(fox_stub))]
 pub(crate) mod mirostat;
@@ -16,6 +17,8 @@ pub(crate) mod mirostat;
 pub(crate) mod sampling;
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod stub;
+
+pub use error::LoadError;
 
 pub use llama_cpp::LlamaCppModel;
 #[cfg(any(test, feature = "test-helpers"))]
@@ -101,6 +104,12 @@ pub struct InferenceRequestForModel {
     /// Per-token logit bias (OpenAI compatibility). Empty = disabled.
     /// Positive values boost a token, negative suppress it (-100 ≈ ban).
     pub logit_bias: std::collections::HashMap<i32, f32>,
+    /// Dynamic temperature lower bound. 0 = disabled (the static
+    /// `temperature` field is used).
+    pub dynamic_temp_low: f32,
+    /// Dynamic temperature upper bound. Effective only when both bounds
+    /// are positive and `high > low`.
+    pub dynamic_temp_high: f32,
     /// Number of prompt tokens already in the KV cache from a prefix hit.
     /// `do_prefill` submits only `prompt_tokens[skip_prefix_tokens..]` starting at
     /// position `skip_prefix_tokens`.

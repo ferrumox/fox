@@ -49,6 +49,14 @@ pub struct SamplingParams {
     /// Positive values boost a token, negative suppress it (-100 ≈ ban).
     /// Empty = disabled.
     pub logit_bias: std::collections::HashMap<i32, f32>,
+    /// Dynamic temperature lower bound. 0 = disabled (static `temperature`
+    /// is used). When both bounds are positive and `high > low`, the sampler
+    /// blends a temperature in `[low, high]` based on the per-step entropy
+    /// of the logits, ignoring the static `temperature` field.
+    pub dynamic_temp_low: f32,
+    /// Dynamic temperature upper bound. Used only when `dynamic_temp_low > 0`
+    /// and `dynamic_temp_high > dynamic_temp_low`.
+    pub dynamic_temp_high: f32,
 }
 
 impl Default for SamplingParams {
@@ -69,6 +77,8 @@ impl Default for SamplingParams {
             mirostat_tau: 0.0,
             mirostat_eta: 0.1,
             logit_bias: std::collections::HashMap::new(),
+            dynamic_temp_low: 0.0,
+            dynamic_temp_high: 0.0,
         }
     }
 }

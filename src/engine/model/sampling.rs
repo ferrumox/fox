@@ -42,6 +42,41 @@ pub(crate) fn apply_logit_bias(
     }
 }
 
+/// Compute a temperature in `[low, high]` based on the normalised entropy
+/// of `logits`. When the model is confident (low entropy) the result is
+/// closer to `low`; when it's hesitant (high entropy) the result drifts
+/// toward `high`. Useful as a single knob that produces near-greedy text in
+/// code-like contexts and looser sampling in prose-like contexts.
+///
+/// Returns `low` immediately when `low >= high` so the caller can use
+/// `(0, 0)` as a "disabled" sentinel without changing behaviour.
+pub(crate) fn dynamic_temperature(logits: &[f32], low: f32, high: f32) -> f32 {
+    if !(low >= 0.0 && high > low) {
+        return low.max(0.0);
+    }
+    if logits.is_empty() {
+        return low;
+    }
+
+    // Softmax with the standard numerical-stability shift.
+    let max_l = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let exps: Vec<f32> = logits.iter().map(|&l| (l - max_l).exp()).collect();
+    let sum: f32 = exps.iter().sum();
+    if sum <= 0.0 {
+        return low;
+    }
+    let mut entropy = 0.0f32;
+    for e in &exps {
+        let p = e / sum;
+        if p > 0.0 {
+            entropy -= p * p.log2();
+        }
+    }
+    let max_entropy = (logits.len() as f32).log2().max(1.0);
+    let normalised = (entropy / max_entropy).clamp(0.0, 1.0);
+    low + (high - low) * normalised
+}
+
 /// Parameters for the full stochastic sampler.
 pub(crate) struct SamplerParams<'a> {
     pub(crate) temperature: f32,
@@ -62,6 +97,11 @@ pub(crate) struct SamplerParams<'a> {
     /// Optional per-token logit adjustment (OpenAI-compatible `logit_bias`).
     /// `None` skips the step entirely.
     pub(crate) logit_bias: Option<&'a std::collections::HashMap<i32, f32>>,
+    /// Dynamic temperature range. When `Some((low, high))` and `high > low`,
+    /// the sampler computes the post-softmax entropy of the logits and
+    /// blends a temperature in `[low, high]` — replacing the static
+    /// `temperature` for that step. `None` keeps the static behaviour.
+    pub(crate) dynamic_temp: Option<(f32, f32)>,
 }
 
 /// Full stochastic sampler: repetition/presence/frequency penalty → temperature → top-K → top-P → min-p → weighted draw.
@@ -70,7 +110,7 @@ pub(crate) struct SamplerParams<'a> {
 /// The RNG is seeded per-request for reproducibility when `seed` is provided.
 pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
     let SamplerParams {
-        temperature,
+        temperature: static_temperature,
         top_p,
         top_k,
         min_p,
@@ -82,7 +122,15 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         seed,
         token_count,
         logit_bias,
+        dynamic_temp,
     } = p;
+    // Resolve the effective temperature once. If the caller supplied a
+    // dynamic range we recompute it from the *raw* logits so the entropy
+    // measurement isn't biased by penalties applied later.
+    let temperature = match dynamic_temp {
+        Some((lo, hi)) if hi > lo => dynamic_temperature(logits, lo, hi),
+        _ => static_temperature,
+    };
     let mut logits = logits.to_vec();
 
     // 0. Logit bias — applied first so positive boosts compete cleanly with
@@ -273,6 +321,36 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn dynamic_temperature_returns_low_when_distribution_is_peaked() {
+        // One logit dominates → entropy ≈ 0 → temperature ≈ low.
+        let mut logits = vec![0.0f32; 64];
+        logits[0] = 100.0;
+        let t = dynamic_temperature(&logits, 0.2, 1.5);
+        assert!(
+            (t - 0.2).abs() < 0.01,
+            "peaked distribution should map close to low; got {t}"
+        );
+    }
+
+    #[test]
+    fn dynamic_temperature_returns_high_when_distribution_is_uniform() {
+        // All logits equal → entropy = log2(N) → normalised = 1 → temp = high.
+        let logits = vec![0.0f32; 64];
+        let t = dynamic_temperature(&logits, 0.2, 1.5);
+        assert!(
+            (t - 1.5).abs() < 0.01,
+            "uniform distribution should map close to high; got {t}"
+        );
+    }
+
+    #[test]
+    fn dynamic_temperature_clamps_invalid_range() {
+        // high < low → return clamped low (no panic, no negative output).
+        assert_eq!(dynamic_temperature(&[0.0, 1.0, 2.0], 0.5, 0.2), 0.5);
+        assert_eq!(dynamic_temperature(&[0.0, 1.0, 2.0], -1.0, 0.5), 0.0);
+    }
+
+    #[test]
     fn apply_logit_bias_adds_to_target_tokens_only() {
         let mut logits = vec![1.0f32, 2.0, 3.0, 4.0];
         let mut bias = std::collections::HashMap::new();
@@ -306,6 +384,7 @@ mod tests {
                 seed: None,
                 token_count: 0,
                 logit_bias: Some(&bias),
+                dynamic_temp: None,
             },
         );
         assert_eq!(token, 2);
@@ -329,6 +408,7 @@ mod tests {
                 seed: None,
                 token_count: 0,
                 logit_bias: None,
+                dynamic_temp: None,
             },
         );
         assert_eq!(token, 1);
@@ -352,6 +432,7 @@ mod tests {
                 seed: None,
                 token_count: 0,
                 logit_bias: None,
+                dynamic_temp: None,
             },
         );
         assert_eq!(token, 2);
@@ -377,6 +458,7 @@ mod tests {
             seed: Some(42),
             token_count: 0,
                 logit_bias: None,
+                dynamic_temp: None,
         };
         assert_eq!(
             sample_token(&logits, params()),
@@ -406,6 +488,7 @@ mod tests {
                     seed: Some(seed),
                     token_count: 0,
                 logit_bias: None,
+                dynamic_temp: None,
                 },
             );
             seen.insert(t);
@@ -438,6 +521,7 @@ mod tests {
                     seed: Some(seed),
                     token_count: 0,
                 logit_bias: None,
+                dynamic_temp: None,
                 },
             );
             assert_eq!(
@@ -467,6 +551,7 @@ mod tests {
                 seed: None,
                 token_count: 1,
                 logit_bias: None,
+                dynamic_temp: None,
             },
         );
         assert_eq!(token, 1, "penalised token 0 should lose to token 1");

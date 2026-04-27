@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::engine::model::error::LoadError;
 use crate::engine::model::LlamaCppModel;
 use crate::model_registry::{kv_type, FlashAttnMode, ModelProfile, RegistryConfig};
 
@@ -77,14 +78,18 @@ impl InferenceBackend for LlamaCppBackend {
                 effective_type_k: cfg.type_k,
                 effective_type_v: cfg.type_v,
             }),
-            Err(first_err) if is_oom_shaped(&first_err) => {
-                tracing::warn!(
-                    "initial llama.cpp load failed (OOM-shaped), retrying with reduced settings: {}",
-                    first_err
-                );
-                run_oom_cascade(path, cfg, first_err)
+            Err(first_err) => {
+                let kind = LoadError::classify(&first_err);
+                if kind.is_oom() {
+                    tracing::warn!(
+                        "initial llama.cpp load failed ({kind}), retrying with reduced settings: {}",
+                        first_err
+                    );
+                    run_oom_cascade(path, cfg, first_err)
+                } else {
+                    Err(first_err)
+                }
             }
-            Err(err) => Err(err),
         }
     }
 }
@@ -168,12 +173,3 @@ fn cascade_cfg(cfg: &RegistryConfig) -> RegistryConfig {
     }
 }
 
-/// Heuristic substring match for OOM-flavoured errors surfaced by the loader
-/// or the underlying CUDA runtime. Replaced by a typed `LoadError` in phase D.
-fn is_oom_shaped(err: &anyhow::Error) -> bool {
-    let msg = format!("{err:#}");
-    msg.contains("out of memory")
-        || msg.contains("failed to allocate")
-        || msg.contains("CUDA error")
-        || msg.contains("llama_init_from_model failed")
-}
