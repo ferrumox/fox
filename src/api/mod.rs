@@ -9,5 +9,5 @@ pub mod test_helpers;
 mod types;
 pub mod v1;
 
-pub use router::{router, AppState};
+pub use router::{router, router_with_cors, AppState, CorsConfig};
 pub use types::*;

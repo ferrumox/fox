@@ -156,6 +156,15 @@ pub struct ServeArgs {
     /// Example: "candle,llama-cpp".
     #[arg(long, env = "FOX_BACKEND_PRIORITY")]
     pub backend_priority: Option<String>,
+
+    /// Restrict CORS to specific origins. Repeatable. When omitted any
+    /// origin is allowed (compatible with the previous default; safe for
+    /// localhost-only deployments). When set, only the listed origins are
+    /// allowed and a comma-separated list is also accepted via the env var.
+    /// Example: `--cors-origin https://my.app --cors-origin http://localhost:5173`
+    /// or `FOX_CORS_ORIGIN=https://my.app,http://localhost:5173`.
+    #[arg(long, env = "FOX_CORS_ORIGIN", value_delimiter = ',')]
+    pub cors_origin: Vec<String>,
 }
 
 fn parse_kv_type(s: &str) -> u32 {
@@ -371,7 +380,12 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         tracing::info!("API key authentication enabled");
     }
 
-    let app = router(
+    let cors = if args.cors_origin.is_empty() {
+        crate::api::CorsConfig::Any
+    } else {
+        crate::api::CorsConfig::Origins(args.cors_origin.clone())
+    };
+    let app = crate::api::router_with_cors(
         registry,
         primary_model.clone(),
         system_prompt,
@@ -379,8 +393,8 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         models_dir,
         args.hf_token,
         args.api_key,
-    )
-    .layer(tower_http::cors::CorsLayer::permissive());
+        cors,
+    );
 
     tracing::info!("listening on {}", addr);
     let display_name = if primary_model.is_empty() {

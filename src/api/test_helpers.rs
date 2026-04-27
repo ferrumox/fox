@@ -61,6 +61,7 @@ pub fn make_test_state(name: &str, dir: &std::path::Path) -> (AppState, Arc<Engi
         digest_cache: Arc::new(Mutex::new(HashMap::new())),
         hf_token: None,
         api_key: None,
+        tool_board: crate::tools::default_board(),
     };
     (state, entry)
 }
@@ -105,6 +106,7 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         digest_cache: Arc::new(Mutex::new(HashMap::new())),
         hf_token: None,
         api_key: None,
+        tool_board: crate::tools::default_board(),
     };
     (state, entry)
 }

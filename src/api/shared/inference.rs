@@ -13,6 +13,7 @@ use crate::api::types::{OllamaOptions, ResponseFormat, Tool, ToolCall, ToolCallF
 
 /// A chat message carrying all fields needed for prompt building.
 /// Content is already extracted to plain text (callers handle MessageContent → String).
+#[derive(Clone)]
 pub struct MessageForTemplate {
     pub role: String,
     pub content: Option<String>,
