@@ -40,6 +40,12 @@ impl MirostatV2 {
 
     /// Re-arm the state to its initial μ. Call this at the start of a new
     /// sequence (after `clear_sequence` on the model).
+    ///
+    /// Currently unused at runtime (the candle backend drops the entire
+    /// state map on `clear_sequence` rather than calling `reset` on each
+    /// entry), but kept on the type because the LlamaCpp Mirostat wireup
+    /// (D.2.b) will need it.
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.mu = 2.0 * self.tau;
     }

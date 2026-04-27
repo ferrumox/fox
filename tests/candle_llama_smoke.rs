@@ -39,6 +39,21 @@ fn greedy(logits: &[f32]) -> i32 {
 }
 
 #[test]
+fn unsupported_architectures_decline_at_runner_table() {
+    // Lib-test guard: keep the runner strict so candle never accepts
+    // architectures it can't actually load. Re-enabling any of these
+    // requires a native implementation (C.5.b work) and a corresponding
+    // ignored smoke test that proves end-to-end load + forward.
+    use ferrumox::candle::arch_runner::CandleRunner;
+    for arch in ["qwen2", "qwen2.5", "qwen35", "qwen3.5", "gemma2", "gemma4"] {
+        assert!(
+            CandleRunner::kind_for_arch(arch).is_none(),
+            "'{arch}' must be declined until a native runner lands"
+        );
+    }
+}
+
+#[test]
 #[ignore = "loads ~2GB Llama-3.2-3B; run explicitly with --ignored"]
 fn forward_at_position_zero_resets_the_kv_cache() {
     // Stronger guarantee than `clear_sequence` doc: prove the reset by running
@@ -47,7 +62,7 @@ fn forward_at_position_zero_resets_the_kv_cache() {
     // second forward would see a contaminated context and the argmax would
     // diverge.
     let path = model_path("Llama-3.2-3B-Instruct-Q4_K_M.gguf");
-    let arch = LlamaArch::from_gguf(&path, Device::Cpu).expect("model loads on CPU");
+    let arch = LlamaArch::from_gguf(&path, "llama", Device::Cpu).expect("model loads on CPU");
 
     let prompt = [9906_i32]; // "Hello"
 
@@ -109,7 +124,8 @@ fn forwards_a_single_prompt_and_picks_a_valid_token() {
 
     // Forward on CPU so the test is deterministic and does not require CUDA
     // to be online for CI.
-    let arch = LlamaArch::from_gguf(&path, Device::Cpu).expect("model loads on CPU");
+    let arch = LlamaArch::from_gguf(&path, "llama", Device::Cpu)
+        .expect("model loads on CPU");
 
     let prompt_ids = tok.encode("Hello");
     assert!(!prompt_ids.is_empty(), "encoder produced zero tokens");

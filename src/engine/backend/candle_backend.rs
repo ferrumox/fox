@@ -11,6 +11,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use candle_core::Device;
 
+use crate::engine::model::candle::arch_runner::CandleRunner;
 use crate::engine::model::candle::llama_model::CandleLlamaModel;
 use crate::model_registry::{ModelProfile, RegistryConfig};
 
@@ -46,17 +47,18 @@ impl InferenceBackend for CandleBackend {
                 "candle backend does not yet handle multimodal inputs (C.5 work)".to_string(),
             );
         }
-        // C.3.2 ships native support for the Llama family only. Other
-        // architectures fall through to llama.cpp via the router.
-        let arch = profile.architecture.to_lowercase();
-        if arch == "llama" || arch.starts_with("llama") {
-            return Compatibility::Native;
+        // Delegate the capability question to the runner table — adding a
+        // new architecture means touching one place (`arch_runner.rs`) and
+        // both the loader and the router pick it up automatically.
+        if CandleRunner::kind_for_arch(&profile.architecture).is_some() {
+            Compatibility::Native
+        } else {
+            Compatibility::Unsupported(format!(
+                "candle backend has no quantised runner for architecture '{}'; \
+                 the router will fall back to llama-cpp",
+                profile.architecture
+            ))
         }
-        Compatibility::Unsupported(format!(
-            "candle backend supports only the Llama family in phase C.3.2; \
-             architecture '{}' arrives in C.5",
-            profile.architecture
-        ))
     }
 
     fn instantiate(
@@ -126,23 +128,27 @@ mod tests {
     }
 
     #[test]
-    fn supports_llama_family_natively() {
+    fn supports_known_arch_families_natively() {
         let backend = CandleBackend::new();
-        assert!(matches!(
-            backend.supports(&baseline("llama")),
-            Compatibility::Native
-        ));
+        for arch in ["llama", "qwen3", "gemma3"] {
+            assert!(
+                matches!(backend.supports(&baseline(arch)), Compatibility::Native),
+                "expected Native for '{arch}'"
+            );
+        }
     }
 
     #[test]
-    fn declines_non_llama_architectures_with_explanation() {
+    fn declines_unsupported_architectures_with_explanation() {
         let backend = CandleBackend::new();
-        for arch in ["gemma4", "qwen35", "mistral", "acme-unknown"] {
+        for arch in [
+            "gemma4", "gemma2", "mistral", "qwen", "qwen2", "qwen35", "acme-unknown",
+        ] {
             match backend.supports(&baseline(arch)) {
                 Compatibility::Unsupported(reason) => {
                     assert!(
-                        reason.contains("phase") || reason.contains("Llama"),
-                        "expected explanation for '{arch}', got: {reason}"
+                        reason.contains("no quantised runner"),
+                        "expected runner-table explanation for '{arch}', got: {reason}"
                     );
                 }
                 other => panic!("expected Unsupported for '{arch}', got {other:?}"),

@@ -54,7 +54,7 @@ impl CandleLlamaModel {
             .map(|v| v as u32)
             .unwrap_or(4096);
         let eos = vocab.specials.eos.map(|v| v as i32).unwrap_or(-1);
-        let arch = LlamaArch::from_gguf(path, device)
+        let arch = LlamaArch::from_gguf(path, &meta.architecture, device)
             .map_err(|e| anyhow!("failed to load weights: {e}"))?;
         let tokenizer = ByteBpeTokenizer::new(vocab.clone());
         Ok(Self {
