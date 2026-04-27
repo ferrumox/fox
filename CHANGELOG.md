@@ -7,6 +7,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.0] - 2026-04-27
+
+A multi-backend refactor focused on **model compatibility**. Modern GGUFs that
+llama.cpp handles poorly (Gemma 4 with `head_dim=512`, Qwen 3.5 with KV-norm,
+multimodal variants) now have a path: the new candle backend coexists with
+the existing llama.cpp path, an architecture-aware router picks the right
+one per model, and pre-load inspection produces actionable errors instead of
+cryptic FFI failures. A pluggable tool registry, pipelines DAG, host
+environment probe and configurable CORS round out the release.
+
+### Added
+
+- **Pre-load GGUF inspection** — every load now goes through a pure-Rust
+  reader that walks the GGUF header, classifies the architecture against a
+  declarative table and emits actionable diagnostics before the model
+  reaches the GPU. Surfaced both as a tracing log on `fox serve` and as a
+  new dedicated subcommand:
+  - `fox inspect <model>` — prints architecture, attention shape, vocabulary
+    size, quirks (non-standard head dim, hybrid memory, MoE expert count,
+    multimodal flags) and a backend recommendation.
+  - When a quirk is detected (vocab missing, multimodal model, etc.) the
+    diagnostic includes a concrete next step.
+
+- **Pluggable inference backends** — new `InferenceBackend` trait + `BackendRouter`
+  living above the existing `Model` trait. `LlamaCppBackend` is the default;
+  the OOM degradation cascade that used to live in `loader.rs` is now owned
+  by the wrapper. New flags on `fox serve`:
+  - `--backend <id>` / `FOX_BACKEND` — force a specific backend
+    (`llama-cpp`, `candle`).
+  - `--backend-priority <list>` / `FOX_BACKEND_PRIORITY` — comma-separated
+    tie-breaker order for backends when no preference can be derived from
+    the model.
+
+- **Candle backend (`backend-candle` feature)** — opt-in alternative
+  backend that loads quantised GGUFs through `candle-transformers` and
+  serves them on CPU. Today it covers Llama family (1, 2, 3.x), Qwen 3
+  (strict), Qwen 3 MoE and Gemma 3 (strict). Modern variants the
+  candle-transformers loaders cannot yet read (`qwen2`, `qwen35`, `gemma2`,
+  `gemma4`) decline at the runner table and the router falls through to
+  llama.cpp transparently — no client change required.
+  - Native byte-level BPE tokenizer (loaded straight from
+    `tokenizer.ggml.tokens` + `tokenizer.ggml.merges`).
+  - Chat templates rendered with `minijinja` from `tokenizer.chat_template`.
+  - The base binary keeps zero candle dependencies; ship with
+    `cargo build --features backend-candle` to opt in.
+
+- **Sampling pipeline expanded and unified** — both backends now go through
+  the same Rust sampler. New per-request knobs (HTTP and CLI):
+  - `mirostat_tau` / `mirostat_eta` — Mirostat v2 (candle backend; FFI hookup
+    for llama.cpp arrives in a follow-up).
+  - `logit_bias` — OpenAI-shaped per-token bias map; works on both backends.
+  - `dynamic_temp_low` / `dynamic_temp_high` — per-step temperature blended
+    from the entropy of the logits.
+
+- **`LoadError` typed cascade** — model load failures are now classified
+  (`OutOfMemory`, `ContextTooLarge`, `ArchUnsupported`, `Io`, `Backend`)
+  through a single dispatch point instead of the old substring match. The
+  OOM cascade still triggers automatically on memory-shaped errors.
+
+- **Tool registry** — pluggable `ToolHandler` trait + `ToolBoard` shared
+  across the request handlers. Two builtins ship by default:
+  `json_extract` (RFC 6901 JSON Pointer access) and `http_fetch` (bounded
+  HTTP GET). Two new endpoints:
+  - `GET /v1/tools` — list registered tools with OpenAI-shaped descriptors.
+  - `POST /v1/tools/execute` — invoke a tool by name with a JSON args
+    payload.
+
+- **Pipelines DAG** — small orchestration runtime over the tool board.
+  New endpoint `POST /v1/pipelines/run` accepts a list of stages
+  (`tool` and `transform` types today), derives `depends_on` edges from
+  `{{stage_id.path}}` placeholders inside their args, runs them in
+  topological order and returns the per-stage outputs map. Cycles and
+  unknown dependencies are rejected with HTTP 400.
+
+- **Server-side tool execution loop** — new `POST /v1/chat/completions/auto`
+  endpoint that, when the model emits `tool_calls` whose name is registered
+  on the board, executes the tool, feeds the result back as a `tool`
+  message and re-runs the model. Capped at 5 round-trips per request.
+  Streaming (`stream: true`) is intentionally rejected on this endpoint —
+  use the regular `/v1/chat/completions` for streamed responses.
+
+- **`fox probe` subcommand** — host environment report covering OS, arch,
+  RAM and GPU vendor (NVIDIA, AMD, Apple). Each vendor probe shells out to
+  its native tool (`nvidia-smi`, `rocm-smi`, `system_profiler`) with a 2 s
+  timeout and silently skips if the tool isn't installed. Output is human-
+  readable by default and JSON with `--json`.
+
+- **Configurable CORS** — `fox serve --cors-origin <url>` (repeatable, also
+  `FOX_CORS_ORIGIN=a,b,c`). When omitted the historical "any origin" default
+  is preserved so localhost deployments keep working.
+
+### Changed
+
+- **`loader.rs` flow** — model loading is now `inspect → recommend → router
+  pick → backend instantiate`. The OOM cascade was lifted out of the
+  loader and into `LlamaCppBackend::instantiate` so each backend owns its
+  own degradation strategy.
+
+- **`InferenceRequestForModel` and `SamplingParams`** gained `mirostat_tau`,
+  `mirostat_eta`, `logit_bias`, `dynamic_temp_low`, `dynamic_temp_high` and
+  `MessageForTemplate` is now `Clone`. Default values preserve the existing
+  behaviour for callers that don't set them.
+
+### Internal
+
+- New modules: `model_registry::{inspect, arch_table, diagnostics}`,
+  `engine::backend::{router, llama_cpp_backend, candle_backend}`,
+  `engine::model::{candle, error, mirostat}`, `tools`, `orchestration`,
+  `system_probe`.
+- ~71 new unit tests (without feature) and ~116 with `--features backend-candle`,
+  bringing the totals to **302 / 347**, plus four `#[ignore]` smoke tests
+  that drive Llama-3.2-3B end-to-end on real weights for the candle path.
+
+---
+
 ## [1.0.0] - 2026-03-25
 
 ### Added

@@ -1,5 +1,12 @@
 //! Mirostat v2 — perplexity-targeted sampling.
 //!
+//! `#[allow(dead_code)]` is applied module-wide because the production caller
+//! is only reachable when the `backend-candle` feature is enabled (the
+//! llama.cpp backend uses its own Mirostat implementation via FFI). Without
+//! that feature the API surface here is exercised exclusively by the
+//! in-module unit tests, which dead-code analysis ignores.
+#![allow(dead_code)]
+//!
 //! Reference: Basu et al. 2020, "Mirostat: A neural text decoding algorithm
 //! that directly controls perplexity". The algorithm keeps an internal
 //! `μ` that adapts the truncation cutoff so the *average surprise* of
@@ -144,6 +151,11 @@ pub fn sample(
 /// Construct a deterministic RNG when `seed` is set, otherwise a thread-local
 /// non-deterministic one. Mirrors the helper used by the regular sampler so
 /// both sampling paths produce identical trajectories for identical seeds.
+///
+/// `#[allow(dead_code)]` because `mirostat::sample` is only invoked from the
+/// candle backend; without `--features backend-candle` the function is reachable
+/// only from the in-module tests, which dead-code analysis ignores.
+#[allow(dead_code)]
 fn build_rng(seed: Option<u64>, token_count: usize) -> Box<dyn rand::RngCore> {
     use rand::SeedableRng;
     match seed {

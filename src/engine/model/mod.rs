@@ -18,7 +18,8 @@ pub(crate) mod sampling;
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod stub;
 
-pub use error::LoadError;
+// `LoadError` is reachable via the `error` submodule path; no need to
+// re-export it at this level.
 
 pub use llama_cpp::LlamaCppModel;
 #[cfg(any(test, feature = "test-helpers"))]

@@ -19,7 +19,6 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use crate::api::router;
 use crate::metrics::Metrics;
 use crate::model_registry::{ModelRegistry, RegistryConfig};
 

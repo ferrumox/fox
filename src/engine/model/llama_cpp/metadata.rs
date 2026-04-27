@@ -27,11 +27,17 @@ impl LlamaCppModel {
     }
 
     /// Read a GGUF metadata value as `f32`. Returns `None` when missing or not parseable.
+    /// Kept on the impl for future feature wiring (alignment/scale hints from
+    /// metadata) — no production caller today.
+    #[allow(dead_code)]
     pub(super) fn read_meta_f32(&self, key: &str) -> Option<f32> {
         self.read_meta_str(key)?.trim().parse::<f32>().ok()
     }
 
     /// Read a GGUF metadata value as `u32`. Returns `None` when missing or not parseable.
+    /// Kept on the impl for symmetry with the f32 reader; reach for it before
+    /// scanning all metadata keys for a single integer hint.
+    #[allow(dead_code)]
     pub(super) fn read_meta_u32(&self, key: &str) -> Option<u32> {
         self.read_meta_str(key)?.trim().parse::<u32>().ok()
     }
