@@ -255,7 +255,7 @@ fn main() {
         //   .dylib → llama, ggml-base, ggml (linked at compile time)
         //   .so    → ggml-cpu, ggml-metal, ... (MODULE, dlopen-ed at runtime)
         // Both must be copied next to the binary.
-        let _exts: &[&str] = if target_os == "macos" {
+        let exts: &[&str] = if target_os == "macos" {
             &["dylib", "so"]
         } else {
             &["so"]
@@ -268,14 +268,15 @@ fn main() {
                     // Match both plain .so and versioned soname files like
                     // libllama.so.0 / libllama.so.0.9.7 (p.extension() returns
                     // the last component, not "so", for versioned names).
-                    let so_ext = if target_os == "macos" { "dylib" } else { "so" };
-                    let is_backend = fname.contains(&format!(".{so_ext}"))
+                    for ext in exts {
+                        let is_backend = fname.contains(&format!(".{ext}"))
                         && (fname.starts_with("libggml")
                             || fname.starts_with("libllama.")
-                            || fname == format!("llama.{so_ext}"));
-                    if is_backend {
-                        let dst = dest.join(p.file_name().unwrap());
-                        let _ = std::fs::copy(&p, &dst);
+                            || fname == format!("llama.{ext}"));
+                        if is_backend {
+                            let dst = dest.join(p.file_name().unwrap());
+                            let _ = std::fs::copy(&p, &dst);
+                        }
                     }
                 }
             }
