@@ -44,10 +44,9 @@ pub struct CandleLlamaModel {
 impl CandleLlamaModel {
     /// Load a Llama-family GGUF and build the runtime around it.
     pub fn load(path: &Path, device: Device) -> Result<Self> {
-        let meta = gguf_metadata::load(path)
-            .map_err(|e| anyhow!("failed to read GGUF metadata: {e}"))?;
-        let vocab =
-            vocab_from_metadata(&meta).map_err(|e| anyhow!("failed to load vocab: {e}"))?;
+        let meta =
+            gguf_metadata::load(path).map_err(|e| anyhow!("failed to read GGUF metadata: {e}"))?;
+        let vocab = vocab_from_metadata(&meta).map_err(|e| anyhow!("failed to load vocab: {e}"))?;
         let config = build_model_config(&meta, vocab.size())?;
         let context_len = meta
             .arch_uint("context_length")
@@ -113,13 +112,7 @@ fn sample_with_request(
         let mut state = mirostat_states
             .entry(req.id)
             .or_insert_with(|| MirostatV2::new(req.mirostat_tau, req.mirostat_eta));
-        return mirostat::sample(
-            logits,
-            state.value_mut(),
-            req.seed,
-            token_count,
-            bias_opt,
-        );
+        return mirostat::sample(logits, state.value_mut(), req.seed, token_count, bias_opt);
     }
 
     let counts: Option<&_> = if req.token_counts.is_empty() {
@@ -140,7 +133,12 @@ fn sample_with_request(
         seed: req.seed,
         token_count,
         logit_bias: bias_opt,
-        dynamic_temp: if req.dynamic_temp_high > req.dynamic_temp_low && req.dynamic_temp_low > 0.0 { Some((req.dynamic_temp_low, req.dynamic_temp_high)) } else { None },
+        dynamic_temp: if req.dynamic_temp_high > req.dynamic_temp_low && req.dynamic_temp_low > 0.0
+        {
+            Some((req.dynamic_temp_low, req.dynamic_temp_high))
+        } else {
+            None
+        },
     };
     sample_token(logits, params)
 }
@@ -153,14 +151,12 @@ fn build_model_config(meta: &GgufMetadata, vocab_size: usize) -> Result<ModelCon
         .arch_uint("block_count")
         .ok_or_else(|| anyhow!("metadata missing '{}.block_count'", meta.architecture))?
         as usize;
-    let num_heads = meta
-        .arch_uint("attention.head_count")
-        .ok_or_else(|| {
-            anyhow!(
-                "metadata missing '{}.attention.head_count'",
-                meta.architecture
-            )
-        })? as usize;
+    let num_heads = meta.arch_uint("attention.head_count").ok_or_else(|| {
+        anyhow!(
+            "metadata missing '{}.attention.head_count'",
+            meta.architecture
+        )
+    })? as usize;
     let num_heads_kv = meta
         .arch_uint("attention.head_count_kv")
         .map(|v| v as usize)
@@ -432,8 +428,7 @@ mod tests {
         meta.architecture = "llama".into();
         meta.uints.insert("llama.block_count".into(), 28);
         meta.uints.insert("llama.attention.head_count".into(), 24);
-        meta.uints
-            .insert("llama.attention.head_count_kv".into(), 8);
+        meta.uints.insert("llama.attention.head_count_kv".into(), 8);
         meta.uints.insert("llama.embedding_length".into(), 3072);
         let cfg = build_model_config(&meta, 128_256).unwrap();
         assert_eq!(cfg.num_layers, 28);
@@ -451,8 +446,7 @@ mod tests {
         meta.uints.insert("gemma4.block_count".into(), 30);
         meta.uints.insert("gemma4.attention.head_count".into(), 7);
         meta.uints.insert("gemma4.embedding_length".into(), 1536);
-        meta.uints
-            .insert("gemma4.attention.key_length".into(), 512);
+        meta.uints.insert("gemma4.attention.key_length".into(), 512);
         let cfg = build_model_config(&meta, 262_144).unwrap();
         assert_eq!(cfg.head_dim, 512);
     }
@@ -477,8 +471,8 @@ mod tests {
         use std::path::PathBuf;
 
         let home = std::env::var("HOME").expect("HOME must be set");
-        let path = PathBuf::from(home)
-            .join(".cache/ferrumox/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf");
+        let path =
+            PathBuf::from(home).join(".cache/ferrumox/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf");
         if !path.exists() {
             eprintln!("skipping — fixture missing: {}", path.display());
             return;
@@ -526,7 +520,10 @@ mod tests {
         // Sampled tokens must be valid vocab ids.
         for &tok in &[greedy_a, seeded_a] {
             assert!(tok >= 0, "token id is non-negative");
-            assert!((tok as usize) < model.config.vocab_size, "token id in range");
+            assert!(
+                (tok as usize) < model.config.vocab_size,
+                "token id in range"
+            );
         }
 
         eprintln!("greedy={greedy_a}, seeded(1.5,42)={seeded_a}");

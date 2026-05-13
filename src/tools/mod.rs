@@ -113,8 +113,11 @@ impl ToolBoard {
     }
 
     pub fn list(&self) -> Vec<ToolDescriptor> {
-        let mut out: Vec<ToolDescriptor> =
-            self.handlers.iter().map(|e| e.value().descriptor()).collect();
+        let mut out: Vec<ToolDescriptor> = self
+            .handlers
+            .iter()
+            .map(|e| e.value().descriptor())
+            .collect();
         // Stable order so `GET /v1/tools` is deterministic for clients.
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out

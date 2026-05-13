@@ -20,8 +20,8 @@ impl FlashAttnMode {
     pub fn to_llama_type(self) -> i32 {
         match self {
             FlashAttnMode::Auto => -1, // LLAMA_FLASH_ATTN_TYPE_AUTO
-            FlashAttnMode::On => 1,   // LLAMA_FLASH_ATTN_TYPE_ENABLED
-            FlashAttnMode::Off => 0,  // LLAMA_FLASH_ATTN_TYPE_DISABLED
+            FlashAttnMode::On => 1,    // LLAMA_FLASH_ATTN_TYPE_ENABLED
+            FlashAttnMode::Off => 0,   // LLAMA_FLASH_ATTN_TYPE_DISABLED
         }
     }
 }

@@ -150,7 +150,13 @@ impl LlamaCppModel {
                         generated_ids: &r.generated_token_ids,
                         seed: r.seed,
                         token_count: r.generated_tokens,
-                        dynamic_temp: if r.dynamic_temp_high > r.dynamic_temp_low && r.dynamic_temp_low > 0.0 { Some((r.dynamic_temp_low, r.dynamic_temp_high)) } else { None },
+                        dynamic_temp: if r.dynamic_temp_high > r.dynamic_temp_low
+                            && r.dynamic_temp_low > 0.0
+                        {
+                            Some((r.dynamic_temp_low, r.dynamic_temp_high))
+                        } else {
+                            None
+                        },
                         logit_bias: if r.logit_bias.is_empty() {
                             None
                         } else {
@@ -245,7 +251,13 @@ impl LlamaCppModel {
                         generated_ids: &r.generated_token_ids,
                         seed: r.seed,
                         token_count: r.generated_tokens,
-                        dynamic_temp: if r.dynamic_temp_high > r.dynamic_temp_low && r.dynamic_temp_low > 0.0 { Some((r.dynamic_temp_low, r.dynamic_temp_high)) } else { None },
+                        dynamic_temp: if r.dynamic_temp_high > r.dynamic_temp_low
+                            && r.dynamic_temp_low > 0.0
+                        {
+                            Some((r.dynamic_temp_low, r.dynamic_temp_high))
+                        } else {
+                            None
+                        },
                         logit_bias: if r.logit_bias.is_empty() {
                             None
                         } else {

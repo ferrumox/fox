@@ -72,7 +72,10 @@ impl fmt::Display for MetadataError {
             Self::InvalidValueType(t) => write!(f, "unknown GGUF metadata value type {t}"),
             Self::InvalidUtf8 => write!(f, "GGUF metadata string is not valid UTF-8"),
             Self::MissingArchitecture => {
-                write!(f, "GGUF metadata is missing required key 'general.architecture'")
+                write!(
+                    f,
+                    "GGUF metadata is missing required key 'general.architecture'"
+                )
             }
             Self::UnreasonableArrayLength(n) => {
                 write!(f, "GGUF array of length {n} exceeds the safety cap")
@@ -171,15 +174,13 @@ fn ingest_value<R: Read + Seek>(
             out.uints.insert(key.to_string(), read_u16(r)? as u64);
         }
         3 => {
-            out.ints
-                .insert(key.to_string(), read_u16(r)? as i16 as i64);
+            out.ints.insert(key.to_string(), read_u16(r)? as i16 as i64);
         }
         4 => {
             out.uints.insert(key.to_string(), read_u32(r)? as u64);
         }
         5 => {
-            out.ints
-                .insert(key.to_string(), read_u32(r)? as i32 as i64);
+            out.ints.insert(key.to_string(), read_u32(r)? as i32 as i64);
         }
         6 => {
             out.floats
@@ -221,10 +222,12 @@ fn ingest_array<R: Read + Seek>(
     match element_type {
         0 => {
             // u8 array — skipped, no consumer cares about it yet
-            r.seek(SeekFrom::Current(len as i64)).map_err(MetadataError::Io)?;
+            r.seek(SeekFrom::Current(len as i64))
+                .map_err(MetadataError::Io)?;
         }
         2 => {
-            r.seek(SeekFrom::Current((len * 2) as i64)).map_err(MetadataError::Io)?;
+            r.seek(SeekFrom::Current((len * 2) as i64))
+                .map_err(MetadataError::Io)?;
         }
         4 => {
             // u32 → store as i64
@@ -251,7 +254,8 @@ fn ingest_array<R: Read + Seek>(
         }
         7 => {
             // bool array — skipped
-            r.seek(SeekFrom::Current(len as i64)).map_err(MetadataError::Io)?;
+            r.seek(SeekFrom::Current(len as i64))
+                .map_err(MetadataError::Io)?;
         }
         8 => {
             let mut v = Vec::with_capacity(len_usize);
@@ -377,7 +381,8 @@ mod tests {
             self.write_string(key);
             self.kv_payload.extend_from_slice(&9u32.to_le_bytes());
             self.kv_payload.extend_from_slice(&8u32.to_le_bytes());
-            self.kv_payload.extend_from_slice(&(items.len() as u64).to_le_bytes());
+            self.kv_payload
+                .extend_from_slice(&(items.len() as u64).to_le_bytes());
             for it in items {
                 self.write_string(it);
             }
@@ -389,7 +394,8 @@ mod tests {
             self.write_string(key);
             self.kv_payload.extend_from_slice(&9u32.to_le_bytes());
             self.kv_payload.extend_from_slice(&5u32.to_le_bytes());
-            self.kv_payload.extend_from_slice(&(items.len() as u64).to_le_bytes());
+            self.kv_payload
+                .extend_from_slice(&(items.len() as u64).to_le_bytes());
             for v in items {
                 self.kv_payload.extend_from_slice(&v.to_le_bytes());
             }
@@ -441,7 +447,14 @@ mod tests {
         )
         .unwrap();
         let toks = m.string_arrays.get("tokenizer.ggml.tokens").unwrap();
-        assert_eq!(toks, &vec!["<bos>".to_string(), "hello".to_string(), "world".to_string()]);
+        assert_eq!(
+            toks,
+            &vec![
+                "<bos>".to_string(),
+                "hello".to_string(),
+                "world".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -472,7 +485,7 @@ mod tests {
         bytes.extend_from_slice(&3u32.to_le_bytes());
         bytes.extend_from_slice(&0u64.to_le_bytes()); // tensor_count
         bytes.extend_from_slice(&1u64.to_le_bytes()); // kv_count
-        // key
+                                                      // key
         let key = "huge";
         bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
         bytes.extend_from_slice(key.as_bytes());

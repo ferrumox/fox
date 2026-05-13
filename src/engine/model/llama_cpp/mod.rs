@@ -725,7 +725,11 @@ impl Model for LlamaCppModel {
 
     fn supports_thinking(&self) -> bool {
         // <think>-prefix style (Qwen3, DeepSeek-R1): single special token, at most [BOS, <think>].
-        if self.tokenize_impl("<think>").map(|t| t.len() <= 2).unwrap_or(false) {
+        if self
+            .tokenize_impl("<think>")
+            .map(|t| t.len() <= 2)
+            .unwrap_or(false)
+        {
             return true;
         }
         self.uses_channel_thinking()

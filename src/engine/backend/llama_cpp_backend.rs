@@ -172,4 +172,3 @@ fn cascade_cfg(cfg: &RegistryConfig) -> RegistryConfig {
         backend_priority: cfg.backend_priority.clone(),
     }
 }
-

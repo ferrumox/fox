@@ -6,9 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use crate::model_registry::{
-    probe, recommend_backend, render_diagnostic, ModelDiagnostic,
-};
+use crate::model_registry::{probe, recommend_backend, render_diagnostic, ModelDiagnostic};
 
 use super::{list_models, models_dir};
 
@@ -25,8 +23,8 @@ pub struct InspectArgs {
 pub async fn run_inspect(args: InspectArgs) -> Result<()> {
     let path = resolve_path(&args)?;
 
-    let profile = probe(&path)
-        .with_context(|| format!("failed to inspect '{}'", path.display()))?;
+    let profile =
+        probe(&path).with_context(|| format!("failed to inspect '{}'", path.display()))?;
     let (hint, notes) = recommend_backend(&profile);
     let diagnostic = ModelDiagnostic {
         profile,
@@ -67,9 +65,5 @@ fn resolve_path(args: &InspectArgs) -> Result<PathBuf> {
         }
     }
 
-    anyhow::bail!(
-        "model '{}' not found in {}",
-        args.model,
-        dir.display()
-    );
+    anyhow::bail!("model '{}' not found in {}", args.model, dir.display());
 }

@@ -23,19 +23,35 @@ pub fn render_diagnostic(d: &ModelDiagnostic) -> String {
 
     writeln!(&mut out, "Architecture").ok();
     write_kv(&mut out, "  name", &d.profile.architecture);
-    write_kv(&mut out, "  gguf version", &d.profile.gguf_version.to_string());
+    write_kv(
+        &mut out,
+        "  gguf version",
+        &d.profile.gguf_version.to_string(),
+    );
     write_kv(&mut out, "  tensors", &d.profile.tensor_count.to_string());
 
     writeln!(&mut out, "\nAttention").ok();
-    write_kv(&mut out, "  embedding length", &d.profile.embedding_length.to_string());
+    write_kv(
+        &mut out,
+        "  embedding length",
+        &d.profile.embedding_length.to_string(),
+    );
     write_kv(&mut out, "  query heads", &d.profile.head_count.to_string());
     write_kv(&mut out, "  kv heads", &d.profile.head_count_kv.to_string());
     write_kv(&mut out, "  head dim", &d.profile.head_dim.to_string());
-    write_kv(&mut out, "  feed-forward length", &d.profile.ff_length.to_string());
+    write_kv(
+        &mut out,
+        "  feed-forward length",
+        &d.profile.ff_length.to_string(),
+    );
 
     writeln!(&mut out, "\nVocabulary & context").ok();
     write_kv(&mut out, "  vocab size", &d.profile.vocab_size.to_string());
-    write_kv(&mut out, "  context length", &d.profile.context_length.to_string());
+    write_kv(
+        &mut out,
+        "  context length",
+        &d.profile.context_length.to_string(),
+    );
 
     writeln!(&mut out, "\nQuirks").ok();
     write_kv(

@@ -100,9 +100,7 @@ pub fn recommend_backend(profile: &ModelProfile) -> (BackendHint, Vec<Diagnostic
             "non-standard attention head dimension ({})",
             profile.head_dim
         )));
-        if matches!(hint, BackendHint::Either | BackendHint::LlamaCpp)
-            && profile.head_dim >= 256
-        {
+        if matches!(hint, BackendHint::Either | BackendHint::LlamaCpp) && profile.head_dim >= 256 {
             notes.push(DiagnosticNote::warn(
                 "head_dim ≥ 256 is unusual",
                 "head dimensions of 256 or larger run more reliably on the \
@@ -293,7 +291,9 @@ mod tests {
         let mut p = baseline("mixtral");
         p.quirks.moe_experts = Some(8);
         let (_, notes) = recommend_backend(&p);
-        assert!(notes.iter().any(|n| n.message.contains("mixture-of-experts")));
+        assert!(notes
+            .iter()
+            .any(|n| n.message.contains("mixture-of-experts")));
     }
 
     #[test]

@@ -144,7 +144,10 @@ enum MetadataValue {
     /// Arrays are not materialised. We retain only the element type and length
     /// because the only piece of information we currently need from any GGUF
     /// array is `tokenizer.ggml.tokens.len()` for vocab size.
-    Array { element_type: u32, len: u64 },
+    Array {
+        element_type: u32,
+        len: u64,
+    },
 }
 
 fn read_header<R: Read>(r: &mut R) -> Result<RawHeader, ProbeError> {
@@ -455,7 +458,8 @@ mod tests {
             self.write_string(key);
             self.bytes.extend_from_slice(&9u32.to_le_bytes()); // ARRAY
             self.bytes.extend_from_slice(&8u32.to_le_bytes()); // element type STRING
-            self.bytes.extend_from_slice(&(items.len() as u64).to_le_bytes());
+            self.bytes
+                .extend_from_slice(&(items.len() as u64).to_le_bytes());
             for item in items {
                 self.write_string(item);
             }

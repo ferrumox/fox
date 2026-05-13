@@ -129,13 +129,8 @@ impl CandleRunner {
                     .map_err(|e| RunnerError::Candle(e.to_string()))?,
             ),
             RunnerKind::Qwen3Moe => Self::Qwen3Moe(
-                quantized_qwen3_moe::GGUFQWenMoE::from_gguf(
-                    content,
-                    &mut file,
-                    device,
-                    DType::F32,
-                )
-                .map_err(|e| RunnerError::Candle(e.to_string()))?,
+                quantized_qwen3_moe::GGUFQWenMoE::from_gguf(content, &mut file, device, DType::F32)
+                    .map_err(|e| RunnerError::Candle(e.to_string()))?,
             ),
             RunnerKind::Gemma3 => Self::Gemma3(
                 quantized_gemma3::ModelWeights::from_gguf(content, &mut file, device)
@@ -223,7 +218,10 @@ mod tests {
 
     #[test]
     fn maps_llama_family_to_llama_runner() {
-        assert_eq!(CandleRunner::kind_for_arch("llama"), Some(RunnerKind::Llama));
+        assert_eq!(
+            CandleRunner::kind_for_arch("llama"),
+            Some(RunnerKind::Llama)
+        );
         assert_eq!(
             CandleRunner::kind_for_arch("LlaMa"),
             Some(RunnerKind::Llama)

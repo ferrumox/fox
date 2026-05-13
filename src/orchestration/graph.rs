@@ -134,11 +134,7 @@ mod tests {
 
     #[test]
     fn linear_chain_orders_in_dependency_order() {
-        let stages = vec![
-            ("c", deps(&["b"])),
-            ("a", deps(&[])),
-            ("b", deps(&["a"])),
-        ];
+        let stages = vec![("c", deps(&["b"])), ("a", deps(&[])), ("b", deps(&["a"]))];
         let order = topological_order(&stages).unwrap();
         let pos = |id: &str| order.iter().position(|s| s == id).unwrap();
         assert!(pos("a") < pos("b"));

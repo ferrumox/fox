@@ -48,7 +48,8 @@ pub async fn chat_auto_completions(
     }
     if req.stream {
         return Err(AppError::BadRequest(
-            "/v1/chat/completions/auto does not support stream=true (use /v1/chat/completions)".into(),
+            "/v1/chat/completions/auto does not support stream=true (use /v1/chat/completions)"
+                .into(),
         )
         .into_response());
     }
@@ -135,7 +136,11 @@ pub async fn chat_auto_completions(
                 .to_string()
         };
 
-        let content_opt = if content.is_empty() { None } else { Some(content.clone()) };
+        let content_opt = if content.is_empty() {
+            None
+        } else {
+            Some(content.clone())
+        };
         last_content = content_opt.clone();
         last_tool_calls = tool_calls.clone();
         last_finish_reason = finish_reason.clone();

@@ -19,7 +19,6 @@ pub mod tools;
 #[cfg(feature = "backend-candle")]
 pub mod candle {
     pub use crate::engine::model::candle::{
-        arch_runner, chat_template, gguf_loader, gguf_metadata, llama_arch, llama_model,
-        tokenizer,
+        arch_runner, chat_template, gguf_loader, gguf_metadata, llama_arch, llama_model, tokenizer,
     };
 }

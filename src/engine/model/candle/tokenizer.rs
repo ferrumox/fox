@@ -84,7 +84,10 @@ impl fmt::Display for TokenizerError {
         match self {
             Self::Metadata(e) => write!(f, "GGUF metadata error: {e}"),
             Self::MissingTokens => {
-                write!(f, "GGUF is missing 'tokenizer.ggml.tokens' — cannot build a vocabulary")
+                write!(
+                    f,
+                    "GGUF is missing 'tokenizer.ggml.tokens' — cannot build a vocabulary"
+                )
             }
             Self::InconsistentTypes { tokens, types } => write!(
                 f,

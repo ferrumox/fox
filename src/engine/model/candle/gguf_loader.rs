@@ -244,7 +244,8 @@ fn skip_value<R: Read + Seek>(r: &mut R, tag: u32) -> Result<(), LoaderError> {
         }
         8 => {
             let len = read_u64(r)?;
-            r.seek(SeekFrom::Current(len as i64)).map_err(LoaderError::Io)?;
+            r.seek(SeekFrom::Current(len as i64))
+                .map_err(LoaderError::Io)?;
         }
         9 => {
             let element_type = read_u32(r)?;
@@ -272,12 +273,14 @@ fn skip_array_payload<R: Read + Seek>(
     match fixed_width {
         Some(width) => {
             let bytes = width.saturating_mul(len);
-            r.seek(SeekFrom::Current(bytes as i64)).map_err(LoaderError::Io)?;
+            r.seek(SeekFrom::Current(bytes as i64))
+                .map_err(LoaderError::Io)?;
         }
         None => {
             for _ in 0..len {
                 let s_len = read_u64(r)?;
-                r.seek(SeekFrom::Current(s_len as i64)).map_err(LoaderError::Io)?;
+                r.seek(SeekFrom::Current(s_len as i64))
+                    .map_err(LoaderError::Io)?;
             }
         }
     }
@@ -399,7 +402,8 @@ mod tests {
             write_string(&mut self.kv_payload, key);
             self.kv_payload.extend_from_slice(&9u32.to_le_bytes()); // ARRAY
             self.kv_payload.extend_from_slice(&8u32.to_le_bytes()); // STRING elements
-            self.kv_payload.extend_from_slice(&(items.len() as u64).to_le_bytes());
+            self.kv_payload
+                .extend_from_slice(&(items.len() as u64).to_le_bytes());
             for item in items {
                 write_string(&mut self.kv_payload, item);
             }
@@ -407,27 +411,24 @@ mod tests {
             self
         }
 
-        fn tensor(
-            mut self,
-            name: &str,
-            dims: &[u64],
-            ggml_type: u32,
-            offset_in_data: u64,
-        ) -> Self {
+        fn tensor(mut self, name: &str, dims: &[u64], ggml_type: u32, offset_in_data: u64) -> Self {
             write_string(&mut self.tensor_payload, name);
             self.tensor_payload
                 .extend_from_slice(&(dims.len() as u32).to_le_bytes());
             for d in dims {
                 self.tensor_payload.extend_from_slice(&d.to_le_bytes());
             }
-            self.tensor_payload.extend_from_slice(&ggml_type.to_le_bytes());
-            self.tensor_payload.extend_from_slice(&offset_in_data.to_le_bytes());
+            self.tensor_payload
+                .extend_from_slice(&ggml_type.to_le_bytes());
+            self.tensor_payload
+                .extend_from_slice(&offset_in_data.to_le_bytes());
             self.tensor_count += 1;
             self
         }
 
         fn finish(self) -> Vec<u8> {
-            let mut out = Vec::with_capacity(self.kv_payload.len() + self.tensor_payload.len() + 24);
+            let mut out =
+                Vec::with_capacity(self.kv_payload.len() + self.tensor_payload.len() + 24);
             out.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
             out.extend_from_slice(&3u32.to_le_bytes()); // version
             out.extend_from_slice(&self.tensor_count.to_le_bytes());

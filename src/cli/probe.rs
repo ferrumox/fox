@@ -60,10 +60,7 @@ pub async fn run_probe(args: ProbeArgs) -> Result<()> {
             theme::print_kv_pair(&format!("  [{i}] vendor"), vendor_label(device.vendor));
             theme::print_kv_pair(&format!("  [{i}] name"), &device.name);
             if let Some(total) = device.vram_total_mib {
-                theme::print_kv_pair(
-                    &format!("  [{i}] vram total"),
-                    &format!("{} MiB", total),
-                );
+                theme::print_kv_pair(&format!("  [{i}] vram total"), &format!("{} MiB", total));
             }
             if let Some(free) = device.vram_free_mib {
                 theme::print_kv_pair(&format!("  [{i}] vram free"), &format!("{} MiB", free));

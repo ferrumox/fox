@@ -68,7 +68,10 @@ impl InferenceBackend for CandleBackend {
         _cfg: &RegistryConfig,
     ) -> Result<BackendInstance> {
         if let Some(p) = profile {
-            if !matches!(self.supports(p), Compatibility::Native | Compatibility::Workable) {
+            if !matches!(
+                self.supports(p),
+                Compatibility::Native | Compatibility::Workable
+            ) {
                 return Err(anyhow!(
                     "candle backend declined to instantiate '{}'; the router \
                      should have picked another backend",
@@ -142,7 +145,13 @@ mod tests {
     fn declines_unsupported_architectures_with_explanation() {
         let backend = CandleBackend::new();
         for arch in [
-            "gemma4", "gemma2", "mistral", "qwen", "qwen2", "qwen35", "acme-unknown",
+            "gemma4",
+            "gemma2",
+            "mistral",
+            "qwen",
+            "qwen2",
+            "qwen35",
+            "acme-unknown",
         ] {
             match backend.supports(&baseline(arch)) {
                 Compatibility::Unsupported(reason) => {

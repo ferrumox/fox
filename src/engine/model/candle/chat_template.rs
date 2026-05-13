@@ -50,12 +50,15 @@ pub fn apply_chat_template(
     // message when the conversation shape is invalid. minijinja does not
     // ship that filter — provide a small shim so common templates render
     // without surprises.
-    env.add_function("raise_exception", |msg: String| -> Result<Value, minijinja::Error> {
-        Err(minijinja::Error::new(
-            minijinja::ErrorKind::InvalidOperation,
-            msg,
-        ))
-    });
+    env.add_function(
+        "raise_exception",
+        |msg: String| -> Result<Value, minijinja::Error> {
+            Err(minijinja::Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                msg,
+            ))
+        },
+    );
     env.add_template("chat", template_str)
         .map_err(|e| TemplateError::Render(e.to_string()))?;
     let tmpl = env
@@ -133,7 +136,8 @@ mod tests {
 
     #[test]
     fn injects_bos_and_eos_tokens() {
-        let template = "{{ bos_token }}{% for m in messages %}{{ m.content }}{{ eos_token }}{% endfor %}";
+        let template =
+            "{{ bos_token }}{% for m in messages %}{{ m.content }}{{ eos_token }}{% endfor %}";
         let vocab = vocab_with_template(template);
         let messages = vec![("user".to_string(), "hi".to_string())];
         let out = apply_chat_template(&vocab, &messages, false).unwrap();

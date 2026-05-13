@@ -18,7 +18,9 @@ use ferrumox::candle::tokenizer::{load_vocab, ByteBpeTokenizer};
 
 fn model_path(filename: &str) -> PathBuf {
     let home = std::env::var("HOME").expect("HOME must be set");
-    let p = PathBuf::from(home).join(".cache/ferrumox/models").join(filename);
+    let p = PathBuf::from(home)
+        .join(".cache/ferrumox/models")
+        .join(filename);
     assert!(
         p.exists(),
         "Test fixture missing: {}. Download the model first or skip with --ignored.",
@@ -29,12 +31,17 @@ fn model_path(filename: &str) -> PathBuf {
 
 /// Argmax helper used by every smoke test below.
 fn greedy(logits: &[f32]) -> i32 {
-    let (idx, _) = logits
-        .iter()
-        .enumerate()
-        .fold((0usize, f32::NEG_INFINITY), |(bi, bs), (i, &s)| {
-            if s > bs { (i, s) } else { (bi, bs) }
-        });
+    let (idx, _) =
+        logits
+            .iter()
+            .enumerate()
+            .fold((0usize, f32::NEG_INFINITY), |(bi, bs), (i, &s)| {
+                if s > bs {
+                    (i, s)
+                } else {
+                    (bi, bs)
+                }
+            });
     idx as i32
 }
 
@@ -83,9 +90,7 @@ fn forward_at_position_zero_resets_the_kv_cache() {
     }
 
     // Now reset by forwarding `prompt` again at position 0.
-    let logits_after_reset = arch
-        .forward(&prompt, 0)
-        .expect("reset forward runs");
+    let logits_after_reset = arch.forward(&prompt, 0).expect("reset forward runs");
     let argmax_after_reset = greedy(&logits_after_reset);
     eprintln!("after reset: argmax={argmax_after_reset}");
 
@@ -124,8 +129,7 @@ fn forwards_a_single_prompt_and_picks_a_valid_token() {
 
     // Forward on CPU so the test is deterministic and does not require CUDA
     // to be online for CI.
-    let arch = LlamaArch::from_gguf(&path, "llama", Device::Cpu)
-        .expect("model loads on CPU");
+    let arch = LlamaArch::from_gguf(&path, "llama", Device::Cpu).expect("model loads on CPU");
 
     let prompt_ids = tok.encode("Hello");
     assert!(!prompt_ids.is_empty(), "encoder produced zero tokens");
@@ -142,16 +146,17 @@ fn forwards_a_single_prompt_and_picks_a_valid_token() {
     // Pick greedy. The argmax is deterministic on CPU; we don't pin it to a
     // specific token because the choice depends on the model revision, but
     // we do require it to be a valid id.
-    let (best_id, best_score) = logits
-        .iter()
-        .enumerate()
-        .fold((0usize, f32::NEG_INFINITY), |(bi, bs), (i, &s)| {
-            if s > bs {
-                (i, s)
-            } else {
-                (bi, bs)
-            }
-        });
+    let (best_id, best_score) =
+        logits
+            .iter()
+            .enumerate()
+            .fold((0usize, f32::NEG_INFINITY), |(bi, bs), (i, &s)| {
+                if s > bs {
+                    (i, s)
+                } else {
+                    (bi, bs)
+                }
+            });
     assert!(best_id < vocab_size, "argmax index in range");
     assert!(best_score.is_finite(), "logit score is finite");
 

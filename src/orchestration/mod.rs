@@ -152,11 +152,7 @@ impl PipelineRunner {
     /// the running `outputs` map.
     pub async fn run(&self, pipeline: &Pipeline) -> Result<PipelineRun, PipelineError> {
         let order = self.plan(pipeline)?;
-        let by_id: HashMap<&str, &Stage> = pipeline
-            .stages
-            .iter()
-            .map(|s| (s.id(), s))
-            .collect();
+        let by_id: HashMap<&str, &Stage> = pipeline.stages.iter().map(|s| (s.id(), s)).collect();
 
         let mut outputs: HashMap<String, serde_json::Value> = HashMap::new();
         for stage_id in &order {
@@ -180,21 +176,20 @@ impl PipelineRunner {
         outputs: &HashMap<String, serde_json::Value>,
     ) -> Result<serde_json::Value, PipelineError> {
         match stage {
-            Stage::Transform(t) => {
-                interpolation::substitute(&t.value, outputs).map_err(|source| {
-                    PipelineError::Interpolation {
-                        stage: t.id.clone(),
-                        source,
-                    }
-                })
-            }
+            Stage::Transform(t) => interpolation::substitute(&t.value, outputs).map_err(|source| {
+                PipelineError::Interpolation {
+                    stage: t.id.clone(),
+                    source,
+                }
+            }),
             Stage::Tool(t) => {
-                let resolved_args = interpolation::substitute(&t.args, outputs).map_err(
-                    |source| PipelineError::Interpolation {
-                        stage: t.id.clone(),
-                        source,
-                    },
-                )?;
+                let resolved_args =
+                    interpolation::substitute(&t.args, outputs).map_err(|source| {
+                        PipelineError::Interpolation {
+                            stage: t.id.clone(),
+                            source,
+                        }
+                    })?;
                 let ctx = match t.max_response_bytes {
                     Some(n) => ToolCtx {
                         max_response_bytes: n,
@@ -221,11 +216,7 @@ fn build_dependency_graph(
 ) -> Result<Vec<(String, HashSet<String>)>, PipelineError> {
     let mut nodes = Vec::with_capacity(pipeline.stages.len());
     for stage in &pipeline.stages {
-        let mut deps: HashSet<String> = stage
-            .declared_deps()
-            .iter()
-            .cloned()
-            .collect();
+        let mut deps: HashSet<String> = stage.declared_deps().iter().cloned().collect();
         let implicit = interpolation::referenced_stages(stage.args_value()).map_err(|source| {
             PipelineError::Interpolation {
                 stage: stage.id().to_string(),
@@ -321,7 +312,10 @@ mod tests {
         );
         let runner = PipelineRunner::new(Arc::new(default_board()));
         let err = runner.run(&p).await.unwrap_err();
-        assert!(matches!(err, PipelineError::Graph(graph::GraphError::Cycle(_))));
+        assert!(matches!(
+            err,
+            PipelineError::Graph(graph::GraphError::Cycle(_))
+        ));
     }
 
     #[tokio::test]

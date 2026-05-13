@@ -17,7 +17,9 @@ use ferrumox::candle::tokenizer::{load_vocab, ByteBpeTokenizer};
 
 fn model_path(filename: &str) -> PathBuf {
     let home = std::env::var("HOME").expect("HOME must be set");
-    let p = PathBuf::from(home).join(".cache/ferrumox/models").join(filename);
+    let p = PathBuf::from(home)
+        .join(".cache/ferrumox/models")
+        .join(filename);
     assert!(
         p.exists(),
         "Test fixture missing: {}. Download the model first or skip with --ignored.",
@@ -29,8 +31,8 @@ fn model_path(filename: &str) -> PathBuf {
 #[test]
 #[ignore = "requires Llama-3.2-3B-Instruct GGUF on disk; run with --ignored"]
 fn loads_llama_3_2_vocab_with_expected_size() {
-    let vocab = load_vocab(&model_path("Llama-3.2-3B-Instruct-Q4_K_M.gguf"))
-        .expect("vocab should load");
+    let vocab =
+        load_vocab(&model_path("Llama-3.2-3B-Instruct-Q4_K_M.gguf")).expect("vocab should load");
     assert_eq!(vocab.size(), 128_256, "Llama 3.2 vocab is 128_256 tokens");
     assert!(!vocab.merges.is_empty(), "Llama 3 ships BPE merges");
     assert!(
@@ -51,8 +53,8 @@ fn loads_llama_3_2_vocab_with_expected_size() {
 #[test]
 #[ignore = "requires Llama-3.2-3B-Instruct GGUF on disk"]
 fn round_trips_plain_english_through_byte_bpe() {
-    let vocab = load_vocab(&model_path("Llama-3.2-3B-Instruct-Q4_K_M.gguf"))
-        .expect("vocab should load");
+    let vocab =
+        load_vocab(&model_path("Llama-3.2-3B-Instruct-Q4_K_M.gguf")).expect("vocab should load");
     let tok = ByteBpeTokenizer::new(vocab);
     for case in [
         "Hello, world!",
@@ -60,10 +62,7 @@ fn round_trips_plain_english_through_byte_bpe() {
         "function add(a, b) { return a + b; }",
     ] {
         let ids = tok.encode(case);
-        assert!(
-            !ids.is_empty(),
-            "encoder produced zero tokens for '{case}'"
-        );
+        assert!(!ids.is_empty(), "encoder produced zero tokens for '{case}'");
         let back = tok.decode(&ids);
         assert_eq!(back, case, "round-trip diverged for '{case}'");
     }
@@ -72,8 +71,8 @@ fn round_trips_plain_english_through_byte_bpe() {
 #[test]
 #[ignore = "requires Llama-3.2-3B-Instruct GGUF on disk"]
 fn round_trips_unicode_through_byte_bpe() {
-    let vocab = load_vocab(&model_path("Llama-3.2-3B-Instruct-Q4_K_M.gguf"))
-        .expect("vocab should load");
+    let vocab =
+        load_vocab(&model_path("Llama-3.2-3B-Instruct-Q4_K_M.gguf")).expect("vocab should load");
     let tok = ByteBpeTokenizer::new(vocab);
     for case in ["¡Hola, mundo!", "λx.x²", "🦊 fox"] {
         let ids = tok.encode(case);
@@ -85,8 +84,7 @@ fn round_trips_unicode_through_byte_bpe() {
 #[test]
 #[ignore = "requires Gemma-4-E2B GGUF on disk"]
 fn loads_gemma_4_vocab_and_round_trips() {
-    let vocab = load_vocab(&model_path("gemma-4-E2B-it-Q4_K_M.gguf"))
-        .expect("vocab should load");
+    let vocab = load_vocab(&model_path("gemma-4-E2B-it-Q4_K_M.gguf")).expect("vocab should load");
     // Gemma 3/4 use a 256k SentencePiece-derived vocab exposed as BPE in GGUF.
     assert_eq!(vocab.size(), 262_144, "Gemma 4 vocab is 262_144 tokens");
     assert!(
@@ -109,8 +107,7 @@ fn loads_gemma_4_vocab_and_round_trips() {
 #[test]
 #[ignore = "requires Qwen3.5-2B GGUF on disk"]
 fn loads_qwen_3_5_vocab_and_round_trips() {
-    let vocab =
-        load_vocab(&model_path("Qwen3.5-2B-Q4_K_M.gguf")).expect("vocab should load");
+    let vocab = load_vocab(&model_path("Qwen3.5-2B-Q4_K_M.gguf")).expect("vocab should load");
     assert!(vocab.size() > 100_000, "Qwen 3.x vocab is ≥100k tokens");
     assert!(
         vocab.specials.eos.is_some(),
@@ -128,8 +125,8 @@ fn loads_qwen_3_5_vocab_and_round_trips() {
 #[test]
 #[ignore = "requires Llama-3.2-3B-Instruct GGUF on disk"]
 fn renders_chat_template_with_assistant_marker() {
-    let vocab = load_vocab(&model_path("Llama-3.2-3B-Instruct-Q4_K_M.gguf"))
-        .expect("vocab should load");
+    let vocab =
+        load_vocab(&model_path("Llama-3.2-3B-Instruct-Q4_K_M.gguf")).expect("vocab should load");
     let messages = vec![
         ("system".to_string(), "You are helpful.".to_string()),
         ("user".to_string(), "Say only OK.".to_string()),

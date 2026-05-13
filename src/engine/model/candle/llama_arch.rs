@@ -73,11 +73,7 @@ impl LlamaArch {
     /// architecture is unknown to the backend the call fails with
     /// [`ArchError::UnsupportedArch`] — caller is expected to route around
     /// the candle backend in that case.
-    pub fn from_gguf(
-        path: &Path,
-        architecture: &str,
-        device: Device,
-    ) -> Result<Self, ArchError> {
+    pub fn from_gguf(path: &Path, architecture: &str, device: Device) -> Result<Self, ArchError> {
         let runner = CandleRunner::from_gguf(path, architecture, &device)?;
         let label = runner.label();
         Ok(Self {

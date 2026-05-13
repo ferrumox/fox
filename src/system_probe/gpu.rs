@@ -76,7 +76,9 @@ impl GpuProbe {
     }
 
     pub fn primary_vendor(&self) -> GpuVendor {
-        self.primary().map(|d| d.vendor).unwrap_or(GpuVendor::Unknown)
+        self.primary()
+            .map(|d| d.vendor)
+            .unwrap_or(GpuVendor::Unknown)
     }
 
     pub fn vendors(&self) -> Vec<GpuVendor> {

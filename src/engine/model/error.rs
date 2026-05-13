@@ -75,7 +75,10 @@ impl fmt::Display for LoadError {
         match self {
             Self::OutOfMemory => write!(f, "model loader ran out of memory"),
             Self::ContextTooLarge => {
-                write!(f, "requested context length exceeds the model or device limit")
+                write!(
+                    f,
+                    "requested context length exceeds the model or device limit"
+                )
             }
             Self::ArchUnsupported => {
                 write!(f, "the backend declined to instantiate this architecture")

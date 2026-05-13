@@ -28,10 +28,9 @@ impl std::fmt::Display for InterpolationError {
         match self {
             Self::UnterminatedPlaceholder => write!(f, "unterminated `{{{{` placeholder"),
             Self::UnknownStage(s) => write!(f, "stage '{s}' has no output to interpolate"),
-            Self::UnresolvedPath { stage, path } => write!(
-                f,
-                "stage '{stage}' output does not contain path '{path}'"
-            ),
+            Self::UnresolvedPath { stage, path } => {
+                write!(f, "stage '{stage}' output does not contain path '{path}'")
+            }
         }
     }
 }
@@ -73,10 +72,7 @@ pub fn referenced_stages(value: &serde_json::Value) -> Result<HashSet<String>, I
     Ok(acc)
 }
 
-fn walk(
-    value: &serde_json::Value,
-    acc: &mut HashSet<String>,
-) -> Result<(), InterpolationError> {
+fn walk(value: &serde_json::Value, acc: &mut HashSet<String>) -> Result<(), InterpolationError> {
     match value {
         serde_json::Value::String(s) => {
             for placeholder in scan(s)? {
@@ -176,8 +172,8 @@ fn scan(s: &str) -> Result<Vec<Placeholder>, InterpolationError> {
     while i + 1 < bytes.len() {
         if bytes[i] == b'{' && bytes[i + 1] == b'{' {
             let body_start = i + 2;
-            let close = find_close(bytes, body_start)
-                .ok_or(InterpolationError::UnterminatedPlaceholder)?;
+            let close =
+                find_close(bytes, body_start).ok_or(InterpolationError::UnterminatedPlaceholder)?;
             let raw = &s[body_start..close];
             let trimmed = raw.trim();
             let mut parts = trimmed.split('.');

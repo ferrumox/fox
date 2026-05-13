@@ -16,11 +16,10 @@ impl ToolHandler for HttpFetch {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "http_fetch".into(),
-            description:
-                "GET an http(s) URL and return its status code and body. \
+            description: "GET an http(s) URL and return its status code and body. \
                  The body is decoded as UTF-8 (lossy when the response is binary). \
                  Bounded by the caller-supplied `max_response_bytes` budget."
-                    .into(),
+                .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

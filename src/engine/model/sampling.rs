@@ -31,10 +31,7 @@ pub(crate) fn apply_repetition_penalty(logits: &mut [f32], token_ids: &[i32], pe
 /// suppresses it (`-100` ≈ ban). Out-of-range token ids are silently
 /// ignored so a request that targets a token from a different vocabulary
 /// can't crash the sampler.
-pub(crate) fn apply_logit_bias(
-    logits: &mut [f32],
-    bias: &std::collections::HashMap<i32, f32>,
-) {
+pub(crate) fn apply_logit_bias(logits: &mut [f32], bias: &std::collections::HashMap<i32, f32>) {
     for (&tid, &b) in bias.iter() {
         if tid >= 0 && (tid as usize) < logits.len() {
             logits[tid as usize] += b;
@@ -457,8 +454,8 @@ mod tests {
             generated_ids: &[],
             seed: Some(42),
             token_count: 0,
-                logit_bias: None,
-                dynamic_temp: None,
+            logit_bias: None,
+            dynamic_temp: None,
         };
         assert_eq!(
             sample_token(&logits, params()),
@@ -487,8 +484,8 @@ mod tests {
                     generated_ids: &[],
                     seed: Some(seed),
                     token_count: 0,
-                logit_bias: None,
-                dynamic_temp: None,
+                    logit_bias: None,
+                    dynamic_temp: None,
                 },
             );
             seen.insert(t);
@@ -520,8 +517,8 @@ mod tests {
                     generated_ids: &[],
                     seed: Some(seed),
                     token_count: 0,
-                logit_bias: None,
-                dynamic_temp: None,
+                    logit_bias: None,
+                    dynamic_temp: None,
                 },
             );
             assert_eq!(
