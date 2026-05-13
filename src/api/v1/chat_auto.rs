@@ -304,7 +304,6 @@ fn _force_use_status_code() -> StatusCode {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::api::test_helpers::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode as Code};
