@@ -115,7 +115,7 @@ struct ModelInfo {
     vocab_size: usize,
 
     // memory model — the key abstraction for "maximum scope"
-    kv_model: KvModel,          // PositionalKv { per_token_bytes_fn } | LatentKv | RecurrentState | None
+    kv_model: KvModel,          // memory CLASS only (Positional | Latent | Recurrent | None) — NOT a sizing formula; governs paging/prefix decisions. Actual size comes from llama.cpp (§4.2)
 
     // capabilities — from model, not literals
     has_kv_cache: bool,         // false for recurrent → disables paging/prefix/seq_cp
@@ -132,32 +132,52 @@ struct ModelInfo {
 Principles:
 - **Prefer the llama.cpp API; fall back to GGUF metadata; never invent.** Where neither
   is available, record `Unknown` and let callers decide — do not silently guess.
-- `head_dim`, `embedding_dim`, and `bytes_per_token` have **exactly one** definition
-  here. The current Gemma `head_dim` fix and the f16/quantized KV inconsistency both
-  dissolve into this.
+- `head_dim`, `embedding_dim` and friends have **exactly one** definition here, read from
+  metadata / the llama.cpp API (never derived by formula). **KV memory sizing is
+  deliberately NOT one of these fields — fox does not compute it at all; see §4.2.**
 
-### 4.2 The memory model is per-architecture (`KvModel`)
+### 4.2 fox does not size the KV cache — it asks llama.cpp
 
-This is the load-bearing change for maximum scope. Today fox computes a single
-`bytes_per_token = n_head_kv * head_dim * … ` and uses it to size both llama.cpp's
-`n_ctx` and its own paged block pool. That formula is **only valid for positional KV
-(dense/GQA/MoE)**. It is wrong for:
+**The single most load-bearing rule of the rework.** Today fox computes
+`bytes_per_token = n_head_kv * head_dim * n_layer * …` and uses it to size both llama.cpp's
+`n_ctx` and its own paged block pool. **There is no formula that is correct across modern
+architectures** — and, crucially, this is *not* limited to exotic models. Even a mainstream
+dense model breaks it.
 
-- **MLA**: KV is a compressed latent; real per-token cost is far smaller → fox
-  over-reserves, under-provisions context, or mismatches llama.cpp's real `n_ctx`.
-- **Recurrent**: there is no per-token KV at all; memory is fixed state-space size →
-  the formula is meaningless and the paged KV cache / prefix cache do not apply.
+Evidence — `gemma-4-E2B`, read straight from its GGUF metadata (verified 2026-06-29):
 
-Design:
-- `KvModel::PositionalKv` keeps the existing (now type-correct) `kv_type_bytes`-based
-  formula — the only class where fox may size memory itself.
-- `KvModel::LatentKv` and `RecurrentState`: **do not self-size.** Defer to llama.cpp:
-  pick `n_ctx` from the trained/user limit and let llama.cpp allocate; fox's block pool
-  either tracks llama.cpp's actual capacity or is bypassed. Cross-check against
-  `llama_state_get_size` / context introspection rather than a hand formula.
-- Where fox and llama.cpp must agree on capacity, make llama.cpp the authority and have
-  fox's bookkeeping follow, not lead. (Prevents "fox thinks there's room, llama_decode
-  returns nonzero" hangs/crashes under load.)
+```
+gemma4.attention.key_length       = 512   (global-attention layers)
+gemma4.attention.key_length_swa   = 256   (sliding-window layers — a DIFFERENT head_dim!)
+gemma4.attention.shared_kv_layers = 20    (KV shared across 20 of 35 layers)
+gemma4.attention.head_count_kv    = 1     (MQA)
+gemma4.feed_forward_length        = [array of 35]   (per-layer FFN sizes)
+```
+
+There is no single `head_dim` (it is 512 *and* 256, depending on layer type), and the real KV
+footprint is far smaller than `n_head_kv · head_dim · n_layer · tokens` because 20 layers
+share their KV. Any hand-rolled formula over-counts wildly. The same is true for MLA
+(compressed latent KV), recurrent/hybrid (state-space, no per-token KV), and whatever ships
+next. Reading the GGUF tells you the formula is wrong — it does **not** hand you a corrected
+formula, because combining these keys correctly *is the model's forward-pass logic*.
+
+**Design — fox never computes KV size, for any architecture:**
+
+- llama.cpp owns the KV/state memory. Pick `n_ctx` from the user/trained limit, create the
+  context, and **read back the actual capacity llama.cpp allocated** (context introspection /
+  `llama_state_get_size` / memory APIs) instead of estimating it from dims.
+- fox's paged block pool **follows** llama.cpp's real capacity — it never leads. This
+  eliminates the whole "fox thinks there's room, `llama_decode` returns nonzero" class of
+  hangs/crashes under load.
+- `has_kv_cache = false` (recurrent/hybrid) → disable paging / prefix cache / seq-copy entirely.
+- There is **no** `KvModel::PositionalKv`-with-our-own-formula case. The formula is deleted
+  for everyone; the per-architecture branching collapses into "ask llama.cpp."
+
+> **The lesson Gemma 4 taught us:** reading the GGUF is *necessary but not sufficient*. fox
+> reads the file for **identity and formatting** (arch, template, special tokens) and
+> delegates **sizing and the forward pass** to llama.cpp — the one component that already
+> parses every key and knows how to combine them. "Derive, don't branch; and delegate the
+> math you can't own."
 
 ### 4.3 Capabilities from the model, not literals
 
@@ -170,9 +190,13 @@ Design:
   the model's reasoning token ids (look up `<think>`/`</think>` or arch-specific markers
   in the vocab and store the ids). The output filter matches ids, not substrings, so it
   is robust to tokenization. If a model has no such tokens → `ReasoningSupport::None`.
-- **Chat template**: keep llama.cpp's builtin template as the primary; the named
-  fallback list stays but is data, not control flow. Record which path was used in
-  `ModelInfo.chat_template` so `fox probe` can show it.
+- **Chat template**: **HIGH PRIORITY — see [`STATUS.md`](../../STATUS.md) finding
+  (2026-06-29).** fox currently applies templates via llama.cpp's legacy C engine, which
+  does *not* execute Jinja: the model's real template (Gemma 4 `enable_thinking`, Qwen3,
+  tool-format macros) is discarded for a simplified built-in format, so **thinking and
+  native tool-calling are lost**. The rework must adopt a real Jinja engine (llama.cpp
+  `minja`/`--jinja`, or `minijinja` in Rust) and thread `enable_thinking`/tools. Record
+  which engine/template path was used in `ModelInfo.chat_template` so `fox probe` shows it.
 - **SPM vs BPE**: detect once (`is_spm`); only then apply the `U+2581 → space`
   substitution. Avoids corrupting BPE output that legitimately contains that codepoint.
 
@@ -210,9 +234,9 @@ The net is the precondition for touching anything. Three layers:
    These run in CI and are the contract behind the support matrix.
 
 3. **Load-time invariant assertions** — cheap self-checks that turn silent corruption
-   into a clear error: e.g. for `PositionalKv`, assert fox's computed block capacity is
-   ≤ llama.cpp's actual `n_ctx`; assert `embedding_dim == n_embd`; assert
-   `head_dim * n_head` relationship only where it should hold.
+   into a clear error: assert fox's paged block pool capacity matches the KV capacity
+   **reported by llama.cpp** (never a hand formula); assert `embedding_dim == n_embd`; for
+   `has_kv_cache == false` assert paging/prefix are disabled.
 
 CI matrix: at minimum a CPU job that runs the golden suite on the smallest GGUF of each
 class. Document how to add a model to the matrix (it should be: drop a fixture + one
@@ -229,9 +253,10 @@ table row).
 - **P1 — Introduce `ModelInfo`** and route the duplicated numbers (head_dim,
   bytes_per_token, embedding_dim) through it. Reabsorb the existing Gemma/flash-attn
   patches here. Golden tests must stay green for dense/GQA/Gemma.
-- **P2 — `KvModel` per class.** Add MLA + recurrent handling (defer-to-llama.cpp sizing,
-  invariant cross-checks). Add their golden fixtures. This is where "maximum scope" is
-  actually earned.
+- **P2 — Delete fox's KV sizing; read it from llama.cpp** (§4.2) for *all* architectures —
+  not just MLA/recurrent. Gemma 4 (SWA + shared-KV) proves mainstream dense models need this
+  too. fox's block pool follows llama.cpp's reported capacity. Add MLA/recurrent golden
+  fixtures. This is where "maximum scope" is actually earned.
 - **P3 — Capabilities from model.** Move control/think/template/SPM off literals onto
   `ModelInfo`. Golden tests for stop-sequence and thinking behavior per class.
 - **P4 — API consistency + footguns.** Decide sampling-default policy; validate `turbo*`
@@ -263,7 +288,7 @@ Each phase is shippable on its own and gated by the net from P0.
 | # | Issue | Location | Resolved by |
 |---|-------|----------|-------------|
 | 1 | `head_dim = n_embd/n_head` wrong (Gemma/MLA) | `engine/model/llama_cpp/mod.rs` (`resolve_head_dim`, already patched to read metadata) | §4.1 `ModelInfo.head_dim` |
-| 2 | KV `bytes_per_token` hardcodes f16 in `load()` | `engine/model/llama_cpp/mod.rs` (load path) | §4.2 `KvModel::PositionalKv` |
+| 2 | KV `bytes_per_token` hardcodes f16 in `load()` (and no single formula is correct anyway — Gemma 4 SWA/shared-KV) | `engine/model/llama_cpp/mod.rs` (load path) | §4.2 (delete the formula; read KV size from llama.cpp) |
 | 3 | `embedding_dim = num_heads*head_dim` | `engine/model/llama_cpp/batch.rs`, `mod.rs` | §4.1 (`== n_embd`) + P3 invariant |
 | 4 | Flash-attn forced ENABLED (Gemma softcap garbage) | `mod.rs` (already patched to AUTO) | §3 Gemma row, validated by golden test |
 | 5 | Hardcoded control patterns | `engine/output_filter.rs` | §4.3 control/EOG from model |

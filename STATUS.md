@@ -75,7 +75,7 @@ to confirm are marked ❓.
 |---|---------|-------|
 | ✅ | OpenAI: `/v1/chat/completions` (SSE + non-stream), `/v1/completions`, `/v1/models`, `/v1/embeddings`, `/health`, `/metrics` | |
 | ✅ | Ollama: `/api/chat`, `/api/generate`, `/api/embed`, `/api/tags`, `/api/show`, `/api/ps`, `/api/pull`, `/api/delete`, `/api/copy`, `/api/create`, `/api/version`, load/unload | |
-| ✅ | GGUF chat template via `apply_chat_template` + named-template fallback | |
+| ⚠️ | GGUF chat template via `apply_chat_template` | **legacy llama.cpp engine — does NOT run Jinja** (see finding below); the model's real template is replaced by a simplified built-in format |
 | ⚠️ | Fallback template `"{role}: {content}"` when none present | may not match what the model expects |
 | ❌ | Sampling defaults diverge between APIs | OpenAI `top_k=0, rep=1.0` vs Ollama `top_k=40, rep=1.1` → same request, different output by endpoint |
 | ✅ | Optional Bearer auth (`FOX_API_KEY`), permissive CORS, OpenAI-style error mapping | |
@@ -84,9 +84,9 @@ to confirm are marked ❓.
 
 | | Feature | Notes |
 |---|---------|-------|
-| ⚠️ | Tool/function calling | prompt-based; parses `{"name","arguments"}` / `{"tool_calls":[…]}`; no enforcement; unknown tool → treated as text; own `[tool_call: …]` wire format |
+| ⚠️ | Tool/function calling | prompt-based; parses `{"name","arguments"}` / `{"tool_calls":[…]}`; no enforcement; unknown tool → treated as text; own `[tool_call: …]` wire format — **root cause: the model's native tool format (in its Jinja template) is discarded; see finding below** |
 | ⚠️ | JSON mode / structured output | prompt instruction only; no validation/grammar — best-effort |
-| ⚠️ | Thinking / `--show-thinking` | hides `<think>` block, `max_thinking_chars` budget; depends on the fragile detection above |
+| ⚠️ | Thinking / `--show-thinking` | hides `<think>` block, `max_thinking_chars` budget; fragile detection (literal `<think>`) **misses Gemma 4's `<|think|>`**, and the Jinja `enable_thinking` toggle is never executed — see finding below |
 | ❌ | Vision / multimodal | image blocks silently dropped, no warning (`api/types/v1.rs`) |
 | ⚠️ | Embeddings | implemented, but the `embedding_dim` bug → wrong dimension/values on GQA |
 
@@ -123,6 +123,66 @@ to confirm are marked ❓.
 
 ---
 
+## Finding (2026-06-29): chat templates are not executed — no Jinja engine
+
+fox applies chat templates through llama.cpp's **legacy C template engine**, which does
+**not** run Jinja. The model's real template is detected by substring and replaced with a
+hardcoded simplified format. Consequence: **thinking mode and native tool-calling are lost**
+for any model whose behavior lives in its Jinja template (Gemma 4, Qwen3, …).
+
+Verified on **Gemma 4 E2B** + pinned llama.cpp **`bc05a68`**:
+
+- Gemma 4's GGUF ships a full Jinja template — `enable_thinking` toggle (×4), `<|think|>`
+  token, tool-formatting macros.
+- `apply_chat_template_impl` (`src/engine/model/llama_cpp/vocab.rs:144`) passes the template
+  string to `llama_chat_apply_template`.
+- That C API → `llm_chat_apply_template` (`vendor/llama.cpp/src/llama-chat.cpp:237`); **no
+  `minja` exists in this commit**.
+- It classifies by substring: `<start_of_turn>` → `LLM_CHAT_TEMPLATE_GEMMA`
+  (`llama-chat.cpp:153`) → emits a simplified `<start_of_turn>…` format (`:372–392`) with
+  **no thinking, no tools**.
+- Also: `supports_thinking()` looks for the literal `<think>`, missing Gemma 4's
+  `<|think|>` → reports `thinking:false`.
+- Empirically: fox loaded gemma-4-E2B and answered coherently, but with `thinking:false`
+  and no `<|think|>` ever emitted (the simplified template never enables it).
+
+This is a **single root cause** behind two ⚠️ rows above (tool calling, thinking), and it
+degrades fidelity for every model whose real behavior needs Jinja — so it ranks **above**
+feature gaps like vision.
+
+**Fix (architectural — belongs in the rework):** adopt a real Jinja engine — either bump
+llama.cpp and use its `minja` + `common_chat_*`/`--jinja` path, or render templates in Rust
+with `minijinja`, threading `enable_thinking`/tools — and detect the model's actual thinking
+token (`<|think|>` vs `<think>`).
+
+### Experiment (2026-06-29): minijinja + `enable_thinking` validates the fix
+
+A standalone test confirmed the fix path end-to-end on the target machine (CPU,
+`gemma-4-E2B`):
+
+1. Extracted Gemma 4's real Jinja chat template from the GGUF.
+2. Rendered it with **minijinja** (+ `minijinja-contrib` `pycompat`, needed for the template's
+   `.get()` calls), passing `enable_thinking=true` → produced the correct
+   `<|turn>system\n<|think|>\n…<|turn>model` prompt. With `enable_thinking=false` the
+   `<|think|>` block is absent.
+3. Temporarily patched fox to tokenize with `parse_special=true` (so `<|think|>` etc. encode as
+   single control tokens, not literal text — confirmed: prompt token count dropped, `<|think|>`
+   became 1 token) and fed the rendered prompt to `/v1/completions`.
+
+**Result:** on a non-trivial problem (relative-speed word problem), Gemma 4 produced its
+**native reasoning trace** in the `<|channel>thought … <channel|>` channel — thinking
+activated. On trivial prompts or with `enable_thinking=false`, no thinking. The
+`parse_special` patch was an experiment only and has been **reverted**.
+
+**Implication — the thinking fix has three parts, not one:**
+
+1. A real Jinja engine (minijinja, or llama.cpp `minja`) + thread `enable_thinking`/tools.
+2. `parse_special` for the **template-added structure** so control tokens encode correctly —
+   but *not* for user content (injection risk); the two must be tokenized separately.
+3. Output-filter detection of the model's **actual** thinking markers — Gemma 4 uses
+   `<|think|>` / `<|channel>thought`, **not** the `<think>` literal fox currently matches (so
+   today fox would also leak the reasoning channel into the normal answer).
+
 ## Known issues, by severity
 
 Mapped to the fix in the [design doc](docs/design/model-architecture-rework.md).
@@ -135,6 +195,7 @@ Mapped to the fix in the [design doc](docs/design/model-architecture-rework.md).
 | 4 | Medium | Sampling defaults diverge between APIs | API consistency §4.4 |
 | 5 | Medium | Footguns: `max_models=1`, unvalidated `turbo*`, silent multimodal drop, ignored `frequency/presence_penalty`, dead `swap_fraction` | Phase P4 |
 | 6 | Low/❓ | Prefix-cache eviction cleanup | P0 stress test (open question) |
+| 7 | High | Chat templates not executed (no Jinja) → thinking + native tool-calling lost (Gemma 4, Qwen3, …) | real Jinja engine + `parse_special` for template + real thinking-token detection — **fix path validated 2026-06-29 (3 parts), see finding + experiment above** |
 
 **Bottom line:** the serving skeleton (batching, preemption, paged KV/CoW, prefix
 caching, UTF-8/stop handling, multi-GPU, both APIs, CLI, ops) is solid. The defects
