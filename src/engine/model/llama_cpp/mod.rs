@@ -68,6 +68,47 @@ fn available_ram_bytes() -> Option<usize> {
     None
 }
 
+/// Read a GGUF metadata string by key directly from a model pointer.
+///
+/// Standalone variant of `read_meta_str` for use during `load()`, before a
+/// `LlamaCppModel` (and thus `&self`) exists. Returns `None` when the key is
+/// absent or the value cannot be decoded as UTF-8.
+#[cfg(not(fox_stub))]
+fn meta_str(model: *const ffi::llama_model, key: &str) -> Option<String> {
+    use std::ffi::CString;
+    let key_c = CString::new(key).ok()?;
+    let mut buf = vec![0u8; 256];
+    let n = unsafe {
+        ffi::llama_model_meta_val_str(
+            model,
+            key_c.as_ptr(),
+            buf.as_mut_ptr() as *mut std::os::raw::c_char,
+            buf.len(),
+        )
+    };
+    if n < 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
+/// Resolve the per-head dimension for KV cache sizing.
+///
+/// `n_embd / n_head` is WRONG for architectures that pin an explicit head
+/// dimension — notably Gemma-2/3 (head_dim = 256, independent of n_embd/n_head)
+/// and DeepSeek-V2/V3 (MLA). Such models publish the real value in the GGUF
+/// `<arch>.attention.key_length` key; using the derived value instead mis-sizes
+/// the KV cache and produces corrupt output. Prefer the metadata key, falling
+/// back to `n_embd / n_head` for architectures that omit it.
+#[cfg(not(fox_stub))]
+fn resolve_head_dim(model: *const ffi::llama_model, n_embd: usize, n_head: usize) -> usize {
+    let from_meta = meta_str(model, "general.architecture")
+        .and_then(|arch| meta_str(model, &format!("{arch}.attention.key_length")))
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&d| d > 0);
+    from_meta.unwrap_or(if n_head > 0 { n_embd / n_head } else { 128 })
+}
+
 /// Diagnose why `llama_model_load_from_file` returned null and return a
 /// human-readable error with actionable suggestions.
 #[cfg(not(fox_stub))]
@@ -302,7 +343,7 @@ impl LlamaCppModel {
         let n_head = unsafe { ffi::llama_model_n_head(model.as_ptr()) } as usize;
         let n_head_kv = unsafe { ffi::llama_model_n_head_kv(model.as_ptr()) } as usize;
         let n_embd = unsafe { ffi::llama_model_n_embd(model.as_ptr()) } as usize;
-        let head_dim = if n_head > 0 { n_embd / n_head } else { 128 };
+        let head_dim = resolve_head_dim(model.as_ptr(), n_embd, n_head);
 
         let config = ModelConfig {
             num_layers: n_layer,
@@ -349,7 +390,11 @@ impl LlamaCppModel {
         // n_batch must be at least as large as n_ctx to handle full prompts in one pass
         ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
-        ctx_params.flash_attn_type = 1; // LLAMA_FLASH_ATTN_TYPE_ENABLED
+        // AUTO (-1): let llama.cpp enable flash attention only when the active
+        // backend supports it for this model/KV type. Forcing ENABLED (1) caused
+        // decode failures and garbage output on Vulkan / some ROCm setups and with
+        // quantized KV caches — matching upstream/Ollama, which default to AUTO.
+        ctx_params.flash_attn_type = -1; // LLAMA_FLASH_ATTN_TYPE_AUTO
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;
         ctx_params.type_v = type_v as _;
@@ -424,7 +469,7 @@ impl LlamaCppModel {
         ctx_params.n_ctx = n_ctx;
         ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
-        ctx_params.flash_attn_type = 1;
+        ctx_params.flash_attn_type = -1; // LLAMA_FLASH_ATTN_TYPE_AUTO (see load())
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;
         ctx_params.type_v = type_v as _;

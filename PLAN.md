@@ -167,6 +167,11 @@ LLM inference engine in Rust, open source, with higher throughput than vLLM and 
 
 ## Future Roadmap (post-v1.0.0)
 
+> **Design doc:** [Model-architecture correctness rework](docs/design/model-architecture-rework.md) —
+> single source of truth (`ModelInfo`), per-architecture memory model, and a regression
+> net so fixes for one model family stop breaking others. Targets parity with every
+> architecture class llama.cpp supports.
+
 ### v1.1.0 — "Benchmarks & Visibility"
 **Theme:** Demonstrate publicly that ferrumox outperforms Ollama, and make it trivially easy to install on any platform. Without published data and simple installation, the performance differentiator has no credibility.
 
