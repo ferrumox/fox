@@ -87,7 +87,13 @@ fn main() {
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
         .define("LLAMA_BUILD_SERVER", "OFF")
         .define("LLAMA_BUILD_COMMON", "OFF")
-        .define("LLAMA_BUILD_WEBUI", "OFF")
+        // Upstream (post-2026-04) additions: the unified `app/` binary builds by default and
+        // needs common/build-info headers we don't generate → turn it off. The web UI was
+        // renamed LLAMA_BUILD_WEBUI → LLAMA_BUILD_UI (and can fetch a prebuilt bundle).
+        .define("LLAMA_BUILD_APP", "OFF")
+        .define("LLAMA_BUILD_UI", "OFF")
+        .define("LLAMA_USE_PREBUILT_UI", "OFF")
+        .define("LLAMA_BUILD_WEBUI", "OFF") // legacy name, harmless on newer trees
         .profile("Release");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
