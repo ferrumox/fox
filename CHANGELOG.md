@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **Vendored llama.cpp now tracks upstream** (`ggerganov/llama.cpp` @ `b9842`). Previously the
+  submodule pointed at a long-lived fork that carried the TurboQuant patches and had drifted
+  ~1,200 commits / 3 months behind upstream. Tracking upstream restores binding/library version
+  parity, lets a clean `--recurse-submodules` clone fetch the pinned commit, and unblocks newer
+  model architectures (e.g. Gemma 4) without maintaining a fork. The migration required only a
+  build-flag fix in `build.rs` (`LLAMA_BUILD_APP/UI=OFF`) — zero FFI changes.
+
+### Removed
+
+- **TurboQuant KV cache quantization** (`turbo2` / `turbo3` / `turbo4`). The fork's custom GGML
+  type IDs collided with upstream's (e.g. `Q1_0=41` vs `TURBO3_0=41`), making it impossible to
+  follow upstream while keeping TurboQuant. Compatibility with upstream llama.cpp was prioritized.
+  KV cache quantization remains available via the standard llama.cpp types `f16`, `q8_0` and
+  `q4_0`. Configs or commands referencing `turbo*` KV types must switch to one of these.
+
+---
+
 ## [1.0.0] - 2026-03-25
 
 ### Added

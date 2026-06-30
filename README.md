@@ -240,7 +240,7 @@ fox bench llama3.2 --runs 10
 
 # Benchmark KV cache quantization types side by side
 fox bench-kv llama3.2
-fox bench-kv llama3.2 --types f16,q8_0,turbo3,turbo4,turbo2 --runs 3
+fox bench-kv llama3.2 --types f16,q8_0,q4_0 --runs 3
 ```
 
 ---
@@ -282,11 +282,10 @@ fox bench-kv llama3.2 --types f16,q8_0,turbo3,turbo4,turbo2 --runs 3
 - **Prefix caching** — shared system prompts are processed once and reused across requests
 - **Continuous batching** — multiple concurrent users processed in parallel, not serialized
 - **Multi-GPU support** — automatic layer-split distribution across all GPUs; configurable via `--split-mode`, `--tensor-split`, `--main-gpu`
-- **TurboQuant KV cache** — `turbo3` (3.1 bpw, ~4.9× context), `turbo4`, `turbo2`; extends context by 4–6× with minimal quality loss
 - **MoE CPU offload** — run DeepSeek, Mixtral and other MoE models with expert layers in RAM via `--moe-cpu`
 - **Function calling** and **structured JSON output** (OpenAI spec)
 - **Request cancellation** — closing the connection immediately frees GPU memory
-- **KV cache quantization** — `f16`, `q8_0`, `q4_0`, `turbo3`, `turbo4`, `turbo2`
+- **KV cache quantization** — `f16`, `q8_0`, `q4_0`
 - **CORS** — permissive headers on all routes; web apps can call the API directly
 - **API key authentication** — optional `FOX_API_KEY` for access control
 - **Prometheus metrics** — latency, throughput, KV cache usage out of the box
@@ -309,7 +308,7 @@ All flags can also be set via environment variable or `~/.config/ferrumox/config
 | `--keep-alive-secs` | `FOX_KEEP_ALIVE_SECS` | `300` | Evict idle models after N seconds (0 = never) |
 | `--max-context-len` | `FOX_MAX_CONTEXT_LEN` | auto | Context window size (auto-detects from model if omitted) |
 | `--gpu-memory-fraction` | `FOX_GPU_MEMORY_FRACTION` | `0.85` | Fraction of GPU RAM allocated to the KV cache |
-| `--type-kv` | `FOX_TYPE_KV` | `f16` | KV cache type for both K and V: `f16`, `q8_0`, `q4_0`, `turbo3`, `turbo4`, `turbo2` |
+| `--type-kv` | `FOX_TYPE_KV` | `f16` | KV cache type for both K and V: `f16`, `q8_0`, `q4_0` |
 | `--type-k` | `FOX_TYPE_K` | — | Override K cache type independently (same values as `--type-kv`) |
 | `--type-v` | `FOX_TYPE_V` | — | Override V cache type independently (same values as `--type-kv`) |
 | `--main-gpu` | `FOX_MAIN_GPU` | `0` | Primary GPU index (0-based) |
@@ -333,9 +332,9 @@ max_models = 3
 keep_alive_secs = 300
 system_prompt = "You are a helpful assistant."
 
-# KV cache quantization (f16, q8_0, q4_0, turbo3, turbo4, turbo2)
-type_kv = "turbo3"
-# type_k = "turbo3"   # override K independently
+# KV cache quantization (f16, q8_0, q4_0)
+type_kv = "f16"
+# type_k = "q8_0"     # override K independently
 # type_v = "f16"      # override V independently
 
 # Multi-GPU

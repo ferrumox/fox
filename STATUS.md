@@ -50,7 +50,7 @@ to confirm are marked ❓.
 | ✅ | `head_dim` from GGUF metadata (`<arch>.attention.key_length`) | **recently patched**; was `n_embd/n_head` (wrong for Gemma/MLA) |
 | ✅ | Flash attention = AUTO | **recently patched**; was forced ENABLED → Gemma softcap garbage on CUDA |
 | ❌ | `embedding_dim = num_heads * head_dim` | wrong for GQA; the head_dim fix makes it worse — should be `n_embd` (`engine/model/llama_cpp/batch.rs`, `mod.rs`) |
-| ❌ | KV `bytes_per_token` assumes f16 in `load()` | inconsistent with `kv_cache/mod.rs` + `new_context()` which use real KV type → wrong memory budget with quantized/turbo KV |
+| ❌ | KV `bytes_per_token` assumes f16 in `load()` | inconsistent with `kv_cache/mod.rs` + `new_context()` which use real KV type → wrong memory budget with quantized (`q8_0`/`q4_0`) KV |
 | ❌ | Positional KV sizing applied to MLA & recurrent | MLA (DeepSeek latent KV) over-reserves; Mamba/RWKV have no per-token KV → risk of mismatch with llama.cpp's real `n_ctx` → `llama_decode failed`/hangs |
 | ✅ | Recurrent/hybrid detected (`llama_memory_can_shift`); prefix caching disabled for them | historic fix (v0.3.1) |
 | ⚠️❓ | `n_ctx`/`n_batch`/`n_seq` heuristic | `.max(effective_ctx)` may size the pool for ~1 sequence while `n_seq_max=32` → possible tightness under concurrency; unconfirmed |
@@ -96,8 +96,7 @@ to confirm are marked ❓.
 |---|---------|-------|
 | ✅ | Paged KV cache (PagedAttention-style): block pool, ref-count, copy-on-write | |
 | ✅ | Prefix caching by chained block hash; correct boundary resubmission | |
-| ✅ | KV quantization: `f16`/`q8_0`/`q4_0` + TurboQuant `turbo2/3/4`, independent K/V | |
-| ⚠️ | `turbo*` requires flash-attn + `head_dim % 128`, not validated at startup | degrades/fails at inference instead of warning early |
+| ✅ | KV quantization: `f16`/`q8_0`/`q4_0`, independent K/V | TurboQuant (`turbo2/3/4`) removed when migrating to upstream llama.cpp — see CHANGELOG |
 | ❓ | Suspected prefix-cache block/seq_id leak on eviction | review shows `pop`-before-`put` + `len>=max` guard keep it balanced (likely NO leak); needs stress test to close |
 | ✅ | Multi-GPU (layer/row split, manual or auto tensor-split) | |
 | ✅ | MoE CPU offload (`--moe-cpu`) via expert-tensor regex | |
@@ -193,7 +192,7 @@ Mapped to the fix in the [design doc](docs/design/model-architecture-rework.md).
 | 2 | High | Positional KV sizing applied to MLA/recurrent → instability in those families | `KvModel` per architecture §4.2 |
 | 3 | High | Hardcoded control/think literals + thinking heuristic ("whack-a-mole") | Capabilities from model §4.3 |
 | 4 | Medium | Sampling defaults diverge between APIs | API consistency §4.4 |
-| 5 | Medium | Footguns: `max_models=1`, unvalidated `turbo*`, silent multimodal drop, ignored `frequency/presence_penalty`, dead `swap_fraction` | Phase P4 |
+| 5 | Medium | Footguns: `max_models=1`, silent multimodal drop, ignored `frequency/presence_penalty`, dead `swap_fraction` | Phase P4 |
 | 6 | Low/❓ | Prefix-cache eviction cleanup | P0 stress test (open question) |
 | 7 | High | Chat templates not executed (no Jinja) → thinking + native tool-calling lost (Gemma 4, Qwen3, …) | real Jinja engine + `parse_special` for template + real thinking-token detection — **fix path validated 2026-06-29 (3 parts), see finding + experiment above** |
 
@@ -253,7 +252,6 @@ The **Scope** column is a deliberate decision, not just a backlog:
 | ✅ | Single static binary, no Python/deps, runtime backend detection | far lighter to deploy than vLLM |
 | ✅ | Dual API (OpenAI + Ollama) native | |
 | ✅ | Continuous batching + paged KV + prefix caching + CoW | vLLM's core, present |
-| ✅ | TurboQuant KV (`turbo2/3/4`) | aggressive KV quant neither offers identically |
 | ✅ | MoE CPU offload, multi-GPU | |
 
 ### Scope verdict

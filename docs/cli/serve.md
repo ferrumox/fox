@@ -54,7 +54,7 @@ fox serve --json-logs --port 8080 --max-models 2 --keep-alive-secs 600
 | `--max-context-len <N>` | `FOX_MAX_CONTEXT_LEN` | auto | Maximum context length in tokens. Auto-detected from the model's trained context if omitted. Larger values require more KV cache memory. |
 | `--max-batch-size <N>` | `FOX_MAX_BATCH_SIZE` | `32` | Maximum number of sequences processed in a single forward pass. |
 | `--gpu-memory-fraction <F>` | `FOX_GPU_MEMORY_FRACTION` | `0.85` | Fraction of GPU VRAM reserved for the KV cache. Must be between 0.0 and 1.0. The remaining memory is left for model weights and other allocations. |
-| `--type-kv <TYPE>` | `FOX_TYPE_KV` | `f16` | KV cache element type for both K and V: `f16`, `q8_0`, `q4_0`, `turbo3`, `turbo4`, or `turbo2`. TurboQuant types require flash attention and `head_dim % 128 == 0`. |
+| `--type-kv <TYPE>` | `FOX_TYPE_KV` | `f16` | KV cache element type for both K and V: `f16`, `q8_0`, or `q4_0`. |
 | `--type-k <TYPE>` | `FOX_TYPE_K` | — | Override K cache type independently (same values as `--type-kv`). Takes precedence over `--type-kv` for the K cache. |
 | `--type-v <TYPE>` | `FOX_TYPE_V` | — | Override V cache type independently (same values as `--type-kv`). Takes precedence over `--type-kv` for the V cache. |
 | `--block-size <N>` | `FOX_BLOCK_SIZE` | `16` | Number of tokens per KV cache block. Smaller blocks improve prefix cache granularity but add overhead. |
@@ -217,17 +217,17 @@ fox serve \
   --max-models 2 \
   --keep-alive-secs 600 \
   --gpu-memory-fraction 0.85 \
-  --type-kv turbo3 \
+  --type-kv q8_0 \
   --hf-token "$HF_TOKEN"
 ```
 
-### Multi-GPU with TurboQuant
+### Multi-GPU with quantized KV cache
 
 ```bash
-# Two GPUs with automatic layer split and TurboQuant KV cache
+# Two GPUs with automatic layer split and 8-bit KV cache
 fox serve \
   --split-mode layer \
-  --type-kv turbo3 \
+  --type-kv q8_0 \
   --max-context-len 32768
 
 # Two GPUs, manual 75%/25% VRAM split
@@ -240,7 +240,7 @@ fox serve \
 fox serve \
   --moe-cpu \
   --split-mode layer \
-  --type-kv turbo3
+  --type-kv q8_0
 ```
 
 ---

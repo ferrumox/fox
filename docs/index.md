@@ -71,7 +71,7 @@ curl http://localhost:8080/v1/chat/completions \
 | Prefix caching | Block-level (vLLM-style) | — |
 | Multi-model LRU | ✓ | ✓ |
 | Multi-GPU | ✓ (layer / row / tensor split) | — |
-| TurboQuant KV cache | ✓ (4–6× more context) | — |
+| KV cache quantization | ✓ (`q8_0` / `q4_0`) | ✓ |
 | MoE CPU offload | ✓ | — |
 | OpenAI API | ✓ | ✓ |
 | Ollama API | ✓ | ✓ |

@@ -53,7 +53,7 @@ sliding window, MLA, state-space). This is why a single source of truth (`ModelI
 | | Kind | fox |
 |---|------|-----|
 | ✅ | GGUF weights: K-quants (Q2_K…Q8_0), legacy, IQ (imatrix) | any model llama.cpp loads |
-| ✅ | KV cache: f16 / q8_0 / q4_0 + TurboQuant (turbo2/3/4) | differentiator; ⚠️ needs FA + `head_dim%128`, unvalidated |
+| ✅ | KV cache: f16 / q8_0 / q4_0 | standard llama.cpp KV types; TurboQuant removed (upstream migration) |
 | ❌ | Non-GGUF (AWQ/GPTQ/FP8/bnb safetensors) | out of scope (GGUF engine) |
 
 ## 4. Inference features

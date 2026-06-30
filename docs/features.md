@@ -96,24 +96,24 @@ This lets you run large MoE models on hardware where the full model wouldn't fit
 
 ---
 
-## TurboQuant KV cache
+## KV cache quantization
 
-TurboQuant is a high-compression quantization scheme for the KV cache that extends the usable context length by 4–6× compared to the default `f16` precision.
+Quantizing the KV cache reduces its memory footprint, letting you fit a longer context (or more concurrent requests) into the same VRAM, at a small quality cost.
 
 | Type | Bits/token | Compression vs f16 | Recommended use |
 |------|-----------|-------------------|-----------------|
-| `turbo3` | ~3.1 | **~4.9×** | Default choice — best balance of compression and quality |
-| `turbo4` | ~4.25 | ~3.8× | Higher quality, slightly less compression |
-| `turbo2` | ~2.1 | ~6.4× | Maximum compression; some quality degradation |
+| `f16` | 16 | 1× | Default — full precision, no quality loss |
+| `q8_0` | ~8.5 | ~1.9× | Near-lossless; safe everywhere |
+| `q4_0` | ~4.5 | ~3.5× | Aggressive compression; some quality degradation |
 
-**Requirements:** Flash attention + `head_dim % 128 == 0`. Most modern models (Llama 3, Gemma 3, Qwen 2.5, Mistral) qualify.
+These are the standard llama.cpp KV types, available on every backend.
 
 ```bash
-# Enable TurboQuant (recommended)
-fox serve --type-kv turbo3
+# 8-bit KV cache (near-lossless, ~2× longer context)
+fox serve --type-kv q8_0
 
-# Asymmetric: full precision for K, TurboQuant for V
-fox serve --type-k f16 --type-v turbo3
+# Asymmetric: full precision for K, 4-bit for V
+fox serve --type-k f16 --type-v q4_0
 ```
 
 Use `fox bench-kv <model>` to measure the throughput and context gain of each KV type on your specific hardware.

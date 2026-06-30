@@ -39,9 +39,9 @@ max_batch_size = 32
 gpu_memory_fraction = 0.85
 block_size = 16
 swap_fraction = 0.0
-type_kv = "f16"   # f16 | q8_0 | q4_0 | turbo3 | turbo4 | turbo2
+type_kv = "f16"   # f16 | q8_0 | q4_0
 # type_k = "f16"          # override K cache type independently
-# type_v = "turbo3"       # override V cache type independently
+# type_v = "q8_0"         # override V cache type independently
 # max_context_len = 8192  # auto-detected from model if omitted
 
 # Multi-GPU

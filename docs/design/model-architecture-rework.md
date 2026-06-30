@@ -26,7 +26,7 @@ disagree:
 | Fact | Place A | Place B | Disagreement |
 |------|---------|---------|--------------|
 | `head_dim` | `n_embd / n_head` in `load()` (`engine/model/llama_cpp/mod.rs`) — wrong for Gemma (256≠224/288), DeepSeek-MLA | `config.head_dim` in `new_context()` | two derivations, one wrong |
-| KV `bytes_per_token` | `load()` hardcodes **f16** (`2 * n_head_kv * head_dim * 2 * n_layer`) | `kv_cache/mod.rs` and `new_context()` use `kv_type_bytes(type_k/type_v)` | with quantized/turbo KV the budget is wrong |
+| KV `bytes_per_token` | `load()` hardcodes **f16** (`2 * n_head_kv * head_dim * 2 * n_layer`) | `kv_cache/mod.rs` and `new_context()` use `kv_type_bytes(type_k/type_v)` | with quantized (`q8_0`/`q4_0`) KV the budget is wrong |
 | `embedding_dim` | `num_heads * head_dim` (`batch.rs`, `mod.rs`) | should be `n_embd` | wrong for GQA; a `head_dim` fix makes it worse |
 
 Beyond duplicated numbers, three more sources of fragility:
@@ -259,8 +259,8 @@ table row).
   fixtures. This is where "maximum scope" is actually earned.
 - **P3 — Capabilities from model.** Move control/think/template/SPM off literals onto
   `ModelInfo`. Golden tests for stop-sequence and thinking behavior per class.
-- **P4 — API consistency + footguns.** Decide sampling-default policy; validate `turbo*`
-  preconditions at startup; fix `max_models`/`swap_fraction`/silent-multimodal; confirm
+- **P4 — API consistency + footguns.** Decide sampling-default policy;
+  fix `max_models`/`swap_fraction`/silent-multimodal; confirm
   the prefix-cache eviction question under a stress test (left open below).
 
 Each phase is shippable on its own and gated by the net from P0.
@@ -295,7 +295,6 @@ Each phase is shippable on its own and gated by the net from P0.
 | 6 | `<think>` substring + ≤2-token heuristic | `output_filter.rs`, `mod.rs`, `api/shared/inference.rs` | §4.3 reasoning token ids |
 | 7 | `U+2581` applied unconditionally | `mod.rs`, `engine/logits.rs` | §4.3 `is_spm` gate |
 | 8 | Sampling defaults diverge by API | `api/v1/chat.rs` vs `api/shared/inference.rs` | §4.4 |
-| 9 | `turbo*` KV needs FA + head_dim%128, unvalidated | `model_registry/config.rs`, `cli/serve.rs` | P4 startup validation |
 | 10 | `max_models=1` default; `swap_fraction` unused; silent multimodal drop | `cli/serve.rs`; `api/types/v1.rs` | P4 |
 | 11 | Recurrent/MLA sizing via positional formula | `mod.rs`, `kv_cache/mod.rs` | §4.2 |
 | 12 | Prefix-cache eviction cleanup (suspected leak) | `scheduler/schedule.rs`, `scheduler/mod.rs` | P0 stress test (open) |
