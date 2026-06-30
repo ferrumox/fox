@@ -6,6 +6,9 @@ models/
 /target/
 **/*.rs.bk
 
+# MkDocs build output (generated; deployed to Pages by the Docs workflow)
+/site/
+
 # Build artifacts
 *.o
 *.a

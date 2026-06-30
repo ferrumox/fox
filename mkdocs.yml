@@ -1,9 +1,15 @@
 site_name: fox
 site_description: Fast local LLM inference server — OpenAI & Ollama compatible
 site_url: https://ferrumox.github.io/fox
-repo_url: https://github.com/ferrumox/rabbit-engine
-repo_name: ferrumox/rabbit-engine
+repo_url: https://github.com/ferrumox/fox
+repo_name: ferrumox/fox
 edit_uri: edit/main/docs/
+
+# Internal design/working docs live under docs/design/ for convenience but are not
+# part of the published site (they link to repo-root files like STATUS.md that aren't
+# in the docs tree, which would otherwise break `mkdocs build --strict`).
+exclude_docs: |
+  design/
 
 theme:
   name: material
@@ -68,11 +74,14 @@ nav:
   - CLI Reference:
     - fox serve: cli/serve.md
     - fox run: cli/run.md
-    - fox pull / list / show / rm: cli/pull.md
+    - fox pull: cli/pull.md
+    - fox models: cli/models.md
+    - fox rm: cli/rm.md
     - fox alias: cli/alias.md
     - fox bench: cli/bench.md
+    - fox bench-kv: cli/bench-kv.md
 
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/ferrumox/rabbit-engine
+      link: https://github.com/ferrumox/fox

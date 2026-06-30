@@ -205,7 +205,7 @@ See [Deployment](./deployment.md) for a complete nginx example with TLS.
 
 ### Does fox support Kubernetes?
 
-Yes. See [Deployment — Kubernetes](./deployment.md#kubernetes) for a minimal Deployment + Service manifest.
+Yes. See [Deployment — Kubernetes liveness/readiness probe](./deployment.md#kubernetes-livenessreadiness-probe) for the health-check configuration.
 
 ---
 
