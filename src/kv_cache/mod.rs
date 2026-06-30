@@ -104,9 +104,9 @@ impl PageTable {
 pub fn kv_type_bytes(t: u32) -> (u64, u64) {
     use crate::model_registry::kv_type;
     match t {
-        kv_type::Q8_0 => (1, 1),      // 8 bits
-        kv_type::Q4_0 => (1, 2),      // 4 bits
-        _ => (2, 1), // F16 = 2 bytes
+        kv_type::Q8_0 => (1, 1), // 8 bits
+        kv_type::Q4_0 => (1, 2), // 4 bits
+        _ => (2, 1),             // F16 = 2 bytes
     }
 }
 
