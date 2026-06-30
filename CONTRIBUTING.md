@@ -5,32 +5,37 @@ Thank you for your interest in contributing! This guide covers how to build the 
 ## Building and running tests
 
 ```bash
-# Clone with submodules (llama.cpp is a Git submodule)
+# Clone with submodules (llama.cpp is a Git submodule — REQUIRED)
 git clone --recurse-submodules https://github.com/ferrumox/fox
 cd fox
 
-# Standard build — GPU backend (CUDA / Metal / Vulkan) detected at runtime
+# Standard build — GPU backend (CUDA / ROCm / Vulkan / Metal) detected at runtime.
+# build.rs compiles llama.cpp via CMake, so this needs the submodule + a C/C++ toolchain.
 cargo build --release
 
-# Stub build for CI environments without GPU drivers
-FOX_SKIP_LLAMA=1 cargo build --release
-
-# Run the test suite
-cargo test
+# Stub build — sets cfg(fox_stub) and swaps in a no-op model, so the crate builds and
+# tests run without llama.cpp, the submodule, or GPU drivers. CI runs entirely like this.
+FOX_SKIP_LLAMA=1 cargo build
 
 # Fast type-check (no codegen)
 cargo check
 ```
 
-## Code style
+`FOX_SKIP_LLAMA=1` is the key escape hatch for any work that doesn't touch real inference.
 
-- **Format**: run `cargo fmt` before committing. CI will reject unformatted code.
-- **Lints**: the project compiles with `cargo clippy -- -D warnings`. Fix all warnings before opening a PR.
+## Code style and CI
+
+`make ci` runs exactly what CI runs — do this before pushing:
 
 ```bash
-cargo fmt
-cargo clippy -- -D warnings
+FOX_SKIP_LLAMA=1 cargo fmt --all -- --check
+FOX_SKIP_LLAMA=1 cargo clippy --all-targets --features test-helpers -- -D warnings
+FOX_SKIP_LLAMA=1 cargo test --all --features test-helpers
 ```
+
+- **Format**: run `cargo fmt` before committing — CI rejects unformatted code.
+- **Lints**: the project must compile clean under `clippy -- -D warnings`.
+- `make setup` installs a pre-push git hook that runs these automatically.
 
 ## Architecture overview
 
@@ -45,23 +50,28 @@ CLI (src/cli/)
     └─ fox run    →  loads one model directly, runs inference loop
 
 API layer (src/api/)
-    ├─ routes.rs       Axum router, AppState, all HTTP handlers
-    ├─ types.rs        Request/response types (OpenAI + Ollama + Embeddings)
-    ├─ mod.rs          Re-exports
-    └─ pull_handler.rs POST /api/pull  — SSE download from HuggingFace
+    ├─ router.rs       Axum router + AppState; routes.rs lists the routes
+    ├─ v1/             OpenAI-compatible handlers (chat, completions, embeddings, models)
+    ├─ ollama/         Ollama-compatible handlers (chat, generate, embed, management)
+    ├─ shared/         Inference + streaming helpers reused by both API families
+    ├─ types/          Request/response types split by surface (v1, ollama, embeddings, …)
+    ├─ auth.rs         Optional FOX_API_KEY bearer-token middleware
+    └─ pull_handler.rs POST /api/pull — SSE download from HuggingFace
 
-Model registry (src/model_registry.rs)
+Model registry (src/model_registry/)
     ModelRegistry — DashMap<String, EngineEntry> + LRU eviction
     get_or_load()  — loads a model on first request, starts its engine loop
     EngineEntry    — holds Arc<InferenceEngine>, aborted on Drop (eviction)
+    loader.rs      — resolves model names/aliases to GGUF files
 
 Engine (src/engine/)
-    InferenceEngine — receives InferenceRequest, runs decode loop
-    LlamaCppModel   — wraps the llama.cpp C bindings
+    InferenceEngine        — receives InferenceRequest, runs the decode loop
+    model/llama_cpp/       — wraps the llama.cpp C bindings (FFI in engine/ffi.rs)
+    model/stub.rs          — the cfg(fox_stub) no-op model for FOX_SKIP_LLAMA builds
 
 Scheduler (src/scheduler/)
     Scheduler       — priority queue, assigns KV cache blocks to requests
-    InferenceRequest — prompt tokens + sampling params + response channel
+    prefix_cache.rs — reuses already-processed shared prefixes (continuous batching)
 
 KV cache (src/kv_cache/)
     KVCacheManager  — manages free/used blocks, implements PagedAttention-style allocation
@@ -69,40 +79,42 @@ KV cache (src/kv_cache/)
 
 **Request lifecycle** (HTTP → token stream):
 
-1. `POST /v1/chat/completions` arrives at `routes.rs`
+1. `POST /v1/chat/completions` arrives at the router (`src/api/router.rs`) → handler `v1/chat.rs`
 2. Handler resolves model name → calls `registry.get_or_load(model_name)`
 3. Registry returns `Arc<InferenceEngine>` (loading model if not cached)
 4. Handler formats prompt, builds `InferenceRequest`, submits to engine
-5. Engine's `run_loop` picks up the request, allocates KV blocks via scheduler
-6. Tokens are sent back through an `mpsc::UnboundedSender<Token>` channel
+5. Engine's run loop picks up the request, allocates KV blocks via scheduler
+6. Tokens are sent back through an `mpsc` token channel
 7. Handler streams tokens as SSE (OpenAI) or NDJSON (Ollama) to the client
 8. When the client disconnects, `send().is_err()` signals the engine to preempt
 
 ## Adding a new API endpoint
 
-1. Add the request/response types to `src/api/types.rs`
-2. Write the handler function in `src/api/routes.rs` (or a new module for complex handlers)
-3. Register the route in the router in `src/api/routes.rs` → `router()`
-4. Add documentation to `docs/api/openai.md` or `docs/api/ollama.md`
+1. Add the request/response types under `src/api/types/`
+2. Write the handler in the matching `src/api/v1/` (OpenAI) or `src/api/ollama/` module, reusing `src/api/shared/` helpers
+3. Register the route in `src/api/router.rs` / `src/api/routes.rs`
+4. Add documentation under `docs/api/`
 
 ## Adding a new CLI command
 
 1. Create `src/cli/<command>.rs` with a `<Command>Args` struct (clap `Parser`) and a `run_<command>()` async function
-2. Add the variant to the `Commands` enum in `src/cli/mod.rs` or `src/main.rs`
-3. Match the variant and call `run_<command>()` in the main dispatch block
-4. Add documentation to `docs/cli/<command>.md`
-5. Add the new page to `mkdocs.yml` under `nav:`
+2. Add the variant to the `Command` enum in `src/cli/mod.rs` and wire its match arm in `run()`
+3. Add documentation to `docs/cli/<command>.md`
+4. Add the new page to `mkdocs.yml` under `nav:`
 
 ## Integration tests
 
-Integration tests live in `tests/`. They require a running `fox serve` instance on localhost. To run them:
+Integration tests live in `tests/`. The HTTP-layer tests need the `test-helpers` feature
+(which exposes `StubModel`, `EngineEntry::for_test`, `ModelRegistry::preload_for_test`, and
+`src/api/test_helpers.rs`); the live tests in `tests/integration.rs` need a running server:
 
 ```bash
-# Start the server (in a separate terminal)
-fox serve --model-path ~/.cache/ferrumox/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf --port 8081
+# Full suite as CI runs it (stub model, no server needed)
+FOX_SKIP_LLAMA=1 cargo test --all --features test-helpers
 
-# Run only integration tests
-cargo test --test '*' -- --test-threads=1
+# Live integration tests — start a server first (in a separate terminal)
+fox serve --model-path models/<model>.gguf --port 8081
+cargo test --test integration -- --test-threads=1
 ```
 
 Unit tests inside `src/` (marked `#[cfg(test)]`) can run without a server:
@@ -140,13 +152,16 @@ To add a new model:
 
 ## Pull request process
 
-1. **Fork** the repository and create a feature branch from `main`:
+`develop` is the active trunk; `main` is the release branch. Branch from and target `develop`.
+
+1. **Fork** the repository and create a feature branch from `develop`:
    ```bash
+   git checkout develop
    git checkout -b feat/my-feature
    ```
 2. Make your changes. Keep commits focused — one logical change per commit.
-3. Run `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` locally.
-4. **Open a PR** targeting `main`. Fill in the PR description explaining what changed and why.
+3. Run `make ci` locally (fmt + clippy + tests) before pushing.
+4. **Open a PR** targeting `develop`. Fill in the PR description explaining what changed and why.
 5. A maintainer will review and may request changes. Once approved, the PR is squash-merged.
 
 ## Reporting bugs
