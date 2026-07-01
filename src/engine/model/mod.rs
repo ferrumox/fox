@@ -8,12 +8,14 @@
 use anyhow::Result;
 
 pub(crate) mod llama_cpp;
+pub(crate) mod model_info;
 #[cfg(not(fox_stub))]
 pub(crate) mod sampling;
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod stub;
 
 pub use llama_cpp::LlamaCppModel;
+pub use model_info::ModelInfo;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use stub::{StubModel, ThinkingStubModel};
 
@@ -189,4 +191,31 @@ pub trait Model: Send + Sync {
     /// Used as base stop sequences so generation halts on model-native terminators
     /// even when the token ID is not caught by `is_eog_token`.
     fn stop_tokens(&self) -> Vec<String>;
+
+    /// Build a `ModelInfo` snapshot of this model's facts (used by `fox probe`).
+    ///
+    /// The default implementation assembles what it can from the generic trait
+    /// methods; backends with direct GGUF access (`LlamaCppModel`) override it to
+    /// report metadata-derived truth (real arch name, `n_embd`, trained context,
+    /// embedded-template presence) instead of the reconstructed values.
+    fn model_info(&self) -> ModelInfo {
+        let c = self.model_config();
+        ModelInfo {
+            arch_name: "unknown".to_string(),
+            n_embd: self.embedding_dim(),
+            n_head: c.num_heads,
+            n_head_kv: c.num_heads_kv,
+            head_dim: c.head_dim,
+            n_layer: c.num_layers,
+            n_ctx_train: self.context_len(),
+            effective_ctx: self.context_len(),
+            vocab_size: c.vocab_size,
+            eos_token_id: self.eos_token_id(),
+            has_chat_template: false,
+            supports_thinking: self.supports_thinking(),
+            supports_seq_copy: self.supports_seq_copy(),
+            stop_token_count: self.stop_tokens().len(),
+            recommended_sampling: self.recommended_sampling(),
+        }
+    }
 }

@@ -33,7 +33,7 @@ use anyhow::anyhow;
 #[cfg(not(fox_stub))]
 use crate::engine::ffi;
 #[cfg(not(fox_stub))]
-use crate::engine::model::{InferenceRequestForModel, Logits, Model, ModelConfig};
+use crate::engine::model::{InferenceRequestForModel, Logits, Model, ModelConfig, ModelInfo};
 
 /// SentencePiece uses U+2581 (▁) for word boundaries.
 #[cfg(not(fox_stub))]
@@ -650,6 +650,37 @@ impl Model for LlamaCppModel {
             }
         }
         result
+    }
+
+    fn model_info(&self) -> ModelInfo {
+        // Read metadata-derived truth directly from the model, rather than the
+        // reconstructed values the generic default would produce.
+        let model = self._model.as_ptr();
+        let n_embd = unsafe { ffi::llama_model_n_embd(model) } as usize;
+        let n_ctx_train = unsafe { ffi::llama_model_n_ctx_train(model) } as u32;
+        let arch_name = self
+            .read_meta_str("general.architecture")
+            .unwrap_or_else(|| "unknown".to_string());
+        let has_chat_template =
+            unsafe { !ffi::llama_model_chat_template(model, std::ptr::null()).is_null() };
+
+        ModelInfo {
+            arch_name,
+            n_embd,
+            n_head: self.config.num_heads,
+            n_head_kv: self.config.num_heads_kv,
+            head_dim: self.config.head_dim,
+            n_layer: self.config.num_layers,
+            n_ctx_train,
+            effective_ctx: self.effective_ctx,
+            vocab_size: self.config.vocab_size,
+            eos_token_id: self.eos_token,
+            has_chat_template,
+            supports_thinking: self.supports_thinking(),
+            supports_seq_copy: self.supports_seq_copy(),
+            stop_token_count: self.stop_tokens().len(),
+            recommended_sampling: self.recommended_sampling(),
+        }
     }
 }
 
