@@ -39,6 +39,10 @@ pub struct ModelConfig {
     pub num_heads: usize,
     pub num_heads_kv: usize,
     pub head_dim: usize,
+    /// Embedding dimension, read from `llama_model_n_embd`. This is NOT
+    /// `num_heads * head_dim` — for Gemma/MLA-class models the two differ, which
+    /// is why it is stored explicitly rather than reconstructed.
+    pub n_embd: usize,
     pub vocab_size: usize,
 }
 

@@ -46,6 +46,7 @@ impl LlamaCppModel {
             num_heads: 32,
             num_heads_kv: 32,
             head_dim: 128,
+            n_embd: 4096,
             vocab_size: 32000,
         };
         Ok(Self { config })
@@ -150,7 +151,7 @@ impl Model for LlamaCppModel {
     }
 
     fn embedding_dim(&self) -> usize {
-        self.config.num_heads * self.config.head_dim
+        self.config.n_embd
     }
 
     fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>> {

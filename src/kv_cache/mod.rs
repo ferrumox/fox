@@ -349,6 +349,7 @@ mod tests {
             num_heads: 32,
             num_heads_kv: 32,
             head_dim: 128,
+            n_embd: 4096,
             vocab_size: 32000,
         }
     }

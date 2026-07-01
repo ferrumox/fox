@@ -350,6 +350,7 @@ impl LlamaCppModel {
             num_heads: n_head,
             num_heads_kv: n_head_kv,
             head_dim,
+            n_embd,
             vocab_size: n_vocab as usize,
         };
 
@@ -614,7 +615,7 @@ impl Model for LlamaCppModel {
     }
 
     fn embedding_dim(&self) -> usize {
-        self.config.num_heads * self.config.head_dim
+        self.config.n_embd
     }
 
     fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>> {
@@ -656,7 +657,6 @@ impl Model for LlamaCppModel {
         // Read metadata-derived truth directly from the model, rather than the
         // reconstructed values the generic default would produce.
         let model = self._model.as_ptr();
-        let n_embd = unsafe { ffi::llama_model_n_embd(model) } as usize;
         let n_ctx_train = unsafe { ffi::llama_model_n_ctx_train(model) } as u32;
         let arch_name = self
             .read_meta_str("general.architecture")
@@ -666,7 +666,7 @@ impl Model for LlamaCppModel {
 
         ModelInfo {
             arch_name,
-            n_embd,
+            n_embd: self.config.n_embd,
             n_head: self.config.num_heads,
             n_head_kv: self.config.num_heads_kv,
             head_dim: self.config.head_dim,

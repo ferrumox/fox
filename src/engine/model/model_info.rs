@@ -58,13 +58,14 @@ impl ModelInfo {
             ));
         }
 
-        // The embeddings path reconstructs n_embd as n_head*head_dim; wrong
-        // whenever head_dim != n_embd/n_head (exactly the Gemma/MLA class).
-        let reconstructed_embd = self.n_head * self.head_dim;
-        if reconstructed_embd != self.n_embd {
+        // n_embd differs from head geometry for the Gemma/MLA class. fox reads
+        // n_embd directly (ModelConfig.n_embd); this flags models where any code
+        // still assuming n_head*head_dim == n_embd would be wrong.
+        let geometry_embd = self.n_head * self.head_dim;
+        if geometry_embd != self.n_embd {
             out.push(format!(
-                "embedding_dim: n_head*head_dim = {}*{} = {} ≠ n_embd = {} — the num_heads*head_dim reconstruction breaks embeddings for this model",
-                self.n_head, self.head_dim, reconstructed_embd, self.n_embd
+                "n_embd = {} ≠ n_head*head_dim = {}*{} = {} — embedding size must be read from metadata, not reconstructed from head geometry",
+                self.n_embd, self.n_head, self.head_dim, geometry_embd
             ));
         }
 

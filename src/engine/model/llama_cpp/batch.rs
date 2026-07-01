@@ -240,7 +240,7 @@ impl LlamaCppModel {
         if tokens.is_empty() {
             return Ok(vec![]);
         }
-        let n_embd = self.config.num_heads * self.config.head_dim;
+        let n_embd = self.config.n_embd;
         let n_tokens = tokens.len() as i32;
 
         let mut batch = unsafe { ffi::llama_batch_init(n_tokens, 0, 1) };
