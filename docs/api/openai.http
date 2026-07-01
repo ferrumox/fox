@@ -1,0 +1,245 @@
+# Fox — OpenAI-compatible API
+# Compatible with VS Code REST Client, JetBrains HTTP Client, and curl.
+#
+# Set @host and @model before running.
+
+@host = http://localhost:8080
+@model = qwen
+# @api_key = your-secret-key  # Uncomment if FOX_API_KEY is set
+
+###
+
+# ── Health ────────────────────────────────────────────────────────────────────
+
+### Health check
+GET {{host}}/health
+
+### Prometheus metrics
+GET {{host}}/metrics
+
+### List available models
+GET {{host}}/v1/models
+
+###
+
+# ── Chat Completions ──────────────────────────────────────────────────────────
+
+### Basic chat (non-streaming)
+POST {{host}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    { "role": "user", "content": "What is the capital of France?" }
+  ],
+  "stream": false,
+  "max_tokens": 256
+}
+
+###
+
+### Chat with system prompt
+POST {{host}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    { "role": "system", "content": "You are a concise assistant. Answer in one sentence." },
+    { "role": "user", "content": "Explain what a transformer is." }
+  ],
+  "stream": false,
+  "max_tokens": 128,
+  "temperature": 0.7
+}
+
+###
+
+### Chat streaming (SSE)
+POST {{host}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    { "role": "user", "content": "Count from 1 to 5." }
+  ],
+  "stream": true,
+  "max_tokens": 64
+}
+
+###
+
+### Chat with sampling parameters
+POST {{host}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    { "role": "user", "content": "Write a short poem about the sea." }
+  ],
+  "stream": false,
+  "max_tokens": 200,
+  "temperature": 1.2,
+  "top_p": 0.9,
+  "top_k": 40,
+  "repetition_penalty": 1.1,
+  "seed": 42
+}
+
+###
+
+### Chat with stop sequences
+POST {{host}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    { "role": "user", "content": "List 10 fruits, one per line." }
+  ],
+  "stream": false,
+  "max_tokens": 128,
+  "stop": ["\n6."]
+}
+
+###
+
+### JSON mode (structured output)
+POST {{host}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    { "role": "user", "content": "Return a JSON object with name and age for a fictional person." }
+  ],
+  "stream": false,
+  "max_tokens": 128,
+  "response_format": { "type": "json_object" }
+}
+
+###
+
+### Function calling (tool use)
+POST {{host}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    { "role": "user", "content": "What is the weather in Madrid?" }
+  ],
+  "stream": false,
+  "max_tokens": 256,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": { "type": "string", "description": "City name" }
+          },
+          "required": ["city"]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto"
+}
+
+###
+
+### Multi-turn conversation
+POST {{host}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [
+    { "role": "user",      "content": "My name is Carlos." },
+    { "role": "assistant", "content": "Nice to meet you, Carlos!" },
+    { "role": "user",      "content": "What is my name?" }
+  ],
+  "stream": false,
+  "max_tokens": 64
+}
+
+###
+
+# ── Text Completions ──────────────────────────────────────────────────────────
+
+### Text completion (non-streaming)
+POST {{host}}/v1/completions
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "prompt": "The quick brown fox",
+  "max_tokens": 64,
+  "stream": false
+}
+
+###
+
+### Text completion (streaming)
+POST {{host}}/v1/completions
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "prompt": "Once upon a time",
+  "max_tokens": 128,
+  "stream": true
+}
+
+###
+
+# ── Embeddings ────────────────────────────────────────────────────────────────
+
+### Single embedding
+POST {{host}}/v1/embeddings
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "input": "The fox runs fast."
+}
+
+###
+
+### Batch embeddings
+POST {{host}}/v1/embeddings
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "input": [
+    "The fox runs fast.",
+    "El zorro corre rápido.",
+    "Le renard court vite."
+  ]
+}
+
+###
+
+# ── With API key (when FOX_API_KEY is set) ────────────────────────────────────
+
+### Authenticated request
+POST {{host}}/v1/chat/completions
+Content-Type: application/json
+Authorization: Bearer {{api_key}}
+
+{
+  "model": "{{model}}",
+  "messages": [
+    { "role": "user", "content": "Hello!" }
+  ],
+  "stream": false,
+  "max_tokens": 32
+}

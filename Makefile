@@ -25,7 +25,7 @@ BENCH_REQUESTS    ?= 50
 BENCH_PROMPT      ?= Write a short paragraph about the Rust programming language.
 BENCH_MAX_TOKENS  ?= 128
 
-.PHONY: help install-rust build run dev test bench download-model check docker docker-run
+.PHONY: help install-rust build run dev test bench download-model check ci setup docker docker-run
 
 help:
 	@echo "Targets:"
@@ -36,6 +36,8 @@ help:
 	@echo "  make dev             Start with verbose logging (RUST_LOG=debug)"
 	@echo "  make test            Run unit tests"
 	@echo "  make check           Fast type-check without producing a binary"
+	@echo "  make ci              Run the full CI suite locally (fmt + clippy + tests)"
+	@echo "  make setup           Install git pre-push hook (run once after cloning)"
 	@echo "  make bench           Run the integrated benchmark against a running server"
 	@echo "  make docker          Build the Docker image"
 	@echo "  make docker-run      Start the server via docker compose"
@@ -70,6 +72,16 @@ download-model:
 
 check:
 	cargo check
+
+# Run exactly what CI runs (use this before pushing to avoid surprises).
+ci:
+	FOX_SKIP_LLAMA=1 cargo fmt --all -- --check
+	FOX_SKIP_LLAMA=1 cargo clippy --all-targets --features test-helpers -- -D warnings
+	FOX_SKIP_LLAMA=1 cargo test --all --features test-helpers
+
+# Install the pre-push git hook so CI checks run automatically on every push.
+setup:
+	bash scripts/install-hooks.sh
 
 build:
 	@command -v cargo >/dev/null 2>&1 || \

@@ -3,3 +3,25 @@
 #![allow(nonstandard_style, dead_code, unused_imports, clippy::all)]
 
 include!(concat!(env!("OUT_DIR"), "/llama_bindings.rs"));
+
+// ── GGML backend loader (GGML_BACKEND_DL) ────────────────────────────────────
+// Not exposed via llama.h, declared manually.
+// When built without GGML_BACKEND_DL these are present as no-ops in ggml-base.
+extern "C" {
+    /// Load all available backends from `dir_path` (searches for libggml-<name>-*.so).
+    /// Pass null to search the executable directory and current directory.
+    pub fn ggml_backend_load_all_from_path(dir_path: *const std::os::raw::c_char);
+    /// Load a single backend from an explicit file path.
+    pub fn ggml_backend_load(path: *const std::os::raw::c_char) -> *mut std::os::raw::c_void;
+}
+
+// ── GGML CPU backend ──────────────────────────────────────────────────────────
+// Not included in the auto-generated bindings (ggml-backend.h is not parsed by build.rs).
+// Guard with cfg(not(fox_stub)) because the stub build emits empty bindings that
+// don't define ggml_backend_buffer_type_t.
+#[cfg(not(fox_stub))]
+extern "C" {
+    /// Returns the CPU backend buffer type. Used to force specific tensors (e.g. MoE experts)
+    /// to be allocated in RAM instead of VRAM.
+    pub fn ggml_backend_cpu_buffer_type() -> ggml_backend_buffer_type_t;
+}
