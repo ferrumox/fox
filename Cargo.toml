@@ -1,18 +1,18 @@
 [package]
 name = "ferrumox"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 description = "High-performance LLM inference engine - alternative to Ollama and vLLM"
 license = "MIT OR Apache-2.0"
 
 [features]
 default = []
-cuda = []
-metal = []
-cpu-only = []
+# Exposes StubModel, EngineEntry::for_test, ModelRegistry::preload_for_test, and
+# test_helpers for use in integration tests under tests/.
+test-helpers = ["dep:tower", "dep:http-body-util"]
 
 [dependencies]
-tokio = { version = "1.41", features = ["rt-multi-thread", "sync", "time", "macros", "signal"] }
+tokio = { version = "1.41", features = ["rt-multi-thread", "sync", "time", "macros", "signal", "process"] }
 axum = { version = "0.7", features = ["json", "macros"] }
 tower-http = { version = "0.5", features = ["cors"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -22,7 +22,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 anyhow = "1.0"
 rand = "0.8"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 tokio-stream = "0.1"
 futures = "0.3"
 async-trait = "0.1"
@@ -39,8 +39,12 @@ hex = "0.4"
 lru = "0.16.3"
 dashmap = "6"
 toml = "0.8"
+bytes = "1"
+dirs = "5"
 
-# Optional
+# Optional (enabled via test-helpers feature)
+tower = { version = "0.4", features = ["util"], optional = true }
+http-body-util = { version = "0.1", optional = true }
 
 [build-dependencies]
 bindgen = "0.69"
@@ -57,3 +61,6 @@ path = "src/bin/bench.rs"
 
 [dev-dependencies]
 tokio-test = "0.4"
+tempfile = "3"
+tower = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"

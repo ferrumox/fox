@@ -3,11 +3,15 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc*'
 
 env:
   CARGO_TERM_COLOR: always
-  FOX_SKIP_LLAMA: "1"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -20,18 +24,43 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
             use_cross: false
+            features: ""
+            ext: ""
+            archive: tar
+            artifact_suffix: ""
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            use_cross: false
+            features: ""
+            ext: ""
+            archive: tar
+            artifact_suffix: "-rocm"
+            gpu_backend: rocm
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04
             use_cross: true
-          - target: x86_64-apple-darwin
-            runner: macos-13
-            use_cross: false
+            features: ""
+            ext: ""
+            archive: tar
+            artifact_suffix: ""
           - target: aarch64-apple-darwin
             runner: macos-latest
             use_cross: false
+            features: ""
+            ext: ""
+            archive: tar
+            artifact_suffix: ""
+            libclang_path: /opt/homebrew/opt/llvm/lib
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            use_cross: false
+            features: ""
+            ext: ".exe"
+            archive: zip
+            artifact_suffix: ""
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -41,7 +70,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -50,29 +79,128 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
 
+      - name: Install build dependencies (Linux native)
+        if: runner.os == 'Linux' && !matrix.use_cross
+        run: |
+          sudo apt-get update -q
+          # No libvulkan-dev: CI runners have no GPU so Vulkan is not useful,
+          # and build.rs auto-enables GGML_VULKAN when vulkan.h is present,
+          # which then requires glslc (not easily available on Ubuntu 22.04).
+          sudo apt-get install -y cmake clang libclang-dev ninja-build
+
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install cmake llvm ninja
+          echo "LIBCLANG_PATH=${{ matrix.libclang_path }}" >> "$GITHUB_ENV"
+
+      - name: Enable long paths (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          git config --system core.longpaths true
+          # Ninja avoids MSBuild FileTracker's hardcoded MAX_PATH limit.
+          "CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # Short target dir so vulkan-shaders-gen ExternalProject paths stay
+          # under MAX_PATH (the nested cmake sub-build adds ~130 chars to the path).
+          "CARGO_TARGET_DIR=C:\t" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = "1.3.280.0"
+          $url = "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe"
+          Invoke-WebRequest -Uri $url -OutFile VulkanSDK.exe
+          Start-Process -FilePath VulkanSDK.exe `
+            -ArgumentList "--accept-licenses --default-answer --confirm-command install" `
+            -Wait
+          "VULKAN_SDK=C:\VulkanSDK\$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "C:\VulkanSDK\$version\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Install ROCm/HIP SDK (Linux ROCm)
+        if: matrix.gpu_backend == 'rocm'
+        run: |
+          wget -q -O - https://repo.radeon.com/rocm/rocm.gpg.key \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/rocm.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] \
+            https://repo.radeon.com/rocm/apt/6.2 jammy main" \
+            | sudo tee /etc/apt/sources.list.d/rocm.list
+          # Give ROCm repo higher priority than Ubuntu's packages.
+          # Ubuntu 22.04 ships rocminfo 5.0.0-1 (upstream versioning) which
+          # apt prefers over ROCm's 1.0.0.6XXXX (Radeon versioning).
+          # Pin-Priority 1001 forces ROCm packages even when they look like a downgrade.
+          printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1001\n' \
+            | sudo tee /etc/apt/preferences.d/rocm.pref
+          sudo apt-get update -q
+          sudo apt-get install -y rocm-hip-sdk
+          echo "/opt/rocm/bin" >> "$GITHUB_PATH"
+          echo "/opt/rocm/lib/llvm/bin" >> "$GITHUB_PATH"
+          echo "HIPCC=/opt/rocm/bin/hipcc" >> "$GITHUB_ENV"
+
       - name: Install cross
         if: matrix.use_cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Build (native)
-        if: "!matrix.use_cross"
-        run: cargo build --release --bin fox --target ${{ matrix.target }}
+      - name: Build (native, no features)
+        if: "!matrix.use_cross && matrix.features == ''"
+        run: cargo build --release --bin fox --bin fox-bench --target ${{ matrix.target }}
+
+      - name: Build (native, with features)
+        if: "!matrix.use_cross && matrix.features != ''"
+        run: cargo build --release --bin fox --bin fox-bench --target ${{ matrix.target }} --features ${{ matrix.features }}
 
       - name: Build (cross)
         if: matrix.use_cross
-        run: cross build --release --bin fox --target ${{ matrix.target }}
+        run: cross build --release --bin fox --bin fox-bench --target ${{ matrix.target }}
 
-      - name: Package tarball
+      - name: Package tarball (Unix)
+        if: matrix.archive == 'tar'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           TARGET="${{ matrix.target }}"
-          BINARY="target/$TARGET/release/fox"
-          TARBALL="fox-${VERSION}-${TARGET}.tar.gz"
-          tar czf "$TARBALL" -C "target/$TARGET/release" fox
-          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+          TARBALL="fox-${VERSION}-${TARGET}${{ matrix.artifact_suffix }}.tar.gz"
+          RELEASE_DIR="target/$TARGET/release"
+          # Include binaries + all backend shared libraries so the tarball is self-contained.
+          # The fox binary has RPATH=$ORIGIN, so it finds .so files in the same directory.
+          FILES=(fox fox-bench)
+          # .so   → Linux shared libs + macOS MODULE backends (ggml-cpu.so, ggml-metal.so)
+          # .dylib → macOS SHARED libs (llama, ggml-base, ggml)
+          for so in "$RELEASE_DIR"/libggml*.so* "$RELEASE_DIR"/libllama*.so* "$RELEASE_DIR"/libggml*.dylib "$RELEASE_DIR"/libllama*.dylib; do
+            [[ -f "$so" ]] && FILES+=("$so")
+          done
+          tar czf "$TARBALL" -C "$RELEASE_DIR" "${FILES[@]##*/}"
+          sha256sum "$TARBALL" > "${TARBALL}.sha256"
+          echo "ASSET=$TARBALL" >> "$GITHUB_ENV"
+          echo "ASSET_SHA256=${TARBALL}.sha256" >> "$GITHUB_ENV"
 
-      - name: Upload release asset
+      - name: Package zip (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $version = "$env:GITHUB_REF_NAME" -replace '^v', ''
+          $target  = "${{ matrix.target }}"
+          $zip     = "fox-${version}-${target}.zip"
+          $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target" }
+          $releaseDir = "$targetDir\$target\release"
+          # Collect binaries + all backend DLLs (ggml-*.dll) for a self-contained zip.
+          $files = @(
+            "$releaseDir\fox.exe",
+            "$releaseDir\fox-bench.exe"
+          ) + (Get-ChildItem "$releaseDir\ggml-*.dll","$releaseDir\llama.dll" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+          Compress-Archive -Path $files -DestinationPath $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  $zip" | Out-File -FilePath "${zip}.sha256" -Encoding utf8
+          "ASSET=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ASSET_SHA256=${zip}.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.TARBALL }}
+          prerelease: ${{ contains(github.ref_name, '-beta') }}
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET_SHA256 }}

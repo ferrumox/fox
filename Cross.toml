@@ -1,0 +1,5 @@
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "apt-get update -q",
+    "apt-get install -y cmake clang libclang-dev ninja-build",
+]

@@ -1,0 +1,56 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# CPU-only build (no CUDA/ROCm/Vulkan toolchain present → build.rs builds the
+# generic CPU backend only). Intended for machines without an NVIDIA GPU — e.g.
+# AMD laptops where the GPU path is Vulkan, added separately.
+#
+# Build:  docker build -f Dockerfile.cpu -t fox:cpu .
+# Run:    docker run --rm -p 8080:8080 \
+#           -v ~/.cache/ferrumox/models:/root/.cache/ferrumox/models fox:cpu
+# ──────────────────────────────────────────────────────────────────────────────
+FROM rust:bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake clang libclang-dev ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Fetch Rust dependencies first so this layer caches while sources change.
+COPY Cargo.toml Cargo.lock ./
+COPY vendor/ vendor/
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo fetch
+
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --bin fox --bin fox-bench && \
+    mkdir -p /bundle && \
+    cp target/release/fox target/release/fox-bench /bundle/ && \
+    find target/release -maxdepth 1 \( -name 'lib*.so*' -o -name 'lib*.dylib' \) \
+         -exec cp {} /bundle/ \;
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Minimal runtime image (CPU). No GPU driver libraries needed.
+# ──────────────────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /bundle/ /usr/local/lib/fox/
+
+RUN echo "/usr/local/lib/fox" > /etc/ld.so.conf.d/fox.conf && ldconfig
+
+RUN ln -s /usr/local/lib/fox/fox      /usr/local/bin/fox && \
+    ln -s /usr/local/lib/fox/fox-bench /usr/local/bin/fox-bench
+
+ENV FOX_HOST=0.0.0.0
+ENV FOX_PORT=8080
+
+EXPOSE 8080
+
+ENTRYPOINT ["fox"]
+CMD ["serve"]
