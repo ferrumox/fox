@@ -49,8 +49,8 @@ to confirm are marked ❓.
 | ✅ | Runtime backend detection (CUDA/ROCm/Vulkan/Metal/CPU) | one binary |
 | ✅ | `head_dim` from GGUF metadata (`<arch>.attention.key_length`) | **recently patched**; was `n_embd/n_head` (wrong for Gemma/MLA) |
 | ✅ | Flash attention = AUTO | **recently patched**; was forced ENABLED → Gemma softcap garbage on CUDA |
-| ❌ | `embedding_dim = num_heads * head_dim` | wrong for GQA; the head_dim fix makes it worse — should be `n_embd` (`engine/model/llama_cpp/batch.rs`, `mod.rs`) |
-| ❌ | KV `bytes_per_token` assumes f16 in `load()` | inconsistent with `kv_cache/mod.rs` + `new_context()` which use real KV type → wrong memory budget with quantized (`q8_0`/`q4_0`) KV |
+| ✅ | `embedding_dim = n_embd` (read from `llama_model_n_embd`) | **fixed**; was `num_heads * head_dim` (wrong for Gemma/MLA + an out-of-bounds read). Stored on `ModelConfig.n_embd` |
+| ⚠️ | KV `bytes_per_token` still caps `n_ctx` in `load()` | the block **pool** now follows the backend's real `llama_n_ctx` (P2 — `KVCacheManager::from_kv_tokens`); dropping the `load()` n_ctx formula-cap is the remaining follow-up |
 | ❌ | Positional KV sizing applied to MLA & recurrent | MLA (DeepSeek latent KV) over-reserves; Mamba/RWKV have no per-token KV → risk of mismatch with llama.cpp's real `n_ctx` → `llama_decode failed`/hangs |
 | ✅ | Recurrent/hybrid detected (`llama_memory_can_shift`); prefix caching disabled for them | historic fix (v0.3.1) |
 | ⚠️❓ | `n_ctx`/`n_batch`/`n_seq` heuristic | `.max(effective_ctx)` may size the pool for ~1 sequence while `n_seq_max=32` → possible tightness under concurrency; unconfirmed |
@@ -88,7 +88,7 @@ to confirm are marked ❓.
 | ⚠️ | JSON mode / structured output | prompt instruction only; no validation/grammar — best-effort |
 | ⚠️ | Thinking / `--show-thinking` | hides `<think>` block, `max_thinking_chars` budget; fragile detection (literal `<think>`) **misses Gemma 4's `<|think|>`**, and the Jinja `enable_thinking` toggle is never executed — see finding below |
 | ❌ | Vision / multimodal | image blocks silently dropped, no warning (`api/types/v1.rs`) |
-| ⚠️ | Embeddings | implemented, but the `embedding_dim` bug → wrong dimension/values on GQA |
+| ✅ | Embeddings | **fixed**: correct length (`n_embd`), mean-pooled + L2-normalized, non-degenerate (was all-zeros due to `pooling_type=NONE`) |
 
 ## Scheduler / KV / performance
 
@@ -188,7 +188,7 @@ Mapped to the fix in the [design doc](docs/design/model-architecture-rework.md).
 
 | # | Severity | Issue | Resolved by |
 |---|----------|-------|-------------|
-| 1 | High | `embedding_dim` and `bytes_per_token` (f16) wrong → bad embeddings & KV budget | `ModelInfo` (single source of truth) §4.1 / `KvModel` §4.2 |
+| 1 | ✅ Landed | `embedding_dim`→`n_embd`, embeddings pooling, KV pool follows `llama_n_ctx` | `ModelInfo` §4.1 + `fox probe` + golden tests (feature/0.11) |
 | 2 | High | Positional KV sizing applied to MLA/recurrent → instability in those families | `KvModel` per architecture §4.2 |
 | 3 | High | Hardcoded control/think literals + thinking heuristic ("whack-a-mole") | Capabilities from model §4.3 |
 | 4 | Medium | Sampling defaults diverge between APIs | API consistency §4.4 |

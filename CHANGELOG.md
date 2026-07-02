@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+Ongoing model-architecture correctness rework (see
+`docs/design/model-architecture-rework.md`) — making per-model facts a single
+inspectable source of truth and closing the "fix one model, break another" gaps.
+
+### Added
+
+- **`fox probe <model>`** — loads a model and prints its resolved `ModelInfo`
+  (architecture, `n_embd`, head counts, `head_dim`, layers, trained context, EOS,
+  embedded-template presence, native-thinking/seq-copy, recommended sampling), then
+  flags **contradictions** between the model's metadata and the formulas fox uses.
+  Unlike `fox show` (which guesses from the filename), probe reads the truth.
+- **`ModelInfo`** — one inspectable snapshot of a loaded model's facts, the basis of
+  the rework and of `fox probe`.
+- **Golden regression tests** (`make golden GOLDEN_MODEL=<path.gguf>`) — real-model
+  assertions (ModelInfo invariants, non-degenerate embeddings, tokenize round-trip)
+  that lock in the fixes below. Gated to real builds; the stub CI is unaffected.
+
+### Fixed
+
+- **Embeddings returned an all-zeros vector** for every model. The generation
+  context uses `pooling_type = NONE`, so `llama_get_embeddings_seq` returned NULL and
+  fox served a zero vector. `/v1/embeddings` and `/api/embed` now mean-pool the
+  per-token embeddings (`llama_get_embeddings_ith`) and L2-normalize the result.
+- **`n_embd` was reconstructed as `num_heads * head_dim`**, wrong for Gemma/MLA-class
+  models (`head_dim != n_embd/n_head`). This produced wrong-length embeddings and an
+  out-of-bounds read of the embedding buffer. `n_embd` is now read from
+  `llama_model_n_embd` and stored on `ModelConfig`.
+- **The KV block pool was sized from an independent formula** that could disagree with
+  the backend's real `n_ctx` (and is wrong for shared/SWA KV, MLA and recurrent
+  models), letting fox over-claim KV and crash `llama_decode` under load. The serving
+  paths now size the pool from `llama_n_ctx` so it follows the backend exactly.
+
+---
+
 ## [0.10.0] - 2026-06-30
 
 Re-baselines the project after retracting a premature `1.0.0`. The version line continues at `0.10.x` and will reach `1.0.0` only when the engine is proven stable. This release also migrates the vendored llama.cpp to upstream and removes TurboQuant.
