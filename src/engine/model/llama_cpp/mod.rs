@@ -554,6 +554,17 @@ impl Model for LlamaCppModel {
         self.build_prompt_tokens_impl(messages, enable_thinking)
     }
 
+    fn reasoning_delimiters(&self) -> Option<(String, String)> {
+        // Gemma-style channel/harmony format wraps reasoning in `<|channel>…<channel|>`
+        // (note the mirrored brackets), detectable from the chat template.
+        let t = self.raw_chat_template()?;
+        if t.contains("<|channel>") {
+            Some(("<|channel>".to_string(), "<channel|>".to_string()))
+        } else {
+            None
+        }
+    }
+
     fn context_len(&self) -> u32 {
         self.effective_ctx
     }

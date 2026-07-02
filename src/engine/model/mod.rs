@@ -224,6 +224,15 @@ pub trait Model: Send + Sync {
     /// even when the token ID is not caught by `is_eog_token`.
     fn stop_tokens(&self) -> Vec<String>;
 
+    /// The (open, close) delimiters that wrap this model's reasoning in its
+    /// generated output, when it uses non-default markers. `None` means the
+    /// standard `<think>…</think>` (the output filter's default). `LlamaCppModel`
+    /// detects e.g. Gemma's channel format (`<|channel>…<channel|>`) from the
+    /// chat template, so the filter separates reasoning from the answer correctly.
+    fn reasoning_delimiters(&self) -> Option<(String, String)> {
+        None
+    }
+
     /// Build a `ModelInfo` snapshot of this model's facts (used by `fox probe`).
     ///
     /// The default implementation assembles what it can from the generic trait
