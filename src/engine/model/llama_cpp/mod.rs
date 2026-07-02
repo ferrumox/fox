@@ -569,10 +569,17 @@ impl Model for LlamaCppModel {
     }
 
     fn supports_thinking(&self) -> bool {
-        // Reasoning models (Qwen3, DeepSeek-R1, …) have `<think>` as a single
-        // special token.  Tokenising it with add_special=true produces at most
-        // [BOS, <think>] (2 tokens).  Non-reasoning models split it into many
-        // character/subword pieces, so the count will be higher.
+        // Primary signal: the model's chat template exposes an `enable_thinking`
+        // toggle (Gemma-4, Qwen3, …). This is robust regardless of what the model
+        // names its reasoning tokens.
+        if self
+            .raw_chat_template()
+            .is_some_and(|t| t.contains("enable_thinking"))
+        {
+            return true;
+        }
+        // Fallback signal: `<think>` is a single special token (DeepSeek-R1, some
+        // Qwen). Tokenising it with add_special=true yields at most [BOS, <think>].
         self.tokenize_impl("<think>")
             .map(|t| t.len() <= 2)
             .unwrap_or(false)

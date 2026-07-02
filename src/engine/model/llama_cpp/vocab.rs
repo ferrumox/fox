@@ -71,6 +71,21 @@ impl LlamaCppModel {
         }
     }
 
+    /// The model's raw Jinja chat template string, straight from the GGUF (NOT
+    /// `read_meta_str`, whose 512-byte buffer would truncate a multi-KB template).
+    pub(super) fn raw_chat_template(&self) -> Option<String> {
+        unsafe {
+            let p = ffi::llama_model_chat_template(self._model.as_ptr(), std::ptr::null());
+            if p.is_null() {
+                return None;
+            }
+            std::ffi::CStr::from_ptr(p)
+                .to_str()
+                .ok()
+                .map(|s| s.to_owned())
+        }
+    }
+
     /// Render the model's real Jinja chat template (from the GGUF) with `minijinja`,
     /// threading `enable_thinking`. Returns `None` when the model has no embedded
     /// template or it fails to render — the caller then falls back to the built-in
@@ -83,15 +98,7 @@ impl LlamaCppModel {
         messages: &[(String, String)],
         enable_thinking: bool,
     ) -> Option<String> {
-        // Full template string straight from the model (NOT read_meta_str, whose
-        // 512-byte buffer would truncate a multi-KB chat template).
-        let template = unsafe {
-            let p = ffi::llama_model_chat_template(self._model.as_ptr(), std::ptr::null());
-            if p.is_null() {
-                return None;
-            }
-            std::ffi::CStr::from_ptr(p).to_str().ok()?.to_owned()
-        };
+        let template = self.raw_chat_template()?;
 
         let bos = {
             let id = unsafe { ffi::llama_vocab_bos(self.vocab) };

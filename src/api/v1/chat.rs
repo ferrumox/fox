@@ -65,6 +65,10 @@ pub async fn chat_completions(
     let tool_required = tc.required;
     let specific_tool = tc.specific.as_deref();
 
+    // Thinking is opt-in via the `think` request field, and only when the model
+    // actually supports it. Default off (no reasoning latency unless requested).
+    let enable_thinking = req.think.unwrap_or(false) && entry.engine.supports_thinking();
+
     let (prompt_tokens, prompt_tokens_len) = prepare_prompt(
         &entry,
         messages,
@@ -73,12 +77,11 @@ pub async fn chat_completions(
         tool_required,
         specific_tool,
         req.response_format.as_ref(),
-        entry.engine.supports_thinking(),
+        enable_thinking,
     );
 
     let max_tokens = req.max_tokens.or(req.max_completion_tokens).unwrap_or(256) as usize;
 
-    let supports_thinking = entry.engine.supports_thinking();
     let sampling = SamplingParams {
         temperature: req.temperature.unwrap_or(0.8).max(0.0),
         top_p: req.top_p.unwrap_or(0.9).clamp(0.0, 1.0),
@@ -87,7 +90,7 @@ pub async fn chat_completions(
         seed: req.seed,
         stop: req.stop.clone(),
         show_thinking: false,
-        initial_in_thinking: supports_thinking,
+        initial_in_thinking: enable_thinking,
         max_thinking_chars: 8192,
     };
 
@@ -108,7 +111,7 @@ pub async fn chat_completions(
         model = %req.model,
         stream = req.stream,
         prompt_tokens = prompt_tokens_len,
-        thinking = supports_thinking,
+        thinking = enable_thinking,
         has_tools,
         "request"
     );

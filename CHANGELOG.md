@@ -33,8 +33,18 @@ inspectable source of truth and closing the "fix one model, break another" gaps.
   and tokenize the result with the template's own BOS (`add_special=false`, no
   double BOS) and real control tokens (`parse_special=true`, not literal text). The
   prompt now matches what each model was trained on. Falls back to the built-in
-  format when a model has no embedded template or it fails to render. (Threading
-  native `enable_thinking`/tools through the template is a follow-up.)
+  format when a model has no embedded template or it fails to render.
+
+- **Thinking/reasoning is now opt-in and correctly detected.** `supports_thinking`
+  recognizes models whose chat template exposes an `enable_thinking` toggle
+  (Gemma-4, Qwen3), not just the `<think>`-token heuristic — `fox probe` now reports
+  `Native thinking: yes` for Gemma. Thinking activates only when the request opts in
+  (OpenAI: a `think: true` extension field; Ollama: the existing `think` field) and
+  threads `enable_thinking` into the model's Jinja template; the default is off (no
+  reasoning latency unless asked). Note: clean separation of reasoning from the
+  answer currently works for `<think>`-delimited models; channel-format models
+  (Gemma's `<|channel>thought…`) still need the output-filter generalization —
+  tracked as a follow-up. Tool-calling through the template is also a follow-up.
 
 ### Fixed
 

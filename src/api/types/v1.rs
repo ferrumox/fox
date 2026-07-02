@@ -113,6 +113,10 @@ pub struct ChatCompletionRequest {
     /// Structured output format.
     #[serde(default)]
     pub response_format: Option<ResponseFormat>,
+    /// fox extension: opt in to the model's native reasoning/thinking when it
+    /// supports it. Default off — thinking is NOT enabled unless requested.
+    #[serde(default)]
+    pub think: Option<bool>,
     /// Options for the streaming response (include_usage etc.).
     #[serde(default)]
     pub stream_options: Option<StreamOptions>,

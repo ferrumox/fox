@@ -91,7 +91,8 @@ pub async fn ollama_chat(
                 .map(|s| !matches!(s, "false" | "none"))
                 .unwrap_or(false)
     });
-    let use_thinking = think_requested.unwrap_or(supports_thinking) && supports_thinking;
+    // Opt-in: thinking is off unless the request asks for it (and the model supports it).
+    let use_thinking = think_requested.unwrap_or(false) && supports_thinking;
 
     let stream_mode = req.stream.unwrap_or(true);
     let show_thinking_in_output = use_thinking && !stream_mode;
