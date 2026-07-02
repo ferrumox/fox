@@ -546,6 +546,14 @@ impl Model for LlamaCppModel {
         self.apply_chat_template_impl(messages)
     }
 
+    fn build_prompt_tokens(
+        &self,
+        messages: &[(String, String)],
+        enable_thinking: bool,
+    ) -> Result<Vec<i32>> {
+        self.build_prompt_tokens_impl(messages, enable_thinking)
+    }
+
     fn context_len(&self) -> u32 {
         self.effective_ctx
     }

@@ -94,6 +94,14 @@ impl InferenceEngine {
         self.model.apply_chat_template(messages)
     }
 
+    pub fn build_prompt_tokens(
+        &self,
+        messages: &[(String, String)],
+        enable_thinking: bool,
+    ) -> anyhow::Result<Vec<i32>> {
+        self.model.build_prompt_tokens(messages, enable_thinking)
+    }
+
     pub fn submit_request(&self, req: InferenceRequest) {
         self.scheduler.submit(req);
     }

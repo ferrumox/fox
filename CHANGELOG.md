@@ -26,6 +26,16 @@ inspectable source of truth and closing the "fix one model, break another" gaps.
   assertions (ModelInfo invariants, non-degenerate embeddings, tokenize round-trip)
   that lock in the fixes below. Gated to real builds; the stub CI is unaffected.
 
+### Changed
+
+- **Chat prompts now execute the model's real Jinja template** (via `minijinja` +
+  `minijinja-contrib` pycompat) instead of llama.cpp's simplified built-in format,
+  and tokenize the result with the template's own BOS (`add_special=false`, no
+  double BOS) and real control tokens (`parse_special=true`, not literal text). The
+  prompt now matches what each model was trained on. Falls back to the built-in
+  format when a model has no embedded template or it fails to render. (Threading
+  native `enable_thinking`/tools through the template is a follow-up.)
+
 ### Fixed
 
 - **Embeddings returned an all-zeros vector** for every model. The generation

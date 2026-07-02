@@ -401,24 +401,24 @@ pub fn prepare_prompt(
 
     let flat: Vec<(String, String)> = messages.iter().map(flatten_message_for_template).collect();
 
-    let mut prompt = entry.engine.apply_chat_template(&flat).unwrap_or_else(|_| {
-        flat.iter()
-            .map(|(r, c)| format!("{r}: {c}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    });
-
-    if show_thinking {
-        prompt.push_str("<think>\n");
-    }
-
-    let tokens: Vec<i32> = entry.engine.tokenize(&prompt).unwrap_or_else(|_| {
-        if prompt.is_empty() {
-            vec![0]
-        } else {
-            prompt.bytes().map(|b| b as i32).take(4096).collect()
-        }
-    });
+    // Build the prompt tokens via the model's chat template (real Jinja when the
+    // model has one, threading `enable_thinking`; built-in format otherwise).
+    let tokens: Vec<i32> = entry
+        .engine
+        .build_prompt_tokens(&flat, show_thinking)
+        .unwrap_or_else(|_| {
+            // Last-ditch fallback: plain "role: content" text, byte-tokenized.
+            let prompt = flat
+                .iter()
+                .map(|(r, c)| format!("{r}: {c}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if prompt.is_empty() {
+                vec![0]
+            } else {
+                prompt.bytes().map(|b| b as i32).take(4096).collect()
+            }
+        });
 
     let len = tokens.len();
     (tokens, len)

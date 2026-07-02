@@ -148,6 +148,23 @@ pub trait Model: Send + Sync {
     /// Fallback: simple "role: content\n" concatenation if template unavailable.
     fn apply_chat_template(&self, messages: &[(String, String)]) -> Result<String>;
 
+    /// Build the final prompt token ids for a chat request. Backends with a real
+    /// Jinja template (`LlamaCppModel`) execute it — threading `enable_thinking`,
+    /// emitting the model's real control tokens, and tokenizing them AS special
+    /// tokens (not literal text). The default applies `apply_chat_template`, adds a
+    /// `<think>` prefill when `enable_thinking`, and tokenizes generically.
+    fn build_prompt_tokens(
+        &self,
+        messages: &[(String, String)],
+        enable_thinking: bool,
+    ) -> Result<Vec<i32>> {
+        let mut prompt = self.apply_chat_template(messages)?;
+        if enable_thinking {
+            prompt.push_str("<think>\n");
+        }
+        self.tokenize(&prompt)
+    }
+
     /// Effective per-sequence context length (tokens) this model was configured with.
     /// For `LlamaCppModel` this is the value used in `llama_init_from_model`.
     fn context_len(&self) -> u32 {
