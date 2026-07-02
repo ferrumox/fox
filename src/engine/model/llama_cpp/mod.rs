@@ -41,6 +41,16 @@ use crate::engine::model::{InferenceRequestForModel, Logits, Model, ModelConfig,
 #[cfg(not(fox_stub))]
 pub(super) const SPM_SPACE: char = '\u{2581}';
 
+/// Known non-default reasoning-delimiter formats: `(open, close)` marker pairs,
+/// matched against the model's OWN chat template (never its name). The default
+/// `<think>`/`</think>` covers most reasoning models (Qwen3, DeepSeek-R1), so they
+/// need no entry here. Adding support for a new format = one line + a golden test.
+#[cfg(not(fox_stub))]
+const REASONING_FORMATS: &[(&str, &str)] = &[
+    // Gemma / GPT-OSS "channel" (harmony) format — note the mirrored brackets.
+    ("<|channel>", "<channel|>"),
+];
+
 /// Query current free GPU memory in bytes via nvidia-smi.
 /// Returns None on CPU-only systems or when nvidia-smi is unavailable.
 #[cfg(not(fox_stub))]
@@ -555,14 +565,17 @@ impl Model for LlamaCppModel {
     }
 
     fn reasoning_delimiters(&self) -> Option<(String, String)> {
-        // Gemma-style channel/harmony format wraps reasoning in `<|channel>…<channel|>`
-        // (note the mirrored brackets), detectable from the chat template.
+        // Detect the reasoning format from the model's OWN chat template — never
+        // from its name. `REASONING_FORMATS` is a small, documented, extensible
+        // registry of known non-default (open, close) marker pairs; a model matches
+        // a format when its template references BOTH markers. No match → the caller
+        // uses the default `<think>`/`</think>`. Adding a format is one line + a
+        // golden test (see docs/design/model-architecture-rework.md §4.3).
         let t = self.raw_chat_template()?;
-        if t.contains("<|channel>") {
-            Some(("<|channel>".to_string(), "<channel|>".to_string()))
-        } else {
-            None
-        }
+        REASONING_FORMATS
+            .iter()
+            .find(|(open, close)| t.contains(open) && t.contains(close))
+            .map(|(open, close)| (open.to_string(), close.to_string()))
     }
 
     fn context_len(&self) -> u32 {

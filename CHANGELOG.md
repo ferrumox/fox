@@ -42,13 +42,13 @@ inspectable source of truth and closing the "fix one model, break another" gaps.
   (OpenAI: a `think: true` extension field; Ollama: the existing `think` field) and
   threads `enable_thinking` into the model's Jinja template; the default is off (no
   reasoning latency unless asked). Note: clean separation of reasoning from the
-  answer currently works for `<think>`-delimited models. The output filter is now
-  delimiter-agnostic (reads each model's reasoning markers via
-  `Model::reasoning_delimiters`, e.g. Gemma's `<|channel>`/`<channel|>`), but fully
-  surfacing channel-format reasoning also needs the API-layer thinking extraction
-  generalized and the prefill/`initial_in_thinking` semantics adjusted for the
-  Jinja path — tracked as follow-ups. Tool-calling through the template is also a
-  follow-up.
+  answer works for both `<think>`-delimited models (Qwen3, DeepSeek-R1) and
+  channel-format models (Gemma's `<|channel>`/`<channel|>`): the output filter AND
+  the API-layer thinking extraction read each model's reasoning markers via
+  `Model::reasoning_delimiters`, detected from the model's OWN chat template through
+  a small documented format registry (`REASONING_FORMATS`) — never the model name.
+  Supporting a new reasoning format is one registry line plus a golden test.
+  Tool-calling through the template remains a follow-up.
 
 ### Fixed
 
