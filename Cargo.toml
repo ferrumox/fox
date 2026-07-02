@@ -2,8 +2,14 @@
 name = "ferrumox"
 version = "0.10.0"
 edition = "2021"
-description = "High-performance LLM inference engine - alternative to Ollama and vLLM"
+description = "fox — a fast local LLM inference server, drop-in compatible with the Ollama and OpenAI APIs"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/ferrumox/fox"
+homepage = "https://github.com/ferrumox/fox"
+documentation = "https://ferrumox.github.io/fox"
+readme = "README.md"
+keywords = ["llm", "inference", "llama-cpp", "ollama", "gguf"]
+categories = ["command-line-utilities", "web-programming::http-server"]
 
 [features]
 default = []

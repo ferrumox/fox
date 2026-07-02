@@ -14,7 +14,7 @@
 
 </div>
 
-**Fox is free forever.** No asterisks. No "free for now." No pivot to paid. MIT licensed, always.
+**Fox is free forever.** No asterisks. No "free for now." No pivot to paid. Dual-licensed MIT OR Apache-2.0, always.
 
 ---
 
@@ -57,7 +57,7 @@ RTX 4060 · Llama-3.2-3B-Instruct-Q4_K_M · 4 concurrent clients · 50 requests:
 | Throughput | 312 t/s | 148 t/s | **+111%** |
 <!-- BENCH_TABLE_END -->
 
-> Reproduce: `./scripts/benchmark.sh gemma3 4 50`
+> Reproduce: `./scripts/benchmark.sh llama3.2 4 50`
 
 ---
 
@@ -372,7 +372,7 @@ split_mode = "layer"   # none | layer | row
   --model llama3.2 \
   --output json
 
-# Reproducible benchmark (saves to benches/results.md)
+# Reproducible benchmark vs Ollama
 ./scripts/benchmark.sh llama3.2 4 50
 ```
 
@@ -400,41 +400,30 @@ fox/
 ├── src/
 │   ├── main.rs              # Entry point, config, signal handling
 │   ├── metrics.rs           # Prometheus metrics registry
-│   ├── model_registry.rs    # Multi-model registry with LRU eviction
 │   ├── config.rs            # Config file loading
 │   ├── registry.rs          # Model discovery helpers
+│   ├── model_registry/      # Multi-model registry (DashMap) + LRU eviction, loader
 │   ├── api/                 # REST API (OpenAI + Ollama compat)
 │   │   ├── router.rs        # Axum router setup
-│   │   ├── types.rs         # Request/response types
+│   │   ├── routes.rs        # Route table
 │   │   ├── auth.rs          # API key middleware
 │   │   ├── error.rs         # Unified error types
 │   │   ├── pull_handler.rs  # POST /api/pull SSE streaming
-│   │   ├── v1/              # OpenAI-compat handlers
-│   │   │   ├── chat.rs
-│   │   │   ├── completions.rs
-│   │   │   ├── embeddings.rs
-│   │   │   └── models.rs
-│   │   ├── ollama/          # Ollama-compat handlers
-│   │   │   ├── chat.rs
-│   │   │   ├── generate.rs
-│   │   │   ├── embed.rs
-│   │   │   └── management.rs
-│   │   └── shared/          # Shared inference + streaming helpers
-│   │       ├── inference.rs
-│   │       ├── streaming.rs
-│   │       └── digest.rs
+│   │   ├── types/           # Request/response types (v1, ollama, embeddings, …)
+│   │   ├── v1/              # OpenAI-compat handlers (chat, completions, embeddings, models)
+│   │   ├── ollama/          # Ollama-compat handlers (chat, generate, embed, management)
+│   │   └── shared/          # Shared helpers (inference, streaming, digest, extractor)
 │   ├── scheduler/           # Continuous batching + prefix cache
-│   ├── kv_cache/            # PageTable, ref-counted block manager
+│   ├── kv_cache/            # PagedAttention-style ref-counted block manager
 │   ├── engine/              # Inference engine, sampling, output filtering
-│   └── cli/                 # Subcommands: serve, run, pull, list, show, ps, search, alias, bench, bench-kv, models, rm
+│   │   └── model/llama_cpp/ # llama.cpp FFI backend (+ fox_stub no-op model)
+│   └── cli/                 # Subcommands: serve, run, pull, list, rm, show, probe, ps, models, search, alias, bench, bench-kv
 ├── examples/
 │   ├── curl.sh              # curl examples for all API routes
 │   ├── langchain.py         # LangChain integration
 │   └── openwebui.md         # Open WebUI setup guide
 ├── scripts/
 │   └── benchmark.sh         # Reproducible benchmark vs Ollama
-├── benches/
-│   └── results.md           # Benchmark results (generated)
 ├── vendor/llama.cpp/        # Git submodule
 ├── Dockerfile
 ├── docker-compose.yml

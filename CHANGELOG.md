@@ -25,6 +25,9 @@ inspectable source of truth and closing the "fix one model, break another" gaps.
 - **Golden regression tests** (`make golden GOLDEN_MODEL=<path.gguf>`) — real-model
   assertions (ModelInfo invariants, non-degenerate embeddings, tokenize round-trip)
   that lock in the fixes below. Gated to real builds; the stub CI is unaffected.
+- **Community-health files** — `CODE_OF_CONDUCT.md`, issue templates (bug/feature)
+  and a pull-request template. `Cargo.toml` gains package metadata (`repository`,
+  `homepage`, `documentation`, `keywords`, `categories`).
 
 ### Changed
 
