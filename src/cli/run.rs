@@ -567,6 +567,8 @@ fn build_sampling_params(
         top_p,
         top_k,
         repetition_penalty: args.repetition_penalty,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
         seed: args.seed,
         stop: None,
         show_thinking: args.show_thinking,

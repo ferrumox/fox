@@ -159,7 +159,7 @@ fn diagnose_load_failure(model_path: &std::path::Path) -> anyhow::Error {
         _ => false,
     };
 
-    if memory_likely_cause || file_size > 0 {
+    if memory_likely_cause {
         let mut msg = format!(
             "failed to load '{}' ({:.1} GB): not enough memory to fit the model.\n",
             model_path
@@ -192,12 +192,37 @@ fn diagnose_load_failure(model_path: &std::path::Path) -> anyhow::Error {
         }
         anyhow!("{}", msg.trim_end())
     } else {
-        anyhow!(
-            "failed to load '{}': llama.cpp could not open the model.\n\
-             The file may use a GGUF version not supported by this build of Fox.\n\
-             → Check for a newer Fox release or try a different model variant.",
-            model_path.display()
-        )
+        // Load failed but memory is NOT the obvious cause — don't assert OOM. The
+        // common case here is a missing compute backend (no GPU driver AND the CPU
+        // backend .so not found next to the binary).
+        let mut msg = format!(
+            "failed to load '{}' ({:.1} GB): llama.cpp returned no model.\n",
+            model_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?"),
+            file_gb
+        );
+        if let Some(vram) = gpu_free {
+            msg.push_str(&format!(
+                "  GPU free:  {:.1} GB\n",
+                vram as f64 / 1_073_741_824.0
+            ));
+        }
+        if let Some(ram) = ram_free {
+            msg.push_str(&format!(
+                "  RAM free:  {:.1} GB\n",
+                ram as f64 / 1_073_741_824.0
+            ));
+        }
+        msg.push_str("\nPossible causes:\n");
+        msg.push_str(
+            "  • No compute backend — GPU driver missing AND the CPU backend library\n    \
+             (libggml-cpu.so) is not next to the fox binary.\n",
+        );
+        msg.push_str("  • GGUF version/architecture not supported by this llama.cpp build.\n");
+        msg.push_str("  • The model is larger than free memory (see figures above).\n");
+        anyhow!("{}", msg.trim_end())
     }
 }
 

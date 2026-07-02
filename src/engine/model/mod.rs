@@ -82,6 +82,10 @@ pub struct InferenceRequestForModel {
     pub top_k: u32,
     /// Repetition penalty (1.0 = disabled).
     pub repetition_penalty: f32,
+    /// OpenAI-style frequency penalty (additive; 0 = disabled).
+    pub frequency_penalty: f32,
+    /// OpenAI-style presence penalty (additive; 0 = disabled).
+    pub presence_penalty: f32,
     /// RNG seed for reproducible sampling (None = random).
     pub seed: Option<u64>,
     /// Previously generated token IDs (for repetition penalty).

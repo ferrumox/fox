@@ -26,12 +26,42 @@ pub(crate) fn apply_repetition_penalty(logits: &mut [f32], token_ids: &[i32], pe
     }
 }
 
+/// Apply OpenAI-style frequency and presence penalties in-place.
+/// `logit -= presence * (token appeared) + frequency * (times it appeared)`.
+/// Both default to 0.0 (disabled). Unlike `repetition_penalty` (multiplicative),
+/// these are additive and match the OpenAI `frequency_penalty`/`presence_penalty`
+/// semantics, so those request fields are honoured instead of silently ignored.
+pub(crate) fn apply_frequency_presence_penalty(
+    logits: &mut [f32],
+    token_ids: &[i32],
+    frequency: f32,
+    presence: f32,
+) {
+    if frequency == 0.0 && presence == 0.0 {
+        return;
+    }
+    let mut counts: std::collections::HashMap<i32, u32> = std::collections::HashMap::new();
+    for &tid in token_ids {
+        if tid >= 0 {
+            *counts.entry(tid).or_insert(0) += 1;
+        }
+    }
+    for (&tid, &count) in &counts {
+        let idx = tid as usize;
+        if idx < logits.len() {
+            logits[idx] -= frequency * count as f32 + presence;
+        }
+    }
+}
+
 /// Parameters for the full stochastic sampler.
 pub(crate) struct SamplerParams<'a> {
     pub(crate) temperature: f32,
     pub(crate) top_p: f32,
     pub(crate) top_k: u32,
     pub(crate) repetition_penalty: f32,
+    pub(crate) frequency_penalty: f32,
+    pub(crate) presence_penalty: f32,
     pub(crate) generated_ids: &'a [i32],
     pub(crate) seed: Option<u64>,
     pub(crate) token_count: usize,
@@ -47,15 +77,25 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         top_p,
         top_k,
         repetition_penalty,
+        frequency_penalty,
+        presence_penalty,
         generated_ids,
         seed,
         token_count,
     } = p;
     let mut logits = logits.to_vec();
 
-    // 1. Repetition penalty
+    // 1. Repetition + frequency/presence penalties
     if repetition_penalty != 1.0 && !generated_ids.is_empty() {
         apply_repetition_penalty(&mut logits, generated_ids, repetition_penalty);
+    }
+    if !generated_ids.is_empty() {
+        apply_frequency_presence_penalty(
+            &mut logits,
+            generated_ids,
+            frequency_penalty,
+            presence_penalty,
+        );
     }
 
     // 2. Greedy shortcut
@@ -200,6 +240,28 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // apply_frequency_presence_penalty
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn freq_presence_penalty_additive() {
+        let mut logits = vec![1.0f32, 1.0, 1.0];
+        // token 0 appears twice, token 1 once, token 2 not at all.
+        apply_frequency_presence_penalty(&mut logits, &[0, 0, 1], 0.5, 0.2);
+        assert!((logits[0] - (-0.2)).abs() < 1e-6, "1 - (0.5*2 + 0.2)");
+        assert!((logits[1] - 0.3).abs() < 1e-6, "1 - (0.5*1 + 0.2)");
+        assert!((logits[2] - 1.0).abs() < 1e-6, "unseen token untouched");
+    }
+
+    #[test]
+    fn freq_presence_penalty_noop_when_zero() {
+        let orig = vec![1.0f32, 2.0];
+        let mut logits = orig.clone();
+        apply_frequency_presence_penalty(&mut logits, &[0, 1], 0.0, 0.0);
+        assert_eq!(logits, orig);
+    }
+
+    // -----------------------------------------------------------------------
     // sample_token — greedy path (temperature ≤ 0)
     // -----------------------------------------------------------------------
 
@@ -213,6 +275,8 @@ mod tests {
                 top_p: 1.0,
                 top_k: 0,
                 repetition_penalty: 1.0,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
                 generated_ids: &[],
                 seed: None,
                 token_count: 0,
@@ -231,6 +295,8 @@ mod tests {
                 top_p: 1.0,
                 top_k: 0,
                 repetition_penalty: 1.0,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
                 generated_ids: &[],
                 seed: None,
                 token_count: 0,
@@ -251,6 +317,8 @@ mod tests {
             top_p: 1.0,
             top_k: 0,
             repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
             generated_ids: &[],
             seed: Some(42),
             token_count: 0,
@@ -275,6 +343,8 @@ mod tests {
                     top_p: 1.0,
                     top_k: 2,
                     repetition_penalty: 1.0,
+                    frequency_penalty: 0.0,
+                    presence_penalty: 0.0,
                     generated_ids: &[],
                     seed: Some(seed),
                     token_count: 0,
@@ -302,6 +372,8 @@ mod tests {
                     top_p: 0.5,
                     top_k: 0,
                     repetition_penalty: 1.0,
+                    frequency_penalty: 0.0,
+                    presence_penalty: 0.0,
                     generated_ids: &[],
                     seed: Some(seed),
                     token_count: 0,
@@ -326,6 +398,8 @@ mod tests {
                 top_p: 1.0,
                 top_k: 0,
                 repetition_penalty: 10.0,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
                 generated_ids: &[0], // token 0 was already generated
                 seed: None,
                 token_count: 1,

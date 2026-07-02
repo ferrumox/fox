@@ -167,6 +167,8 @@ pub fn sampling_from_ollama(
             top_p,
             top_k,
             repetition_penalty: rep,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
             seed,
             stop,
             show_thinking,

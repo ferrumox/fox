@@ -87,6 +87,8 @@ pub async fn chat_completions(
         top_p: req.top_p.unwrap_or(0.9).clamp(0.0, 1.0),
         top_k: req.top_k.unwrap_or(0),
         repetition_penalty: req.repetition_penalty.unwrap_or(1.0).max(1.0),
+        frequency_penalty: req.frequency_penalty.unwrap_or(0.0),
+        presence_penalty: req.presence_penalty.unwrap_or(0.0),
         seed: req.seed,
         stop: req.stop.clone(),
         show_thinking: false,
