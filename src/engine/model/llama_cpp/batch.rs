@@ -251,7 +251,7 @@ impl LlamaCppModel {
                 *batch.n_seq_id.add(i) = 1;
                 let arr = *batch.seq_id.add(i);
                 *arr.add(0) = 0; // dedicated seq slot for embeddings
-                *batch.logits.add(i) = 0i8; // no logits needed for embeddings
+                *batch.logits.add(i) = 1i8; // mark every token for embedding output (mean-pooled below)
             }
             batch.n_tokens += 1;
         }
@@ -273,12 +273,37 @@ impl LlamaCppModel {
             return Err(anyhow!("llama_decode (embeddings) failed: {}", ret));
         }
 
-        let emb_ptr = unsafe { ffi::llama_get_embeddings_seq(ctx, 0) };
-        let embeddings = if emb_ptr.is_null() {
-            vec![0.0f32; n_embd]
-        } else {
-            unsafe { std::slice::from_raw_parts(emb_ptr, n_embd) }.to_vec()
-        };
+        // The shared generation context is created with pooling_type = NONE, so
+        // seq-pooled embeddings (llama_get_embeddings_seq) are unavailable — it
+        // returns NULL. Read the per-token embeddings (each token was marked for
+        // output above) via llama_get_embeddings_ith and mean-pool them into one
+        // vector, then L2-normalize (the standard sentence-embedding convention).
+        let mut pooled = vec![0.0f32; n_embd];
+        let mut counted = 0usize;
+        for i in 0..n_tokens {
+            let ptr = unsafe { ffi::llama_get_embeddings_ith(ctx, i) };
+            if ptr.is_null() {
+                continue;
+            }
+            let row = unsafe { std::slice::from_raw_parts(ptr, n_embd) };
+            for (acc, &v) in pooled.iter_mut().zip(row) {
+                *acc += v;
+            }
+            counted += 1;
+        }
+        if counted > 0 {
+            let inv = 1.0 / counted as f32;
+            for v in pooled.iter_mut() {
+                *v *= inv;
+            }
+            let norm: f32 = pooled.iter().map(|v| v * v).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                for v in pooled.iter_mut() {
+                    *v /= norm;
+                }
+            }
+        }
+        let embeddings = pooled;
 
         unsafe {
             let mem = ffi::llama_get_memory(ctx as *const _);
