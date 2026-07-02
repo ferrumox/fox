@@ -43,6 +43,21 @@ pub async fn chat_completions(
         .unwrap_or_default()
         .as_secs();
 
+    // fox has no vision/audio support: warn loudly instead of silently dropping
+    // image/audio content blocks.
+    let dropped_blocks: usize = req
+        .messages
+        .iter()
+        .filter_map(|m| m.content.as_ref())
+        .map(|c| c.non_text_blocks())
+        .sum();
+    if dropped_blocks > 0 {
+        tracing::warn!(
+            blocks = dropped_blocks,
+            "dropped {dropped_blocks} non-text content block(s) — fox has no vision/audio support"
+        );
+    }
+
     // Build MessageForTemplate, extracting text from MessageContent (multimodal → text).
     let messages: Vec<MessageForTemplate> = req
         .messages

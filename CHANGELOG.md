@@ -64,6 +64,18 @@ inspectable source of truth and closing the "fix one model, break another" gaps.
   the backend's real `n_ctx` (and is wrong for shared/SWA KV, MLA and recurrent
   models), letting fox over-claim KV and crash `llama_decode` under load. The serving
   paths now size the pool from `llama_n_ctx` so it follows the backend exactly.
+- **`frequency_penalty` / `presence_penalty` were accepted but silently ignored.**
+  They are now applied in the sampler with OpenAI semantics
+  (`logit -= presence*(seen) + frequency*count`), threaded from the request. Default
+  0.0 (disabled).
+- **Misleading load-failure message.** `diagnose_load_failure` asserted "not enough
+  memory" on *any* failure (its condition was almost always true), even when the real
+  cause was a missing compute backend. It now claims OOM only when free memory is
+  actually below the model size, and otherwise lists the real possible causes.
+- **Image/audio content is no longer dropped silently.** The OpenAI handler now
+  warns when a request carries non-text content blocks (fox has no vision/audio
+  support). `--swap-fraction` is documented as reserved/not-yet-implemented rather
+  than appearing to do something.
 
 ---
 

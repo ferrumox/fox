@@ -70,7 +70,8 @@ pub struct ServeArgs {
     )]
     pub system_prompt: String,
 
-    /// Fraction of GPU memory reserved for CPU↔GPU KV-cache swap space (0.0-1.0).
+    /// [reserved — not yet implemented] Fraction of GPU memory for CPU↔GPU KV-cache
+    /// swap space (0.0-1.0). Accepted for forward compatibility; currently a no-op.
     #[arg(long, default_value = DEFAULT_SWAP_FRACTION, env = "FOX_SWAP_FRACTION")]
     pub swap_fraction: f32,
 
