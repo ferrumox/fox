@@ -6,6 +6,8 @@
 
 #[cfg(not(fox_stub))]
 mod batch;
+#[cfg(all(test, not(fox_stub)))]
+mod golden;
 #[cfg(not(fox_stub))]
 mod metadata;
 mod stub;
