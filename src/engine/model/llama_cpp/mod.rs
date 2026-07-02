@@ -550,6 +550,16 @@ impl Model for LlamaCppModel {
         self.effective_ctx
     }
 
+    fn kv_cache_capacity(&self) -> usize {
+        // The real total KV capacity llama.cpp allocated for this context — read
+        // back rather than recomputed, so fox's block pool matches it exactly.
+        let ctx_guard = match self._ctx.lock() {
+            Ok(g) => g,
+            Err(_) => return self.effective_ctx as usize,
+        };
+        unsafe { ffi::llama_n_ctx(ctx_guard.as_ptr() as *const _) as usize }
+    }
+
     fn supports_thinking(&self) -> bool {
         // Reasoning models (Qwen3, DeepSeek-R1, …) have `<think>` as a single
         // special token.  Tokenising it with add_special=true produces at most

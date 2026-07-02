@@ -154,6 +154,17 @@ pub trait Model: Send + Sync {
         4096
     }
 
+    /// Total KV-cache capacity in tokens, as ACTUALLY allocated by the backend
+    /// (llama.cpp `llama_n_ctx`). fox's paged block pool must be sized from this
+    /// — never from a hand-rolled `n_head_kv * head_dim * n_layer` formula, which
+    /// is wrong for Gemma (shared/SWA KV), MLA (latent KV) and recurrent models.
+    /// Sizing from the real capacity guarantees the pool never claims room the
+    /// backend doesn't have (the "fox thinks there's room → llama_decode fails"
+    /// class of crashes). Default: the per-sequence context length (stubs/mocks).
+    fn kv_cache_capacity(&self) -> usize {
+        self.context_len() as usize
+    }
+
     /// Returns `true` when the model has native thinking support — i.e. `<think>` is a
     /// single special token in the vocabulary (Qwen3, DeepSeek-R1, etc.).
     /// Models without native thinking always return `false`.

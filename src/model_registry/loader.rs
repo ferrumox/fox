@@ -70,16 +70,11 @@ pub(super) async fn load_model(
     .await
     .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;
 
-    let model_config = model.model_config();
+    // Size the paged block pool from the backend's ACTUAL KV capacity
+    // (llama_n_ctx), so the pool can never claim room llama.cpp didn't allocate.
+    let kv_tokens = model.kv_cache_capacity();
     let model: Arc<dyn Model> = Arc::new(model);
-    let kv_cache = Arc::new(KVCacheManager::new(
-        &model_config,
-        gpu_memory_bytes,
-        gpu_memory_fraction,
-        block_size,
-        type_k,
-        type_v,
-    ));
+    let kv_cache = Arc::new(KVCacheManager::from_kv_tokens(kv_tokens, block_size));
 
     let scheduler = Arc::new(Scheduler::new(kv_cache.clone(), max_batch_size));
     let engine = Arc::new(InferenceEngine::new(
