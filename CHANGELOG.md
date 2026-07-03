@@ -31,6 +31,14 @@ inspectable source of truth and closing the "fix one model, break another" gaps.
 
 ### Changed
 
+- **CI/CD workflows simplified to stop failing.** The Docker and Release workflows
+  dropped their fragile multi-platform matrices (arm64/CUDA, ROCm apt bundle,
+  aarch64 cross, Windows+Vulkan, macOS) — which failed often — for a single reliable
+  `linux/amd64` build; Docker now builds+pushes directly (no push-by-digest/manifest
+  merge). The redundant `test-linux-build` workflow (only ran on `-test` tags, pinned
+  rotting ROCm versions) was removed. GPU users can use the Docker image or build
+  locally; platforms will be re-added once each is verified in isolation.
+
 - **Chat prompts now execute the model's real Jinja template** (via `minijinja` +
   `minijinja-contrib` pycompat) instead of llama.cpp's simplified built-in format,
   and tokenize the result with the template's own BOS (`add_special=false`, no
