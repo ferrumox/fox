@@ -7,11 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [0.11.0] - 2026-07-03
 
-Ongoing model-architecture correctness rework (see
-`docs/design/model-architecture-rework.md`) — making per-model facts a single
-inspectable source of truth and closing the "fix one model, break another" gaps.
+Model-architecture correctness rework (see
+`docs/design/model-architecture-rework.md`) — makes per-model facts a single
+inspectable source of truth and closes several "fix one model, break another" gaps.
 
 ### Added
 
