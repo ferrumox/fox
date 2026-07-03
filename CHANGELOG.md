@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   embeddings, and tokenize round-trips on emoji/CJK. The model and the llama.cpp build
   are cached so it only pays the full cost when either changes. This wires up the
   regression net that P0 built but only ran locally.
+- **Prefix-cache leak stress test** (`scheduler::tests::stress_prefix_cache_no_leak`) —
+  settles the last open question of the model-architecture rework (§7). It drives 400
+  admit/finish/cache/hit/refuse-when-full cycles and asserts, after every step, that
+  every seq_id and KV block is owned by exactly one of {pool, running request, cache
+  entry} — never dropped, never duplicated — and that allocation returns to zero after
+  draining. Confirms the prefix cache does **not** leak (the initial automated flag was
+  a false positive). Adds `KVCacheManager::allocated_blocks()` for the assertion.
 
 ### Changed
 

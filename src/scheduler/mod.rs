@@ -240,4 +240,195 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
+
+    /// Prefix-cache eviction stress test — settles design-doc §7's open question
+    /// ("does the prefix cache leak blocks/seq-ids under churn?") empirically.
+    ///
+    /// It drives real `schedule_step` + `try_insert_prefix` over hundreds of
+    /// admit / finish / cache / hit / refuse-when-full cycles and asserts strict
+    /// conservation after every step, under a **move** ownership model: each seq_id
+    /// and each KV block is owned by exactly one of {pool, a running request, a
+    /// prefix-cache entry} — never dropped, never duplicated. (The engine layers a
+    /// KV-copy optimization on top via `return_prefix_seq_id`; the leak question is
+    /// about the scheduler's bookkeeping, which the move model exercises exactly.)
+    ///
+    /// A leak would show up as either a seq_id that can't be accounted for
+    /// (`seen.len() != TOTAL_SEQ`) or an allocated KV block that nothing references
+    /// (`allocated_blocks() != reachable`), or a non-zero allocation after draining.
+    #[test]
+    fn stress_prefix_cache_no_leak() {
+        use std::collections::HashSet;
+
+        const TOTAL_SEQ: usize = 8; // = max_batch_size → seq_id pool {0..8}
+        let config = ModelConfig {
+            num_layers: 2,
+            num_heads: 2,
+            num_heads_kv: 2,
+            head_dim: 64,
+            n_embd: 128,
+            vocab_size: 1000,
+        };
+        // Plenty of blocks: this test targets prefix-cache churn, not block
+        // starvation, so keep the loop live and deterministic.
+        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1, 1));
+        let sched = Scheduler::new(kv.clone(), TOTAL_SEQ);
+        assert_eq!(
+            sched.prefix_cache_max, 2,
+            "TOTAL_SEQ/4 → cache holds 2 entries"
+        );
+
+        // Deterministic prompt of `blocks` full 16-token blocks (+3 leftover tokens),
+        // content keyed by `seed` so distinct seeds have distinct prefixes.
+        let prompt = |seed: i32, blocks: usize| -> Vec<i32> {
+            (0..(blocks * 16 + 3) as i32)
+                .map(|i| seed * 1000 + i)
+                .collect()
+        };
+
+        // Assert full conservation of seq_ids and blocks against the live state.
+        let check_conservation = |label: &str| {
+            let running = sched.running_batch.lock().unwrap();
+            let pool = sched.seq_id_pool.lock().unwrap();
+            let pcache = sched.prefix_cache.lock().unwrap();
+
+            // Every seq_id lives in exactly one place, and all TOTAL_SEQ are present.
+            let mut seen: HashSet<i32> = HashSet::new();
+            for &s in pool.iter() {
+                assert!(seen.insert(s), "{label}: seq {s} duplicated in pool");
+            }
+            for r in running.iter() {
+                if r.kv_seq_id >= 0 {
+                    assert!(
+                        seen.insert(r.kv_seq_id),
+                        "{label}: seq {} duplicated (running req {})",
+                        r.kv_seq_id,
+                        r.id
+                    );
+                }
+            }
+            for (_h, e) in pcache.iter() {
+                assert!(
+                    seen.insert(e.seq_id),
+                    "{label}: seq {} duplicated (cache)",
+                    e.seq_id
+                );
+            }
+            assert_eq!(
+                seen.len(),
+                TOTAL_SEQ,
+                "{label}: seq_ids not conserved (found {}, expected {TOTAL_SEQ})",
+                seen.len()
+            );
+
+            // Every allocated block is reachable from a running request or a cache
+            // entry — nothing dropped on the floor.
+            let running_blocks: usize = running.iter().map(|r| r.page_table.len()).sum();
+            let cache_blocks: usize = pcache.iter().map(|(_h, e)| e.block_ids.len()).sum();
+            assert_eq!(
+                kv.allocated_blocks(),
+                running_blocks + cache_blocks,
+                "{label}: KV block leak — {} allocated but only {} reachable",
+                kv.allocated_blocks(),
+                running_blocks + cache_blocks
+            );
+
+            // The refuse-when-full guard must keep the cache within bounds.
+            assert!(
+                pcache.len() <= sched.prefix_cache_max,
+                "{label}: prefix cache exceeded its cap ({} > {})",
+                pcache.len(),
+                sched.prefix_cache_max
+            );
+        };
+
+        let mut observed_hit = false;
+        let mut observed_full_refuse = false;
+
+        for iter in 0..400usize {
+            // 1. Submit one request. 2/3 reuse a small shared-prompt set (so their
+            //    prefixes hit once cached); 1/3 are unique (misses → fresh inserts).
+            let seed = if iter % 3 == 0 {
+                100_000 + iter as i32 // unique → miss
+            } else {
+                (iter % 3) as i32 // {1,2} shared → hit candidate
+            };
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let id = iter as u64 + 1;
+            let req = InferenceRequest::new(id, prompt(seed, 2), 8, SamplingParams::default(), tx);
+            sched.submit(req);
+
+            // 2. Schedule: cleans the previous iteration's finishes and admits.
+            let hits_pre = sched.prefix_hits.load(Ordering::Relaxed);
+            let _batch = sched.schedule_step();
+            if sched.prefix_hits.load(Ordering::Relaxed) > hits_pre {
+                observed_hit = true;
+            }
+
+            // 3. Conservation must hold after every step.
+            check_conservation("mid-churn");
+
+            // 4. Finish the oldest running request once we have a few in flight, and
+            //    try to cache it. When the cache is full this exercises the
+            //    refuse-when-full path (try_insert_prefix → false).
+            let finish_id = {
+                let mut running = sched.running_batch.lock().unwrap();
+                if running.len() >= 3 {
+                    let r = &mut running[0];
+                    r.state = RequestState::Finished;
+                    Some(r.id)
+                } else {
+                    None
+                }
+            };
+            if let Some(id) = finish_id {
+                let cache_full = sched.prefix_cache_size() >= sched.prefix_cache_max;
+                let cached = sched.try_insert_prefix(id);
+                if cache_full && !cached {
+                    observed_full_refuse = true;
+                }
+            }
+        }
+
+        // The churn must have actually exercised the interesting paths, or the test
+        // would be conserving trivially.
+        assert!(
+            observed_hit,
+            "stress loop never produced a prefix-cache hit"
+        );
+        assert!(
+            observed_full_refuse,
+            "stress loop never hit the refuse-when-full path"
+        );
+        assert!(sched.prefix_hits.load(Ordering::Relaxed) > 0);
+
+        // 5. Drain everything and prove nothing leaked: finish all running requests,
+        //    let schedule_step reclaim them, then empty the cache (returning its
+        //    seq_ids and freeing its blocks). Allocation must fall back to zero and
+        //    the pool must be whole again.
+        {
+            let mut running = sched.running_batch.lock().unwrap();
+            for r in running.iter_mut() {
+                r.state = RequestState::Finished;
+            }
+        }
+        sched.schedule_step();
+        {
+            let mut pcache = sched.prefix_cache.lock().unwrap();
+            let mut pool = sched.seq_id_pool.lock().unwrap();
+            while let Some((_h, e)) = pcache.pop_lru() {
+                kv.free_blocks(&e.block_ids);
+                pool.push(e.seq_id);
+            }
+        }
+        assert_eq!(
+            kv.allocated_blocks(),
+            0,
+            "KV blocks leaked after full churn + drain"
+        );
+        assert_eq!(
+            sched.seq_id_pool.lock().unwrap().len(),
+            TOTAL_SEQ,
+            "seq_id pool not whole after drain"
+        );
+    }
 }
