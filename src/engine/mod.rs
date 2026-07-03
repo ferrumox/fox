@@ -94,6 +94,22 @@ impl InferenceEngine {
         self.model.apply_chat_template(messages)
     }
 
+    pub fn build_prompt_tokens(
+        &self,
+        messages: &[(String, String)],
+        enable_thinking: bool,
+    ) -> anyhow::Result<Vec<i32>> {
+        self.model.build_prompt_tokens(messages, enable_thinking)
+    }
+
+    /// The model's reasoning (open, close) delimiters, resolved to the default
+    /// `<think>`/`</think>` when the model uses the standard format.
+    pub fn reasoning_delimiters(&self) -> (String, String) {
+        self.model
+            .reasoning_delimiters()
+            .unwrap_or_else(|| ("<think>".to_string(), "</think>".to_string()))
+    }
+
     pub fn submit_request(&self, req: InferenceRequest) {
         self.scheduler.submit(req);
     }

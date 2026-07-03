@@ -74,6 +74,7 @@ nav:
   - CLI Reference:
     - fox serve: cli/serve.md
     - fox run: cli/run.md
+    - fox probe: cli/probe.md
     - fox pull: cli/pull.md
     - fox models: cli/models.md
     - fox rm: cli/rm.md

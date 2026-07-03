@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.11.0] - 2026-07-03
+
+Model-architecture correctness rework (see
+`docs/design/model-architecture-rework.md`) — makes per-model facts a single
+inspectable source of truth and closes several "fix one model, break another" gaps.
+
+### Added
+
+- **`fox probe <model>`** — loads a model and prints its resolved `ModelInfo`
+  (architecture, `n_embd`, head counts, `head_dim`, layers, trained context, EOS,
+  embedded-template presence, native-thinking/seq-copy, recommended sampling), then
+  flags **contradictions** between the model's metadata and the formulas fox uses.
+  Unlike `fox show` (which guesses from the filename), probe reads the truth.
+- **`ModelInfo`** — one inspectable snapshot of a loaded model's facts, the basis of
+  the rework and of `fox probe`.
+- **Golden regression tests** (`make golden GOLDEN_MODEL=<path.gguf>`) — real-model
+  assertions (ModelInfo invariants, non-degenerate embeddings, tokenize round-trip)
+  that lock in the fixes below. Gated to real builds; the stub CI is unaffected.
+- **Community-health files** — `CODE_OF_CONDUCT.md`, issue templates (bug/feature)
+  and a pull-request template. `Cargo.toml` gains package metadata (`repository`,
+  `homepage`, `documentation`, `keywords`, `categories`).
+
+### Changed
+
+- **CI/CD workflows simplified to stop failing.** The Docker and Release workflows
+  dropped their fragile multi-platform matrices (arm64/CUDA, ROCm apt bundle,
+  aarch64 cross, Windows+Vulkan, macOS) — which failed often — for a single reliable
+  `linux/amd64` build; Docker now builds+pushes directly (no push-by-digest/manifest
+  merge). The redundant `test-linux-build` workflow (only ran on `-test` tags, pinned
+  rotting ROCm versions) was removed. GPU users can use the Docker image or build
+  locally; platforms will be re-added once each is verified in isolation.
+
+- **Chat prompts now execute the model's real Jinja template** (via `minijinja` +
+  `minijinja-contrib` pycompat) instead of llama.cpp's simplified built-in format,
+  and tokenize the result with the template's own BOS (`add_special=false`, no
+  double BOS) and real control tokens (`parse_special=true`, not literal text). The
+  prompt now matches what each model was trained on. Falls back to the built-in
+  format when a model has no embedded template or it fails to render.
+
+- **Thinking/reasoning is now opt-in and correctly detected.** `supports_thinking`
+  recognizes models whose chat template exposes an `enable_thinking` toggle
+  (Gemma-4, Qwen3), not just the `<think>`-token heuristic — `fox probe` now reports
+  `Native thinking: yes` for Gemma. Thinking activates only when the request opts in
+  (OpenAI: a `think: true` extension field; Ollama: the existing `think` field) and
+  threads `enable_thinking` into the model's Jinja template; the default is off (no
+  reasoning latency unless asked). Note: clean separation of reasoning from the
+  answer works for both `<think>`-delimited models (Qwen3, DeepSeek-R1) and
+  channel-format models (Gemma's `<|channel>`/`<channel|>`): the output filter AND
+  the API-layer thinking extraction read each model's reasoning markers via
+  `Model::reasoning_delimiters`, detected from the model's OWN chat template through
+  a small documented format registry (`REASONING_FORMATS`) — never the model name.
+  Supporting a new reasoning format is one registry line plus a golden test.
+  Tool-calling through the template remains a follow-up.
+
+### Fixed
+
+- **Embeddings returned an all-zeros vector** for every model. The generation
+  context uses `pooling_type = NONE`, so `llama_get_embeddings_seq` returned NULL and
+  fox served a zero vector. `/v1/embeddings` and `/api/embed` now mean-pool the
+  per-token embeddings (`llama_get_embeddings_ith`) and L2-normalize the result.
+- **`n_embd` was reconstructed as `num_heads * head_dim`**, wrong for Gemma/MLA-class
+  models (`head_dim != n_embd/n_head`). This produced wrong-length embeddings and an
+  out-of-bounds read of the embedding buffer. `n_embd` is now read from
+  `llama_model_n_embd` and stored on `ModelConfig`.
+- **The KV block pool was sized from an independent formula** that could disagree with
+  the backend's real `n_ctx` (and is wrong for shared/SWA KV, MLA and recurrent
+  models), letting fox over-claim KV and crash `llama_decode` under load. The serving
+  paths now size the pool from `llama_n_ctx` so it follows the backend exactly.
+- **`frequency_penalty` / `presence_penalty` were accepted but silently ignored.**
+  They are now applied in the sampler with OpenAI semantics
+  (`logit -= presence*(seen) + frequency*count`), threaded from the request. Default
+  0.0 (disabled).
+- **Misleading load-failure message.** `diagnose_load_failure` asserted "not enough
+  memory" on *any* failure (its condition was almost always true), even when the real
+  cause was a missing compute backend. It now claims OOM only when free memory is
+  actually below the model size, and otherwise lists the real possible causes.
+- **Image/audio content is no longer dropped silently.** The OpenAI handler now
+  warns when a request carries non-text content blocks (fox has no vision/audio
+  support). `--swap-fraction` is documented as reserved/not-yet-implemented rather
+  than appearing to do something.
+
+---
+
 ## [0.10.0] - 2026-06-30
 
 Re-baselines the project after retracting a premature `1.0.0`. The version line continues at `0.10.x` and will reach `1.0.0` only when the engine is proven stable. This release also migrates the vendored llama.cpp to upstream and removes TurboQuant.

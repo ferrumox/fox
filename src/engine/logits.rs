@@ -48,17 +48,24 @@ impl InferenceEngine {
             let (text, is_stop_hit) = {
                 // Clone stop tokens only on first token for this request (inside or_insert_with),
                 // not on every subsequent token.
-                let mut state =
-                    self.per_request_state
-                        .entry(*req_id)
-                        .or_insert_with(|| PerRequestState {
-                            show_thinking: req.sampling.show_thinking,
-                            in_thinking: req.sampling.initial_in_thinking,
-                            emit_think_open_tag: req.sampling.initial_in_thinking,
-                            model_control_patterns: self.model_stop_tokens.clone(),
-                            max_thinking_chars: req.sampling.max_thinking_chars,
-                            ..Default::default()
-                        });
+                let mut state = self.per_request_state.entry(*req_id).or_insert_with(|| {
+                    // Reasoning delimiters come from the model (default `<think>`/`</think>`,
+                    // or the model's own markers, e.g. Gemma's `<|channel>`/`<channel|>`).
+                    let (think_open, think_close) = self
+                        .model
+                        .reasoning_delimiters()
+                        .unwrap_or_else(|| ("<think>".to_string(), "</think>".to_string()));
+                    PerRequestState {
+                        think_open,
+                        think_close,
+                        show_thinking: req.sampling.show_thinking,
+                        in_thinking: req.sampling.initial_in_thinking,
+                        emit_think_open_tag: req.sampling.initial_in_thinking,
+                        model_control_patterns: self.model_stop_tokens.clone(),
+                        max_thinking_chars: req.sampling.max_thinking_chars,
+                        ..Default::default()
+                    }
+                });
 
                 // Accumulate raw token bytes and drain complete UTF-8 codepoints.
                 // This prevents "??" artifacts when multi-byte characters (e.g. emoji)

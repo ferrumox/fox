@@ -14,6 +14,10 @@ pub struct SamplingParams {
     pub top_k: u32,
     /// Repetition penalty applied to already-generated tokens (1.0 = disabled).
     pub repetition_penalty: f32,
+    /// OpenAI-style frequency penalty (additive, scales with token count; 0 = disabled).
+    pub frequency_penalty: f32,
+    /// OpenAI-style presence penalty (additive, applied once per seen token; 0 = disabled).
+    pub presence_penalty: f32,
     /// Optional RNG seed for reproducible sampling.
     pub seed: Option<u64>,
     /// Stop generation when the output ends with any of these strings.
@@ -42,6 +46,8 @@ impl Default for SamplingParams {
             top_p: 1.0,
             top_k: 0,
             repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
             seed: None,
             stop: None,
             show_thinking: false,

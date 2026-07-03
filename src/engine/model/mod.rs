@@ -8,12 +8,14 @@
 use anyhow::Result;
 
 pub(crate) mod llama_cpp;
+pub(crate) mod model_info;
 #[cfg(not(fox_stub))]
 pub(crate) mod sampling;
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod stub;
 
 pub use llama_cpp::LlamaCppModel;
+pub use model_info::ModelInfo;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use stub::{StubModel, ThinkingStubModel};
 
@@ -37,6 +39,10 @@ pub struct ModelConfig {
     pub num_heads: usize,
     pub num_heads_kv: usize,
     pub head_dim: usize,
+    /// Embedding dimension, read from `llama_model_n_embd`. This is NOT
+    /// `num_heads * head_dim` — for Gemma/MLA-class models the two differ, which
+    /// is why it is stored explicitly rather than reconstructed.
+    pub n_embd: usize,
     pub vocab_size: usize,
 }
 
@@ -76,6 +82,10 @@ pub struct InferenceRequestForModel {
     pub top_k: u32,
     /// Repetition penalty (1.0 = disabled).
     pub repetition_penalty: f32,
+    /// OpenAI-style frequency penalty (additive; 0 = disabled).
+    pub frequency_penalty: f32,
+    /// OpenAI-style presence penalty (additive; 0 = disabled).
+    pub presence_penalty: f32,
     /// RNG seed for reproducible sampling (None = random).
     pub seed: Option<u64>,
     /// Previously generated token IDs (for repetition penalty).
@@ -142,10 +152,38 @@ pub trait Model: Send + Sync {
     /// Fallback: simple "role: content\n" concatenation if template unavailable.
     fn apply_chat_template(&self, messages: &[(String, String)]) -> Result<String>;
 
+    /// Build the final prompt token ids for a chat request. Backends with a real
+    /// Jinja template (`LlamaCppModel`) execute it — threading `enable_thinking`,
+    /// emitting the model's real control tokens, and tokenizing them AS special
+    /// tokens (not literal text). The default applies `apply_chat_template`, adds a
+    /// `<think>` prefill when `enable_thinking`, and tokenizes generically.
+    fn build_prompt_tokens(
+        &self,
+        messages: &[(String, String)],
+        enable_thinking: bool,
+    ) -> Result<Vec<i32>> {
+        let mut prompt = self.apply_chat_template(messages)?;
+        if enable_thinking {
+            prompt.push_str("<think>\n");
+        }
+        self.tokenize(&prompt)
+    }
+
     /// Effective per-sequence context length (tokens) this model was configured with.
     /// For `LlamaCppModel` this is the value used in `llama_init_from_model`.
     fn context_len(&self) -> u32 {
         4096
+    }
+
+    /// Total KV-cache capacity in tokens, as ACTUALLY allocated by the backend
+    /// (llama.cpp `llama_n_ctx`). fox's paged block pool must be sized from this
+    /// — never from a hand-rolled `n_head_kv * head_dim * n_layer` formula, which
+    /// is wrong for Gemma (shared/SWA KV), MLA (latent KV) and recurrent models.
+    /// Sizing from the real capacity guarantees the pool never claims room the
+    /// backend doesn't have (the "fox thinks there's room → llama_decode fails"
+    /// class of crashes). Default: the per-sequence context length (stubs/mocks).
+    fn kv_cache_capacity(&self) -> usize {
+        self.context_len() as usize
     }
 
     /// Returns `true` when the model has native thinking support — i.e. `<think>` is a
@@ -189,4 +227,40 @@ pub trait Model: Send + Sync {
     /// Used as base stop sequences so generation halts on model-native terminators
     /// even when the token ID is not caught by `is_eog_token`.
     fn stop_tokens(&self) -> Vec<String>;
+
+    /// The (open, close) delimiters that wrap this model's reasoning in its
+    /// generated output, when it uses non-default markers. `None` means the
+    /// standard `<think>…</think>` (the output filter's default). `LlamaCppModel`
+    /// detects e.g. Gemma's channel format (`<|channel>…<channel|>`) from the
+    /// chat template, so the filter separates reasoning from the answer correctly.
+    fn reasoning_delimiters(&self) -> Option<(String, String)> {
+        None
+    }
+
+    /// Build a `ModelInfo` snapshot of this model's facts (used by `fox probe`).
+    ///
+    /// The default implementation assembles what it can from the generic trait
+    /// methods; backends with direct GGUF access (`LlamaCppModel`) override it to
+    /// report metadata-derived truth (real arch name, `n_embd`, trained context,
+    /// embedded-template presence) instead of the reconstructed values.
+    fn model_info(&self) -> ModelInfo {
+        let c = self.model_config();
+        ModelInfo {
+            arch_name: "unknown".to_string(),
+            n_embd: self.embedding_dim(),
+            n_head: c.num_heads,
+            n_head_kv: c.num_heads_kv,
+            head_dim: c.head_dim,
+            n_layer: c.num_layers,
+            n_ctx_train: self.context_len(),
+            effective_ctx: self.context_len(),
+            vocab_size: c.vocab_size,
+            eos_token_id: self.eos_token_id(),
+            has_chat_template: false,
+            supports_thinking: self.supports_thinking(),
+            supports_seq_copy: self.supports_seq_copy(),
+            stop_token_count: self.stop_tokens().len(),
+            recommended_sampling: self.recommended_sampling(),
+        }
+    }
 }

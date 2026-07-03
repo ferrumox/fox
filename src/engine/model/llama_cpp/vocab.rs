@@ -2,18 +2,37 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 
 use anyhow::{anyhow, Result};
+use minijinja::{context, Environment};
 
 use crate::engine::ffi;
 
 use super::LlamaCppModel;
 
 impl LlamaCppModel {
+    /// Tokenize arbitrary user text / raw strings: prepend BOS (add_special) and
+    /// treat any `<|...|>`-looking text as literal, NOT as special tokens.
     pub(super) fn tokenize_impl(&self, text: &str) -> Result<Vec<i32>> {
+        self.tokenize_with(text, true, false)
+    }
+
+    /// Tokenize an already chat-templated prompt: the template already supplies
+    /// BOS (add_special = false, avoids a double BOS) and its control markers must
+    /// become the real special tokens (parse_special = true), not literal text.
+    pub(super) fn tokenize_prompt_impl(&self, text: &str) -> Result<Vec<i32>> {
+        self.tokenize_with(text, false, true)
+    }
+
+    fn tokenize_with(
+        &self,
+        text: &str,
+        add_special: bool,
+        parse_special: bool,
+    ) -> Result<Vec<i32>> {
         let vocab = self.vocab;
         if vocab.is_null() {
             return Err(anyhow!("vocab is null"));
         }
-        // First call with null buffer to get required size
+        // First call sizes the buffer; retry once if it was too small.
         let n_max = text.len() + 4;
         let mut tokens: Vec<ffi::llama_token> = vec![0; n_max];
         let n = unsafe {
@@ -23,8 +42,8 @@ impl LlamaCppModel {
                 text.len() as i32,
                 tokens.as_mut_ptr(),
                 n_max as i32,
-                true,  // add_special
-                false, // parse_special
+                add_special,
+                parse_special,
             )
         };
         if n < 0 {
@@ -37,8 +56,8 @@ impl LlamaCppModel {
                     text.len() as i32,
                     tokens.as_mut_ptr(),
                     need as i32,
-                    true,
-                    false,
+                    add_special,
+                    parse_special,
                 )
             };
             if n < 0 {
@@ -50,6 +69,87 @@ impl LlamaCppModel {
             tokens.truncate(n as usize);
             Ok(tokens)
         }
+    }
+
+    /// The model's raw Jinja chat template string, straight from the GGUF (NOT
+    /// `read_meta_str`, whose 512-byte buffer would truncate a multi-KB template).
+    pub(super) fn raw_chat_template(&self) -> Option<String> {
+        unsafe {
+            let p = ffi::llama_model_chat_template(self._model.as_ptr(), std::ptr::null());
+            if p.is_null() {
+                return None;
+            }
+            std::ffi::CStr::from_ptr(p)
+                .to_str()
+                .ok()
+                .map(|s| s.to_owned())
+        }
+    }
+
+    /// Render the model's real Jinja chat template (from the GGUF) with `minijinja`,
+    /// threading `enable_thinking`. Returns `None` when the model has no embedded
+    /// template or it fails to render — the caller then falls back to the built-in
+    /// llama.cpp format.
+    ///
+    /// TODO(perf): this parses the template on every call; cache the compiled
+    /// template on the model once the interface settles.
+    fn render_chat_jinja(
+        &self,
+        messages: &[(String, String)],
+        enable_thinking: bool,
+    ) -> Option<String> {
+        let template = self.raw_chat_template()?;
+
+        let bos = {
+            let id = unsafe { ffi::llama_vocab_bos(self.vocab) };
+            self.token_to_piece_impl(id).unwrap_or_default()
+        };
+        let eos = self.token_to_piece_impl(self.eos_token).unwrap_or_default();
+
+        let msgs: Vec<minijinja::Value> = messages
+            .iter()
+            .map(|(role, content)| context! { role => role, content => content })
+            .collect();
+
+        let mut env = Environment::new();
+        // Chat templates lean on Python string methods (.strip(), .split(), …).
+        env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
+        env.add_template_owned("chat", template).ok()?;
+        let tmpl = env.get_template("chat").ok()?;
+
+        tmpl.render(context! {
+            messages => msgs,
+            add_generation_prompt => true,
+            enable_thinking => enable_thinking,
+            bos_token => bos,
+            eos_token => eos,
+        })
+        .ok()
+    }
+
+    /// Build the final prompt token ids for a chat request. Prefers the model's
+    /// real Jinja template; falls back to llama.cpp's built-in format. Each path
+    /// tokenizes with the flags appropriate to how it produced the string.
+    pub(super) fn build_prompt_tokens_impl(
+        &self,
+        messages: &[(String, String)],
+        enable_thinking: bool,
+    ) -> Result<Vec<i32>> {
+        if let Some(rendered) = self.render_chat_jinja(messages, enable_thinking) {
+            tracing::debug!(
+                chars = rendered.len(),
+                enable_thinking,
+                "chat prompt: rendered via model Jinja template"
+            );
+            return self.tokenize_prompt_impl(&rendered);
+        }
+        tracing::debug!("chat prompt: fell back to llama.cpp built-in template");
+        // Fallback: built-in format + manual <think> prefill, tokenized the legacy way.
+        let mut prompt = self.apply_chat_template_impl(messages)?;
+        if enable_thinking {
+            prompt.push_str("<think>\n");
+        }
+        self.tokenize_impl(&prompt)
     }
 
     pub(super) fn token_to_piece_impl(&self, token: i32) -> Result<String> {

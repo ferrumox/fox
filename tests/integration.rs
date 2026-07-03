@@ -852,6 +852,7 @@ async fn thinking_openai_non_streaming_no_tags_in_content() {
         serde_json::json!({
             "model": "think",
             "messages": [{"role": "user", "content": "Hi"}],
+            "think": true,
             "stream": false,
             "max_tokens": 16,
         }),
@@ -891,6 +892,7 @@ async fn thinking_openai_streaming_no_tags_in_content() {
         serde_json::json!({
             "model": "think",
             "messages": [{"role": "user", "content": "Hi"}],
+            "think": true,
             "stream": true,
             "max_tokens": 16,
         }),
@@ -926,6 +928,7 @@ async fn thinking_ollama_chat_non_streaming_separates_thinking_field() {
         serde_json::json!({
             "model": "think",
             "messages": [{"role": "user", "content": "Hi"}],
+            "think": true,
             "stream": false,
         }),
     )
@@ -967,6 +970,7 @@ async fn thinking_ollama_chat_streaming_no_tags_in_content() {
         serde_json::json!({
             "model": "think",
             "messages": [{"role": "user", "content": "Hi"}],
+            "think": true,
             "stream": true,
         }),
     )

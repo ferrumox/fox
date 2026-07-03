@@ -27,6 +27,18 @@ pub enum MessageContent {
 }
 
 impl MessageContent {
+    /// Number of non-text blocks (`image_url`, `input_audio`, …) that `as_text`
+    /// drops. fox has no vision/audio support, so callers can warn on these
+    /// instead of dropping them silently.
+    pub fn non_text_blocks(&self) -> usize {
+        match self {
+            MessageContent::Text(_) => 0,
+            MessageContent::Array(blocks) => {
+                blocks.iter().filter(|b| b.block_type != "text").count()
+            }
+        }
+    }
+
     /// Extract all text from the content, joining text blocks with a newline.
     pub fn as_text(&self) -> String {
         match self {
@@ -113,6 +125,10 @@ pub struct ChatCompletionRequest {
     /// Structured output format.
     #[serde(default)]
     pub response_format: Option<ResponseFormat>,
+    /// fox extension: opt in to the model's native reasoning/thinking when it
+    /// supports it. Default off — thinking is NOT enabled unless requested.
+    #[serde(default)]
+    pub think: Option<bool>,
     /// Options for the streaming response (include_usage etc.).
     #[serde(default)]
     pub stream_options: Option<StreamOptions>,

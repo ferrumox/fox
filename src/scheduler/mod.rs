@@ -100,6 +100,7 @@ mod tests {
             num_heads: 32,
             num_heads_kv: 32,
             head_dim: 128,
+            n_embd: 4096,
             vocab_size: 32000,
         };
         let kv = Arc::new(KVCacheManager::new(&config, 1_000_000_000, 0.5, 16, 1, 1));
@@ -124,6 +125,7 @@ mod tests {
             num_heads: 2,
             num_heads_kv: 2,
             head_dim: 64,
+            n_embd: 128,
             vocab_size: 1000,
         };
         let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1, 1));
@@ -174,6 +176,7 @@ mod tests {
             num_heads: 2,
             num_heads_kv: 2,
             head_dim: 64,
+            n_embd: 128,
             vocab_size: 1000,
         };
         let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1, 1));

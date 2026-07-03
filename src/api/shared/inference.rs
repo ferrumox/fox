@@ -167,6 +167,8 @@ pub fn sampling_from_ollama(
             top_p,
             top_k,
             repetition_penalty: rep,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
             seed,
             stop,
             show_thinking,
@@ -181,15 +183,14 @@ pub fn sampling_from_ollama(
 // Thinking extraction
 // ---------------------------------------------------------------------------
 
-pub fn extract_thinking(text: &str) -> (Option<String>, String) {
-    let start_tag = "<think>";
-    let end_tag = "</think>";
+pub fn extract_thinking(text: &str, start_tag: &str, end_tag: &str) -> (Option<String>, String) {
     if let Some(end) = text.find(end_tag) {
-        // Well-formed <think>...</think> block.
+        // Well-formed <open>...<close> block.
         let think_start = text
             .find(start_tag)
             .map(|i| i + start_tag.len())
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .min(end); // guard against a malformed open-after-close ordering
         let thinking = text[think_start..end].trim().to_string();
         let content = text[end + end_tag.len()..].trim().to_string();
         let thinking = if thinking.is_empty() {
@@ -401,24 +402,24 @@ pub fn prepare_prompt(
 
     let flat: Vec<(String, String)> = messages.iter().map(flatten_message_for_template).collect();
 
-    let mut prompt = entry.engine.apply_chat_template(&flat).unwrap_or_else(|_| {
-        flat.iter()
-            .map(|(r, c)| format!("{r}: {c}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    });
-
-    if show_thinking {
-        prompt.push_str("<think>\n");
-    }
-
-    let tokens: Vec<i32> = entry.engine.tokenize(&prompt).unwrap_or_else(|_| {
-        if prompt.is_empty() {
-            vec![0]
-        } else {
-            prompt.bytes().map(|b| b as i32).take(4096).collect()
-        }
-    });
+    // Build the prompt tokens via the model's chat template (real Jinja when the
+    // model has one, threading `enable_thinking`; built-in format otherwise).
+    let tokens: Vec<i32> = entry
+        .engine
+        .build_prompt_tokens(&flat, show_thinking)
+        .unwrap_or_else(|_| {
+            // Last-ditch fallback: plain "role: content" text, byte-tokenized.
+            let prompt = flat
+                .iter()
+                .map(|(r, c)| format!("{r}: {c}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if prompt.is_empty() {
+                vec![0]
+            } else {
+                prompt.bytes().map(|b| b as i32).take(4096).collect()
+            }
+        });
 
     let len = tokens.len();
     (tokens, len)
@@ -538,7 +539,11 @@ mod tests {
 
     #[test]
     fn test_extract_thinking_well_formed() {
-        let (thinking, content) = extract_thinking("<think>\nsome thought\n</think>\nthe answer");
+        let (thinking, content) = extract_thinking(
+            "<think>\nsome thought\n</think>\nthe answer",
+            "<think>",
+            "</think>",
+        );
         assert_eq!(thinking.as_deref(), Some("some thought"));
         assert_eq!(content, "the answer");
     }
@@ -546,8 +551,11 @@ mod tests {
     #[test]
     fn test_extract_thinking_unclosed_block() {
         // Generation cut off before </think> — thinking leaks into content without this fix.
-        let (thinking, content) =
-            extract_thinking("<think>\nI was still thinking when tokens ran out");
+        let (thinking, content) = extract_thinking(
+            "<think>\nI was still thinking when tokens ran out",
+            "<think>",
+            "</think>",
+        );
         assert_eq!(
             thinking.as_deref(),
             Some("I was still thinking when tokens ran out")
@@ -557,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_extract_thinking_no_think_tag() {
-        let (thinking, content) = extract_thinking("plain response");
+        let (thinking, content) = extract_thinking("plain response", "<think>", "</think>");
         assert!(thinking.is_none());
         assert_eq!(content, "plain response");
     }

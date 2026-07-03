@@ -41,6 +41,7 @@ impl Model for StubModel {
             num_heads: 2,
             num_heads_kv: 2,
             head_dim: 64,
+            n_embd: 128,
             vocab_size: 256,
         }
     }
