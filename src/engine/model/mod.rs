@@ -237,6 +237,13 @@ pub trait Model: Send + Sync {
         None
     }
 
+    /// Human description of the compute backend this model runs on (e.g.
+    /// `Vulkan0 — AMD Radeon 890M`, or `CPU`). Reported at startup so users can see
+    /// whether inference is GPU-accelerated. Default: `"cpu"` (stubs/mocks).
+    fn active_backend(&self) -> String {
+        "cpu".to_string()
+    }
+
     /// Build a `ModelInfo` snapshot of this model's facts (used by `fox probe`).
     ///
     /// The default implementation assembles what it can from the generic trait
@@ -247,6 +254,7 @@ pub trait Model: Send + Sync {
         let c = self.model_config();
         ModelInfo {
             arch_name: "unknown".to_string(),
+            backend: self.active_backend(),
             n_embd: self.embedding_dim(),
             n_head: c.num_heads,
             n_head_kv: c.num_heads_kv,

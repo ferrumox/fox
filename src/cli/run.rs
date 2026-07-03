@@ -198,6 +198,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
     )?;
     spinner.finish_and_clear();
     theme::print_success("Model loaded.");
+    theme::print_kv_pair("Backend", &model.active_backend());
 
     // Size the block pool from the backend's actual KV capacity (llama_n_ctx).
     let kv_cache = std::sync::Arc::new(KVCacheManager::from_kv_tokens(

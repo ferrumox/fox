@@ -51,6 +51,7 @@ pub async fn run_probe(args: ProbeArgs) -> Result<()> {
     println!();
     theme::print_kv_pair("Model", stem);
     theme::print_kv_pair("Architecture", &info.arch_name);
+    theme::print_kv_pair("Backend", &info.backend);
     theme::print_kv_pair("n_embd", &info.n_embd.to_string());
     theme::print_kv_pair(
         "Heads",

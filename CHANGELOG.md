@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CONTRIBUTING documents the GPU-build story, including the exact toolchain
   (`glslc`, `glslang-tools`, `libvulkan-dev`, `spirv-headers`) and the
   build-in-container / run-on-host split.
+- **fox reports the active compute backend at startup.** `fox run`, `fox serve` (in
+  the log) and `fox probe` now show whether inference runs on the GPU (e.g.
+  `Vulkan0 — AMD Radeon 890M`) or the CPU, read from the ggml device registry —
+  closing the "is it actually using my GPU?" gap. Exposed on `ModelInfo.backend`.
 
 ---
 
