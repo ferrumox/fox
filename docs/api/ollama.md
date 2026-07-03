@@ -85,13 +85,18 @@ Multi-turn conversation using the Ollama chat format. Supports streaming (NDJSON
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `temperature` | `1.0` | Sampling temperature. |
-| `top_p` | `1.0` | Nucleus sampling probability. |
-| `top_k` | `0` | Top-K filter. `0` = disabled. |
-| `repeat_penalty` | `1.0` | Repetition penalty. |
+| `temperature` | `0.8` | Sampling temperature. |
+| `top_p` | `0.9` | Nucleus sampling probability. |
+| `top_k` | `40` | Top-K filter (mirrors upstream Ollama). `0` = disabled. |
+| `repeat_penalty` | `1.1` | Repetition penalty (mirrors upstream Ollama). `1.0` = disabled. |
 | `seed` | `null` | RNG seed. |
-| `num_predict` | `256` | Maximum tokens to generate (equivalent to `max_tokens`). |
+| `num_predict` | `512` | Maximum tokens to generate (`2048` when thinking is on). |
 | `stop` | `[]` | Stop sequences. |
+
+> **Why the defaults differ from `/v1/*`.** The Ollama surface mirrors upstream
+> Ollama (`top_k = 40`, `repeat_penalty = 1.1`); the OpenAI surface mirrors OpenAI
+> (no `top_k`, no repeat penalty). This divergence is deliberate — the single source
+> of truth is `src/api/shared/sampling_defaults.rs`.
 
 ### Response (streaming)
 

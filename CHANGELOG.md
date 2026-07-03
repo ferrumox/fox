@@ -32,6 +32,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GPU-enabled binary that runs natively on any host with a Vulkan driver — no build
   toolchain needed on the host.
 
+### Changed
+
+- **Sampling defaults centralized** (`src/api/shared/sampling_defaults.rs`) — the
+  per-request defaults were duplicated as magic literals across the OpenAI and Ollama
+  handlers. They now live in one table keyed by API surface, with the cross-surface
+  divergence documented as a **deliberate** decision: the OpenAI surface (`/v1/*`)
+  mirrors OpenAI (no `top_k`, no repeat penalty) while the Ollama surface (`/api/*`)
+  mirrors upstream Ollama (`top_k = 40`, `repeat_penalty = 1.1`). A unit test locks
+  the divergence so it can't be "unified" by accident. (Model-architecture rework P4.)
+
+### Fixed
+
+- **API docs listed the wrong sampling defaults.** `docs/api/{openai,ollama}.md`
+  claimed `temperature = 1.0` / `top_p = 1.0` (actual: `0.8` / `0.9`) and the Ollama
+  page showed `top_k = 0` / `repeat_penalty = 1.0` when fox actually applies Ollama's
+  `40` / `1.1`. Corrected, with a note explaining the deliberate `/v1` vs `/api`
+  divergence.
+- **`--max-models` help now states the default-1 trade-off** — a request for a second
+  model evicts the first (logged), which is the safe choice for small-VRAM iGPUs;
+  raise it if you have the VRAM.
+
 ---
 
 ## [0.11.0] - 2026-07-03

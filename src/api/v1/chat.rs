@@ -16,6 +16,7 @@ use crate::api::router::AppState;
 use crate::api::shared::inference::{
     prepare_prompt, resolve_tool_choice, try_parse_tool_call, MessageForTemplate,
 };
+use crate::api::shared::sampling_defaults as defaults;
 use crate::api::shared::streaming::finish_reason_str;
 use crate::api::types::{
     ChatCompletionChoice, ChatCompletionChunk, ChatCompletionChunkChoice, ChatCompletionRequest,
@@ -95,20 +96,30 @@ pub async fn chat_completions(
         enable_thinking,
     );
 
-    let max_tokens = req.max_tokens.or(req.max_completion_tokens).unwrap_or(256) as usize;
+    let max_tokens = req
+        .max_tokens
+        .or(req.max_completion_tokens)
+        .unwrap_or(defaults::openai::MAX_TOKENS as u32) as usize;
 
     let sampling = SamplingParams {
-        temperature: req.temperature.unwrap_or(0.8).max(0.0),
-        top_p: req.top_p.unwrap_or(0.9).clamp(0.0, 1.0),
-        top_k: req.top_k.unwrap_or(0),
-        repetition_penalty: req.repetition_penalty.unwrap_or(1.0).max(1.0),
-        frequency_penalty: req.frequency_penalty.unwrap_or(0.0),
-        presence_penalty: req.presence_penalty.unwrap_or(0.0),
+        temperature: req.temperature.unwrap_or(defaults::TEMPERATURE).max(0.0),
+        top_p: req.top_p.unwrap_or(defaults::TOP_P).clamp(0.0, 1.0),
+        top_k: req.top_k.unwrap_or(defaults::openai::TOP_K),
+        repetition_penalty: req
+            .repetition_penalty
+            .unwrap_or(defaults::openai::REPETITION_PENALTY)
+            .max(1.0),
+        frequency_penalty: req
+            .frequency_penalty
+            .unwrap_or(defaults::openai::FREQUENCY_PENALTY),
+        presence_penalty: req
+            .presence_penalty
+            .unwrap_or(defaults::openai::PRESENCE_PENALTY),
         seed: req.seed,
         stop: req.stop.clone(),
         show_thinking: false,
         initial_in_thinking: enable_thinking,
-        max_thinking_chars: 8192,
+        max_thinking_chars: defaults::MAX_THINKING_CHARS,
     };
 
     let req_id = entry.engine.next_request_id();
