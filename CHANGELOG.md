@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`fox`, `fox-bench`, `libggml-vulkan.so`) to `./fox-vulkan/`, so you get a
   GPU-enabled binary that runs natively on any host with a Vulkan driver — no build
   toolchain needed on the host.
+- **Golden tests now run in CI** — a new `golden` job builds llama.cpp for real (the
+  only CI job that does; the rest stay on the fast stub) and runs the golden suite
+  against a tiny GGUF (Qwen2.5-0.5B) on CPU: `ModelInfo` invariants, non-degenerate
+  embeddings, and tokenize round-trips on emoji/CJK. The model and the llama.cpp build
+  are cached so it only pays the full cost when either changes. This wires up the
+  regression net that P0 built but only ran locally.
 
 ### Changed
 
