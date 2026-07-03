@@ -91,14 +91,28 @@ impl LlamaCppModel {
     /// template or it fails to render — the caller then falls back to the built-in
     /// llama.cpp format.
     ///
-    /// TODO(perf): this parses the template on every call; cache the compiled
-    /// template on the model once the interface settles.
+    /// The `minijinja::Environment` (with the template already parsed) is built once
+    /// and cached in `self.chat_env`, so only the *render* runs per request — parsing
+    /// the template on every call was a needless per-request cost.
     fn render_chat_jinja(
         &self,
         messages: &[(String, String)],
         enable_thinking: bool,
     ) -> Option<String> {
-        let template = self.raw_chat_template()?;
+        let env = self
+            .chat_env
+            .get_or_init(|| {
+                let template = self.raw_chat_template()?;
+                let mut env = Environment::new();
+                // Chat templates lean on Python string methods (.strip(), .split(), …).
+                env.set_unknown_method_callback(
+                    minijinja_contrib::pycompat::unknown_method_callback,
+                );
+                env.add_template_owned("chat", template).ok()?;
+                Some(env)
+            })
+            .as_ref()?;
+        let tmpl = env.get_template("chat").ok()?;
 
         let bos = {
             let id = unsafe { ffi::llama_vocab_bos(self.vocab) };
@@ -110,12 +124,6 @@ impl LlamaCppModel {
             .iter()
             .map(|(role, content)| context! { role => role, content => content })
             .collect();
-
-        let mut env = Environment::new();
-        // Chat templates lean on Python string methods (.strip(), .split(), …).
-        env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
-        env.add_template_owned("chat", template).ok()?;
-        let tmpl = env.get_template("chat").ok()?;
 
         tmpl.render(context! {
             messages => msgs,

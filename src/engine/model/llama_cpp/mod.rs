@@ -294,6 +294,11 @@ pub struct LlamaCppModel {
     /// Whether this instance owns the model pointer and should free it on drop.
     /// `false` when sharing weights with another `LlamaCppModel` (e.g. bench-kv).
     owns_model: bool,
+    /// Lazily-built, cached minijinja environment holding the model's compiled chat
+    /// template (pycompat callback + the GGUF template added once). The inner `None`
+    /// means the model has no usable embedded template. Cached so the template is
+    /// parsed once, not on every request (see `render_chat_jinja`).
+    pub(super) chat_env: std::sync::OnceLock<Option<minijinja::Environment<'static>>>,
 }
 
 #[cfg(not(fox_stub))]
@@ -502,6 +507,7 @@ impl LlamaCppModel {
             eos_token,
             effective_ctx: effective_max_ctx,
             owns_model: true,
+            chat_env: std::sync::OnceLock::new(),
         })
     }
 
@@ -572,6 +578,7 @@ impl LlamaCppModel {
             eos_token: self.eos_token,
             effective_ctx: effective_max_ctx,
             owns_model: false, // weights are owned by the original LlamaCppModel
+            chat_env: std::sync::OnceLock::new(),
         })
     }
 }

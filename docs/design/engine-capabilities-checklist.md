@@ -58,8 +58,8 @@ sliding window, MLA, state-space). This is why a single source of truth (`ModelI
 
 ## 4. Inference features
 
-**Sampling:** ✅ temp, top_p, top_k, seed, repetition_penalty · ⚠️ frequency/presence_penalty
-(accepted but **ignored**) · ❌ min_p, typical_p, mirostat, logit_bias, min_tokens.
+**Sampling:** ✅ temp, top_p, top_k, seed, repetition_penalty, frequency/presence_penalty
+(additive, OpenAI semantics) · ❌ min_p, typical_p, mirostat, logit_bias, min_tokens.
 
 **Decoding / scheduling:**
 

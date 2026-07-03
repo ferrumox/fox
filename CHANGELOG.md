@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Chat template compiled once, not per request** — the model's Jinja chat template
+  was re-parsed on every chat request. The `minijinja` environment (with the template
+  parsed and the pycompat callback installed) is now built lazily and cached on the
+  model, so only the render runs per request. Behaviour-identical; covered by a new
+  golden test (`golden_chat_template_renders`) that asserts a non-empty, deterministic
+  render across calls. First item of the 0.13 serving-robustness work
+  (`docs/design/serving-robustness.md`).
+
 ## [0.12.0] - 2026-07-06
 
 GPU inference becomes a first-class, reproducible path, and the model-architecture

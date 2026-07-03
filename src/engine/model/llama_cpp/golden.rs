@@ -113,6 +113,35 @@ fn golden_embeddings_nondegenerate() {
     );
 }
 
+/// The chat template must render to a non-empty prompt, and — because the compiled
+/// `minijinja::Environment` is cached after the first call — rendering the same
+/// messages twice must be byte-for-byte identical. Guards the template-cache change.
+#[test]
+fn golden_chat_template_renders() {
+    let m = golden!();
+    let messages = vec![
+        ("system".to_string(), "You are a helpful assistant.".to_string()),
+        ("user".to_string(), "Say hi in one word.".to_string()),
+    ];
+
+    let first = m
+        .build_prompt_tokens(&messages, false)
+        .expect("build_prompt_tokens should succeed");
+    assert!(
+        !first.is_empty(),
+        "rendered chat prompt tokenized to nothing"
+    );
+
+    // Second call hits the cached environment — output must be identical.
+    let second = m
+        .build_prompt_tokens(&messages, false)
+        .expect("second build_prompt_tokens should succeed");
+    assert_eq!(
+        first, second,
+        "cached template render must be deterministic across calls"
+    );
+}
+
 /// tokenize → detokenize must reconstruct tricky text. Uses the raw-byte piece
 /// path so multi-token UTF-8 sequences (emoji, CJK) survive; normalizes the SPM
 /// word-boundary marker so the comparison works for SentencePiece models too.
