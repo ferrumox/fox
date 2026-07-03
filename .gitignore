@@ -16,8 +16,13 @@ models/
 *.o
 *.a
 *.so
+*.so.*
 *.dylib
 *.dll
+
+# GGUF backend libs copied to the repo root by `make golden`
+/libggml*
+/libllama*
 
 # IDE / Editor
 .idea/
