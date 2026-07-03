@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the log) and `fox probe` now show whether inference runs on the GPU (e.g.
   `Vulkan0 — AMD Radeon 890M`) or the CPU, read from the ggml device registry —
   closing the "is it actually using my GPU?" gap. Exposed on `ModelInfo.backend`.
+- **Prebuilt Vulkan binary in releases** — `release.yml` now builds a
+  `x86_64-unknown-linux-gnu-vulkan` tarball (on Ubuntu 24.04) alongside the CPU one,
+  so GPU users get a ready-to-run binary. The Vulkan tarball needs glibc 2.39+ and a
+  Vulkan driver (Mesa RADV/ANV, etc.) at runtime.
 
 ---
 
