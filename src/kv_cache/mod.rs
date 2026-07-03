@@ -185,14 +185,26 @@ impl KVCacheManager {
             type_k,
             type_v,
         );
+        Self::with_total_blocks(total_blocks, block_size)
+    }
 
+    /// Create a manager whose block pool exactly matches the backend's allocated
+    /// KV capacity, where `total_kv_tokens` is llama.cpp's `llama_n_ctx`. This is
+    /// the correct sizing (see `Model::kv_cache_capacity`): the pool follows the
+    /// backend's real allocation instead of an independent, formula-based estimate
+    /// that can disagree with it and let fox over-claim KV that isn't there.
+    pub fn from_kv_tokens(total_kv_tokens: usize, block_size: usize) -> Self {
+        let total_blocks = total_kv_tokens / block_size.max(1);
+        Self::with_total_blocks(total_blocks, block_size)
+    }
+
+    /// Build the pool from a final block count (shared by both constructors).
+    fn with_total_blocks(total_blocks: usize, block_size: usize) -> Self {
+        let total_blocks = total_blocks.max(1);
         let free_list: Vec<BlockId> = (0..total_blocks).collect();
         let ref_count: Vec<AtomicUsize> = (0..total_blocks).map(|_| AtomicUsize::new(0)).collect();
 
-        debug!(
-            total_blocks,
-            block_size, gpu_memory_bytes, "KV cache manager initialized"
-        );
+        debug!(total_blocks, block_size, "KV cache manager initialized");
 
         Self {
             total_blocks,
@@ -349,6 +361,7 @@ mod tests {
             num_heads: 32,
             num_heads_kv: 32,
             head_dim: 128,
+            n_embd: 4096,
             vocab_size: 32000,
         }
     }

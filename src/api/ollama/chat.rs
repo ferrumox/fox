@@ -91,7 +91,8 @@ pub async fn ollama_chat(
                 .map(|s| !matches!(s, "false" | "none"))
                 .unwrap_or(false)
     });
-    let use_thinking = think_requested.unwrap_or(supports_thinking) && supports_thinking;
+    // Opt-in: thinking is off unless the request asks for it (and the model supports it).
+    let use_thinking = think_requested.unwrap_or(false) && supports_thinking;
 
     let stream_mode = req.stream.unwrap_or(true);
     let show_thinking_in_output = use_thinking && !stream_mode;
@@ -184,7 +185,8 @@ pub async fn ollama_chat(
         let (full_content, eval_count, stop_reason) = collect_tokens(&mut rx).await;
         let elapsed_ns = start.elapsed().as_nanos() as u64;
 
-        let (thinking, visible) = extract_thinking(&full_content);
+        let (think_open, think_close) = entry.engine.reasoning_delimiters();
+        let (thinking, visible) = extract_thinking(&full_content, &think_open, &think_close);
 
         let (content, ollama_tool_calls) = if has_tools {
             let (text, oa_calls) = try_parse_tool_call(&visible, eff_tools);

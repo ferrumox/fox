@@ -6,6 +6,8 @@
 
 #[cfg(not(fox_stub))]
 mod batch;
+#[cfg(all(test, not(fox_stub)))]
+mod golden;
 #[cfg(not(fox_stub))]
 mod metadata;
 mod stub;
@@ -33,11 +35,21 @@ use anyhow::anyhow;
 #[cfg(not(fox_stub))]
 use crate::engine::ffi;
 #[cfg(not(fox_stub))]
-use crate::engine::model::{InferenceRequestForModel, Logits, Model, ModelConfig};
+use crate::engine::model::{InferenceRequestForModel, Logits, Model, ModelConfig, ModelInfo};
 
 /// SentencePiece uses U+2581 (▁) for word boundaries.
 #[cfg(not(fox_stub))]
 pub(super) const SPM_SPACE: char = '\u{2581}';
+
+/// Known non-default reasoning-delimiter formats: `(open, close)` marker pairs,
+/// matched against the model's OWN chat template (never its name). The default
+/// `<think>`/`</think>` covers most reasoning models (Qwen3, DeepSeek-R1), so they
+/// need no entry here. Adding support for a new format = one line + a golden test.
+#[cfg(not(fox_stub))]
+const REASONING_FORMATS: &[(&str, &str)] = &[
+    // Gemma / GPT-OSS "channel" (harmony) format — note the mirrored brackets.
+    ("<|channel>", "<channel|>"),
+];
 
 /// Query current free GPU memory in bytes via nvidia-smi.
 /// Returns None on CPU-only systems or when nvidia-smi is unavailable.
@@ -147,7 +159,7 @@ fn diagnose_load_failure(model_path: &std::path::Path) -> anyhow::Error {
         _ => false,
     };
 
-    if memory_likely_cause || file_size > 0 {
+    if memory_likely_cause {
         let mut msg = format!(
             "failed to load '{}' ({:.1} GB): not enough memory to fit the model.\n",
             model_path
@@ -180,12 +192,37 @@ fn diagnose_load_failure(model_path: &std::path::Path) -> anyhow::Error {
         }
         anyhow!("{}", msg.trim_end())
     } else {
-        anyhow!(
-            "failed to load '{}': llama.cpp could not open the model.\n\
-             The file may use a GGUF version not supported by this build of Fox.\n\
-             → Check for a newer Fox release or try a different model variant.",
-            model_path.display()
-        )
+        // Load failed but memory is NOT the obvious cause — don't assert OOM. The
+        // common case here is a missing compute backend (no GPU driver AND the CPU
+        // backend .so not found next to the binary).
+        let mut msg = format!(
+            "failed to load '{}' ({:.1} GB): llama.cpp returned no model.\n",
+            model_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?"),
+            file_gb
+        );
+        if let Some(vram) = gpu_free {
+            msg.push_str(&format!(
+                "  GPU free:  {:.1} GB\n",
+                vram as f64 / 1_073_741_824.0
+            ));
+        }
+        if let Some(ram) = ram_free {
+            msg.push_str(&format!(
+                "  RAM free:  {:.1} GB\n",
+                ram as f64 / 1_073_741_824.0
+            ));
+        }
+        msg.push_str("\nPossible causes:\n");
+        msg.push_str(
+            "  • No compute backend — GPU driver missing AND the CPU backend library\n    \
+             (libggml-cpu.so) is not next to the fox binary.\n",
+        );
+        msg.push_str("  • GGUF version/architecture not supported by this llama.cpp build.\n");
+        msg.push_str("  • The model is larger than free memory (see figures above).\n");
+        anyhow!("{}", msg.trim_end())
     }
 }
 
@@ -350,6 +387,7 @@ impl LlamaCppModel {
             num_heads: n_head,
             num_heads_kv: n_head_kv,
             head_dim,
+            n_embd,
             vocab_size: n_vocab as usize,
         };
 
@@ -543,15 +581,54 @@ impl Model for LlamaCppModel {
         self.apply_chat_template_impl(messages)
     }
 
+    fn build_prompt_tokens(
+        &self,
+        messages: &[(String, String)],
+        enable_thinking: bool,
+    ) -> Result<Vec<i32>> {
+        self.build_prompt_tokens_impl(messages, enable_thinking)
+    }
+
+    fn reasoning_delimiters(&self) -> Option<(String, String)> {
+        // Detect the reasoning format from the model's OWN chat template — never
+        // from its name. `REASONING_FORMATS` is a small, documented, extensible
+        // registry of known non-default (open, close) marker pairs; a model matches
+        // a format when its template references BOTH markers. No match → the caller
+        // uses the default `<think>`/`</think>`. Adding a format is one line + a
+        // golden test (see docs/design/model-architecture-rework.md §4.3).
+        let t = self.raw_chat_template()?;
+        REASONING_FORMATS
+            .iter()
+            .find(|(open, close)| t.contains(open) && t.contains(close))
+            .map(|(open, close)| (open.to_string(), close.to_string()))
+    }
+
     fn context_len(&self) -> u32 {
         self.effective_ctx
     }
 
+    fn kv_cache_capacity(&self) -> usize {
+        // The real total KV capacity llama.cpp allocated for this context — read
+        // back rather than recomputed, so fox's block pool matches it exactly.
+        let ctx_guard = match self._ctx.lock() {
+            Ok(g) => g,
+            Err(_) => return self.effective_ctx as usize,
+        };
+        unsafe { ffi::llama_n_ctx(ctx_guard.as_ptr() as *const _) as usize }
+    }
+
     fn supports_thinking(&self) -> bool {
-        // Reasoning models (Qwen3, DeepSeek-R1, …) have `<think>` as a single
-        // special token.  Tokenising it with add_special=true produces at most
-        // [BOS, <think>] (2 tokens).  Non-reasoning models split it into many
-        // character/subword pieces, so the count will be higher.
+        // Primary signal: the model's chat template exposes an `enable_thinking`
+        // toggle (Gemma-4, Qwen3, …). This is robust regardless of what the model
+        // names its reasoning tokens.
+        if self
+            .raw_chat_template()
+            .is_some_and(|t| t.contains("enable_thinking"))
+        {
+            return true;
+        }
+        // Fallback signal: `<think>` is a single special token (DeepSeek-R1, some
+        // Qwen). Tokenising it with add_special=true yields at most [BOS, <think>].
         self.tokenize_impl("<think>")
             .map(|t| t.len() <= 2)
             .unwrap_or(false)
@@ -614,7 +691,7 @@ impl Model for LlamaCppModel {
     }
 
     fn embedding_dim(&self) -> usize {
-        self.config.num_heads * self.config.head_dim
+        self.config.n_embd
     }
 
     fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>> {
@@ -650,6 +727,36 @@ impl Model for LlamaCppModel {
             }
         }
         result
+    }
+
+    fn model_info(&self) -> ModelInfo {
+        // Read metadata-derived truth directly from the model, rather than the
+        // reconstructed values the generic default would produce.
+        let model = self._model.as_ptr();
+        let n_ctx_train = unsafe { ffi::llama_model_n_ctx_train(model) } as u32;
+        let arch_name = self
+            .read_meta_str("general.architecture")
+            .unwrap_or_else(|| "unknown".to_string());
+        let has_chat_template =
+            unsafe { !ffi::llama_model_chat_template(model, std::ptr::null()).is_null() };
+
+        ModelInfo {
+            arch_name,
+            n_embd: self.config.n_embd,
+            n_head: self.config.num_heads,
+            n_head_kv: self.config.num_heads_kv,
+            head_dim: self.config.head_dim,
+            n_layer: self.config.num_layers,
+            n_ctx_train,
+            effective_ctx: self.effective_ctx,
+            vocab_size: self.config.vocab_size,
+            eos_token_id: self.eos_token,
+            has_chat_template,
+            supports_thinking: self.supports_thinking(),
+            supports_seq_copy: self.supports_seq_copy(),
+            stop_token_count: self.stop_tokens().len(),
+            recommended_sampling: self.recommended_sampling(),
+        }
     }
 }
 

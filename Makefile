@@ -79,6 +79,19 @@ ci:
 	FOX_SKIP_LLAMA=1 cargo clippy --all-targets --features test-helpers -- -D warnings
 	FOX_SKIP_LLAMA=1 cargo test --all --features test-helpers
 
+# Golden regression tests — assert model-facing invariants against a REAL model
+# (ModelInfo numbers, non-degenerate embeddings, tokenize round-trip). Requires a
+# real build (not the stub) and a GGUF. The backend .so files are copied next to
+# the working dir so llama.cpp's dlopen search (executable dir + cwd) finds them.
+#   Usage: make golden GOLDEN_MODEL=~/.cache/ferrumox/models/gemma-4-E2B-it-Q4_K_M.gguf
+GOLDEN_MODEL ?=
+golden:
+	@test -n "$(GOLDEN_MODEL)" || \
+		(echo "Set GOLDEN_MODEL=/path/to/model.gguf" && exit 1)
+	cargo test --lib --no-run
+	find target \( -name 'libggml*.so*' -o -name 'libllama*.so*' \) -exec cp {} . \;
+	FOX_GOLDEN_MODEL="$(GOLDEN_MODEL)" cargo test --lib golden -- --nocapture
+
 # Install the pre-push git hook so CI checks run automatically on every push.
 setup:
 	bash scripts/install-hooks.sh

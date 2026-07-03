@@ -196,19 +196,13 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         &tensor_split_parsed,
         args.moe_cpu,
     )?;
-    let model_config = model.model_config();
-
     spinner.finish_and_clear();
     theme::print_success("Model loaded.");
 
-    let gpu_memory_bytes = gpu_memory_bytes_load;
-    let kv_cache = std::sync::Arc::new(KVCacheManager::new(
-        &model_config,
-        gpu_memory_bytes,
-        args.gpu_memory_fraction,
+    // Size the block pool from the backend's actual KV capacity (llama_n_ctx).
+    let kv_cache = std::sync::Arc::new(KVCacheManager::from_kv_tokens(
+        model.kv_cache_capacity(),
         args.block_size,
-        1,
-        1,
     ));
     let scheduler = std::sync::Arc::new(crate::scheduler::Scheduler::new(kv_cache.clone(), 1));
 
@@ -573,6 +567,8 @@ fn build_sampling_params(
         top_p,
         top_k,
         repetition_penalty: args.repetition_penalty,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
         seed: args.seed,
         stop: None,
         show_thinking: args.show_thinking,
