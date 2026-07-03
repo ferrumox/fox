@@ -23,6 +23,44 @@ cargo check
 
 `FOX_SKIP_LLAMA=1` is the key escape hatch for any work that doesn't touch real inference.
 
+### GPU backends
+
+`build.rs` picks the GPU backend **at build time** from the toolchains it finds on the
+host (CUDA via `nvcc`, ROCm via `hipcc`, Vulkan via `glslc`, Metal on macOS), and the
+backend is then `dlopen`-ed at runtime — one binary runs on GPU or CPU, falling back to
+CPU automatically when no GPU is present.
+
+**Key split:** *building* a GPU backend needs its toolchain; *running* it only needs the
+GPU driver. So you can build in a container and run the binary on the host.
+
+**Vulkan** (AMD / Intel iGPUs and any Vulkan GPU — validated on an AMD Radeon 890M
+`gfx1150`). Building the Vulkan backend needs, on top of the standard `cmake clang
+libclang-dev ninja-build`:
+
+```
+glslc  glslang-tools  libvulkan-dev  spirv-headers
+```
+
+(llama.cpp's ggml-vulkan CMake wants both the Vulkan/`glslc` tooling **and**
+`SPIRV-Headers`.) These are all packaged on Ubuntu 24.04; 22.04 does not ship `glslc`
+easily. The reproducible way to build + run is [`Dockerfile.vulkan`](Dockerfile.vulkan):
+
+```bash
+# Build the image (installs the toolchain above and compiles the Vulkan backend)
+docker build -f Dockerfile.vulkan -t fox:vulkan .
+
+# Run with the host GPU passed through (the image ships the Mesa driver)
+docker run --rm --device /dev/dri --group-add video \
+  -p 8080:8080 -v ~/.cache/ferrumox/models:/root/.cache/ferrumox/models \
+  fox:vulkan serve
+
+# …or extract the self-contained bundle and run it natively on a host that already
+# has a Vulkan driver (Mesa/RADV, etc.):
+id=$(docker create fox:vulkan) \
+  && docker cp "$id:/usr/local/lib/fox" ./fox-vulkan && docker rm "$id" \
+  && ./fox-vulkan/fox serve --model-path <model.gguf>
+```
+
 ## Code style and CI
 
 `make ci` runs exactly what CI runs — do this before pushing:

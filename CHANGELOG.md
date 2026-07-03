@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **`Dockerfile.vulkan`** — a reproducible Vulkan build for AMD/Intel iGPUs and any
+  Vulkan-capable GPU (no CUDA/ROCm). Validated end-to-end on an AMD Radeon 890M
+  (`gfx1150`, RDNA 3.5): coherent output, GPU-accelerated, both by extracting the
+  binary to run natively and by running the image with `--device /dev/dri`. The image
+  ships the Mesa Vulkan driver and falls back to CPU when no GPU is present.
+  CONTRIBUTING documents the GPU-build story, including the exact toolchain
+  (`glslc`, `glslang-tools`, `libvulkan-dev`, `spirv-headers`) and the
+  build-in-container / run-on-host split.
+
+---
+
 ## [0.11.0] - 2026-07-03
 
 Model-architecture correctness rework (see
