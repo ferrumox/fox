@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-06
+
+GPU inference becomes a first-class, reproducible path, and the model-architecture
+rework (started in 0.11) is finished off. Vulkan is validated end-to-end on an AMD
+Radeon 890M (`gfx1150`, RDNA 3.5) and shipped three ways — a Docker image, a prebuilt
+release tarball, and a `make vulkan` bundle — with fox now reporting the active
+backend at startup. On the correctness side, P4 (API consistency) lands, and the
+rework's regression net is wired up for real: golden tests run in CI against a live
+model, and a stress test settles the last open question (§7) by proving the prefix
+cache doesn't leak.
+
 ### Added
 
 - **`Dockerfile.vulkan`** — a reproducible Vulkan build for AMD/Intel iGPUs and any
