@@ -61,6 +61,9 @@ id=$(docker create fox:vulkan) \
   && ./fox-vulkan/fox serve --model-path <model.gguf>
 ```
 
+`make vulkan` wraps the build-and-extract step: it produces `./fox-vulkan/` ready to
+run (`./fox-vulkan/fox serve --model-path <model.gguf>`).
+
 ## Code style and CI
 
 `make ci` runs exactly what CI runs — do this before pushing:

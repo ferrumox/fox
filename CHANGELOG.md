@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `x86_64-unknown-linux-gnu-vulkan` tarball (on Ubuntu 24.04) alongside the CPU one,
   so GPU users get a ready-to-run binary. The Vulkan tarball needs glibc 2.39+ and a
   Vulkan driver (Mesa RADV/ANV, etc.) at runtime.
+- **`make vulkan`** — builds the `Dockerfile.vulkan` image and extracts the bundle
+  (`fox`, `fox-bench`, `libggml-vulkan.so`) to `./fox-vulkan/`, so you get a
+  GPU-enabled binary that runs natively on any host with a Vulkan driver — no build
+  toolchain needed on the host.
 
 ---
 
