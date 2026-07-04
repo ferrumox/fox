@@ -92,11 +92,15 @@ trigger pattern (e.g. `</think>`). Called out so it isn't a silent gap.
   a grammar that only admits `yes`/`no` forces output into `{yes, no}` on a real model,
   and asserts the sampler is cached then freed (no leak). Grammar-`None` keeps the
   original sampling path unchanged.
-- **S2 — JSON-schema → GBNF (Rust)**: since `json_schema_to_grammar` is in `common/`
-  (not linked), implement a pragmatic converter in Rust covering the JSON-Schema subset
-  that matters: `type` (object/array/string/number/integer/boolean/null), `properties` +
-  `required`, `items`, `enum`, and nesting. Unit-tested against known schema→grammar
-  pairs. A plain "any JSON" grammar backs `json_object` mode.
+- **S2 — JSON-schema → GBNF (Rust)** ✅: `api/shared/json_schema.rs` converts a schema
+  to GBNF — `type` (object/array/string/integer/number/boolean/null), `properties` +
+  `required`, `items`, `enum`, nesting; untyped/empty → any JSON; `any_json_gbnf()`
+  backs `json_object` mode. Simplification: object rules require exactly the `required`
+  set (or all declared props when `required` is absent) in the caller's order; optional
+  props are dropped (output stays schema-valid, just not *more* permissive). 10 stub
+  unit tests on the conversion + golden `golden_json_schema_constrains_to_valid_json`,
+  which feeds a generated grammar to a real model and asserts the output parses as a
+  conforming JSON object (proving the emitted GBNF is valid).
 - **S3 — API surface**: OpenAI `response_format` — `{ "type": "json_object" }` and
   `{ "type": "json_schema", "json_schema": { "schema": … } }`; Ollama `format` — the
   string `"json"` or a schema object. Build the grammar in the chat/completions handlers

@@ -366,6 +366,74 @@ fn golden_grammar_constrains_output() {
     );
 }
 
+/// JSON-schema guided decoding (0.14, S2) must yield JSON that parses and conforms to
+/// the schema. Converts a small object schema to GBNF (the Rust converter), constrains
+/// generation with it, and asserts the output is a valid JSON object with the required
+/// field of the right type — proving the generated grammar is real, valid GBNF.
+#[test]
+fn golden_json_schema_constrains_to_valid_json() {
+    let m = golden!();
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": { "answer": { "type": "boolean" } },
+        "required": ["answer"]
+    });
+    let gbnf = crate::api::shared::json_schema::schema_to_gbnf(&schema).unwrap();
+    let grammar: std::sync::Arc<str> = std::sync::Arc::from(gbnf.as_str());
+    let prompt = m.tokenize("Is the sky blue? Reply as JSON:").unwrap();
+
+    let mk_req = |last: Option<i32>, ctx_len: usize| InferenceRequestForModel {
+        id: 1,
+        prompt_tokens: prompt.clone(),
+        last_token: last,
+        generated_tokens: 0,
+        max_new_tokens: 64,
+        context_len: ctx_len,
+        kv_seq_id: 0,
+        temperature: 0.0,
+        top_p: 1.0,
+        top_k: 0,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        seed: None,
+        generated_token_ids: vec![],
+        skip_prefix_tokens: 0,
+        prefix_seq_id: None,
+        prefill_pos: 0,
+        grammar: Some(grammar.clone()),
+    };
+
+    let pre = m.do_prefill(&[1], &[mk_req(None, 0)], 0).unwrap();
+    let mut next = pre[0].logits.clone().unwrap().sampled_token;
+    let mut gen: Vec<i32> = Vec::new();
+    let mut live = prompt.len();
+    for _ in 0..64 {
+        if m.is_eog_token(next) {
+            break;
+        }
+        gen.push(next);
+        let out = m.do_decode(&[1], &[mk_req(Some(next), live + 1)]).unwrap();
+        next = out[0].1.sampled_token;
+        live += 1;
+    }
+    let mut bytes = Vec::new();
+    for &t in &gen {
+        bytes.extend(m.token_to_piece_bytes(t));
+    }
+    let text = String::from_utf8_lossy(&bytes).replace(super::SPM_SPACE, " ");
+    let parsed: serde_json::Value = serde_json::from_str(text.trim())
+        .unwrap_or_else(|e| panic!("constrained output must be valid JSON, got {text:?}: {e}"));
+    assert!(
+        parsed
+            .get("answer")
+            .map(|v| v.is_boolean())
+            .unwrap_or(false),
+        "output must be an object with a boolean `answer`, got {parsed}"
+    );
+    m.free_grammar(1);
+}
+
 /// tokenize → detokenize must reconstruct tricky text. Uses the raw-byte piece
 /// path so multi-token UTF-8 sequences (emoji, CJK) survive; normalizes the SPM
 /// word-boundary marker so the comparison works for SentencePiece models too.
