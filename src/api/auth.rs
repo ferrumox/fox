@@ -61,6 +61,8 @@ mod tests {
                     max_models: 1,
                     max_batch_size: 1,
                     max_prefill_chunk: 0,
+                    context_shift: false,
+                    context_keep: 0,
                     max_context_len: Some(512),
                     block_size: 16,
                     gpu_memory_bytes: 0,

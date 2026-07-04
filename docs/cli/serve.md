@@ -54,6 +54,8 @@ fox serve --json-logs --port 8080 --max-models 2 --keep-alive-secs 600
 | `--max-context-len <N>` | `FOX_MAX_CONTEXT_LEN` | auto | Maximum context length in tokens. Auto-detected from the model's trained context if omitted. Larger values require more KV cache memory. |
 | `--max-batch-size <N>` | `FOX_MAX_BATCH_SIZE` | `32` | Maximum number of sequences processed in a single forward pass. |
 | `--max-prefill-chunk <N>` | `FOX_MAX_PREFILL_CHUNK` | `512` | Maximum prompt tokens prefilled per request per scheduler step. Chunking a long prompt lets it interleave with other requests' token generation instead of blocking the engine loop for the whole prefill. `0` disables chunking (single-shot). |
+| `--context-shift <BOOL>` | `FOX_CONTEXT_SHIFT` | `true` | When a conversation fills the context window, discard the oldest KV window and keep generating instead of stopping the request with `length`. Automatically skipped for recurrent/hybrid models whose KV cache cannot shift. Pass `--context-shift false` to disable. |
+| `--context-keep <N>` | `FOX_CONTEXT_KEEP` | `0` | Tokens preserved at the front (BOS + system prompt) when the context is rolled. Only meaningful with `--context-shift true`. |
 | `--gpu-memory-fraction <F>` | `FOX_GPU_MEMORY_FRACTION` | `0.85` | Fraction of GPU VRAM reserved for the KV cache. Must be between 0.0 and 1.0. The remaining memory is left for model weights and other allocations. |
 | `--type-kv <TYPE>` | `FOX_TYPE_KV` | `f16` | KV cache element type for both K and V: `f16`, `q8_0`, or `q4_0`. |
 | `--type-k <TYPE>` | `FOX_TYPE_K` | — | Override K cache type independently (same values as `--type-kv`). Takes precedence over `--type-kv` for the K cache. |

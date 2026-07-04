@@ -17,6 +17,12 @@ pub struct RegistryConfig {
     /// Max prompt tokens submitted per request per prefill step (0 = single-shot).
     /// Chunking a long prompt lets it interleave with other requests' decode steps.
     pub max_prefill_chunk: usize,
+    /// Context rolling: when a sequence fills `n_ctx`, discard its oldest KV window and
+    /// shift the rest down so decode continues instead of stopping with `Length`.
+    /// Only applied to shiftable (non-recurrent) caches.
+    pub context_shift: bool,
+    /// Tokens preserved at the front (BOS + system prompt) when context rolling fires.
+    pub context_keep: usize,
     /// Per-sequence context length. `None` = auto-detect from the model's trained context.
     pub max_context_len: Option<u32>,
     pub block_size: usize,

@@ -26,6 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--max-prefill-chunk` value. Chunking bounds that stall to one chunk's prefill;
   single-shot (`--chunks 0`) balloons it to the full long-prompt prefill, so one run
   quantifies the win (`docs/cli/bench-prefill.md`).
+- **Context rolling on full** (`--context-shift` / `FOX_CONTEXT_SHIFT`, default on;
+  `--context-keep` / `FOX_CONTEXT_KEEP`, default 0) — when a conversation fills the
+  context window, fox now discards the oldest KV window (preserving the first
+  `--context-keep` head tokens) and shifts the rest down via `llama_memory_seq_rm` +
+  `llama_memory_seq_add`, so generation continues instead of stopping the request with
+  `length`. Recurrent/hybrid models whose KV cache can't shift keep the old
+  stop-with-`length` behavior. Verified on a real model
+  (`golden_context_shift_continues_past_n_ctx`) plus a scheduler unit test. Second
+  serving-robustness item of 0.13 (`docs/design/serving-robustness.md`).
 
 ### Changed
 

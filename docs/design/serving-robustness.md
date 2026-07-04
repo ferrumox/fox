@@ -73,13 +73,30 @@ step that submits the *final* chunk requests logits and transitions it to `Decod
   (single-shot) it balloons to the full long-prompt prefill, so a single run shows the
   win as a ratio.
 
-## 2. Context rolling on full
+## 2. Context rolling on full ✅
 
-When `context_len` reaches `n_ctx`, discard the oldest KV window (keep a configurable
-head, e.g. the system prompt) via `llama_memory_seq_rm` + position shift, so decode
-continues instead of erroring. Recurrent/hybrid caches that can't shift keep today's
-"stop with Length" behavior. Config: `--context-shift` (default on for shiftable
-caches). Contained to the decode path + KV manager.
+When a decoding sequence's `context_len` reaches `n_ctx`, the engine discards the
+oldest KV window and shifts the survivors down so decode continues instead of stopping
+with `Length`.
+
+- **Trigger** (`engine/run.rs` `roll_full_contexts`, called before each decode batch):
+  a `Decoding` request whose `context_len() >= n_ctx` (the model's per-sequence
+  `context_len()`), on a shiftable cache.
+- **Roll** (`LlamaCppModel::roll_context`): keep the first `n_keep` tokens, discard the
+  next `n_discard = (context_len - n_keep) / 2`, shift the rest down —
+  `llama_memory_seq_rm(seq, n_keep, n_keep+n_discard)` then
+  `llama_memory_seq_add(seq, n_keep+n_discard, -1, -n_discard)`.
+- **Bookkeeping**: the request accumulates `rolled_tokens`; `context_len()` subtracts
+  it so the next decode position lines up with the shifted KV. `rolled_tokens` resets
+  on preemption (the KV, and any rolls, are gone).
+- **Recurrent/hybrid caches** (not shiftable — `supports_seq_copy()` is false) are
+  skipped and keep the "stop with `Length`" behavior.
+- **Config**: `--context-shift` / `FOX_CONTEXT_SHIFT` (default on) and `--context-keep`
+  / `FOX_CONTEXT_KEEP` (default 0, the preserved head). Off in single-shot benches; on
+  for `fox serve` and `fox run`.
+- **Tests**: `context_roll_reduces_logical_context_len` (scheduler math, stub) and
+  golden `golden_context_shift_continues_past_n_ctx` (real model: decode far past a
+  tiny `n_ctx`, asserting every post-roll `llama_decode` still yields finite logits).
 
 ## 3. Template compile cache
 

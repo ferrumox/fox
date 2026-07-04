@@ -73,6 +73,9 @@ impl InferenceEngine {
             }
 
             if !decode_ids.is_empty() {
+                // Before decoding, roll any sequence whose KV window is full so it can
+                // continue past n_ctx instead of failing (context shift).
+                engine.roll_full_contexts(&decode_ids).await;
                 match engine.run_decode(&decode_ids).await {
                     Ok(decode_results) => {
                         engine.handle_logits(&decode_results, false).await?;
@@ -89,6 +92,65 @@ impl InferenceEngine {
                             engine.scheduler.mark_finished(*req_id, StopReason::Length);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// Roll the KV window of any decoding request that has filled the context.
+    ///
+    /// When context shift is enabled (`context_shift = Some(n_keep)`) and the model's
+    /// KV cache is shiftable, a request whose `context_len` has reached `n_ctx` has its
+    /// oldest half (after the preserved `n_keep`-token head) discarded and the survivors
+    /// shifted down, then its logical length is reduced by the same amount so subsequent
+    /// decode positions line up with the shifted KV. Recurrent/hybrid caches (not
+    /// shiftable) are skipped — those requests hit the decode error path and stop with
+    /// `Length`, the pre-context-shift behavior.
+    async fn roll_full_contexts(&self, decode_ids: &[u64]) {
+        let Some(n_keep_cfg) = self.context_shift else {
+            return;
+        };
+        // Recurrent/hybrid caches can't shift positions — leave today's behavior.
+        if !self.supports_prefix_cache {
+            return;
+        }
+        let n_ctx = self.model.context_len() as usize;
+        if n_ctx == 0 {
+            return;
+        }
+        for req in self.scheduler.get_running(decode_ids) {
+            let ctx_len = req.context_len();
+            if ctx_len < n_ctx || req.kv_seq_id < 0 {
+                continue;
+            }
+            // Preserve the head; discard half of what remains (at least one token). Keep
+            // at least one token beyond the head so the shifted tail is non-empty.
+            let n_keep = n_keep_cfg.min(n_ctx.saturating_sub(1));
+            let n_discard = (ctx_len.saturating_sub(n_keep) / 2).max(1);
+            let seq_id = req.kv_seq_id;
+            let model = self.model.clone();
+            let res =
+                tokio::task::spawn_blocking(move || model.roll_context(seq_id, n_keep, n_discard))
+                    .await;
+            match res {
+                Ok(Ok(())) => {
+                    self.scheduler.record_context_roll(req.id, n_discard);
+                    tracing::info!(
+                        request_id = req.id,
+                        seq_id,
+                        n_keep,
+                        n_discard,
+                        ctx_len,
+                        n_ctx,
+                        "rolled full context window to keep generating"
+                    );
+                }
+                Ok(Err(e)) => tracing::warn!(
+                    request_id = req.id,
+                    "context roll failed: {e} — request will stop with Length"
+                ),
+                Err(e) => {
+                    tracing::warn!(request_id = req.id, "context roll join error: {e}")
                 }
             }
         }

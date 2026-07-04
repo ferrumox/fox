@@ -237,6 +237,17 @@ pub trait Model: Send + Sync {
     /// needs to be computed.
     fn copy_sequence_range(&self, src_seq_id: i32, dst_seq_id: i32, token_count: i32);
 
+    /// Roll a sequence's KV window when it fills the context: discard the `n_discard`
+    /// oldest tokens *after* the preserved head of `n_keep` tokens (e.g. BOS + system
+    /// prompt) and shift the survivors down by `n_discard`, so decode can continue past
+    /// `n_ctx` instead of `llama_decode` failing. Requires a shiftable KV cache
+    /// (`supports_seq_copy()` / `llama_memory_can_shift`); the caller only invokes this
+    /// for models where that holds. Default: no-op success (stub models never reach the
+    /// context limit in tests).
+    fn roll_context(&self, _seq_id: i32, _n_keep: usize, _n_discard: usize) -> Result<()> {
+        Ok(())
+    }
+
     /// Returns true if the loaded model's memory backend supports sequence copying
     /// (`llama_memory_seq_cp`).  Standard transformer (attention-only) models return true;
     /// recurrent / hybrid models (Mamba, Qwen3.5, etc.) return false.

@@ -750,6 +750,37 @@ impl Model for LlamaCppModel {
         }
     }
 
+    fn roll_context(&self, seq_id: i32, n_keep: usize, n_discard: usize) -> Result<()> {
+        if n_discard == 0 {
+            return Ok(());
+        }
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+        unsafe {
+            let mem = ffi::llama_get_memory(ctx_guard.as_ptr() as *const _);
+            if mem.is_null() {
+                return Err(anyhow!("no memory backend for context roll"));
+            }
+            if !ffi::llama_memory_can_shift(mem) {
+                return Err(anyhow!(
+                    "KV cache is not shiftable (recurrent/hybrid model)"
+                ));
+            }
+            let keep = n_keep as i32;
+            let discard = n_discard as i32;
+            // Drop [n_keep, n_keep + n_discard) …
+            if !ffi::llama_memory_seq_rm(mem, seq_id, keep, keep + discard) {
+                return Err(anyhow!("llama_memory_seq_rm failed during context roll"));
+            }
+            // … then shift every surviving token after the hole down by n_discard so
+            // positions stay contiguous (p1 = -1 → [keep + discard, ∞)).
+            ffi::llama_memory_seq_add(mem, seq_id, keep + discard, -1, -discard);
+        }
+        Ok(())
+    }
+
     fn embedding_dim(&self) -> usize {
         self.config.n_embd
     }

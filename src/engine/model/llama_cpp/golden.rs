@@ -219,6 +219,76 @@ fn golden_chunked_prefill_matches_single_shot() {
     );
 }
 
+/// Context rolling (0.13) must let a sequence keep decoding past its `n_ctx`.
+/// We prefill a short prompt, then decode token-by-token; when the KV window fills,
+/// we roll it (discard the oldest half after a small head, shift the rest down) and
+/// keep going. Every `llama_decode` after the roll must still succeed and produce
+/// finite logits — proving the shifted KV is a valid, continuable state.
+#[test]
+fn golden_context_shift_continues_past_n_ctx() {
+    let m = golden!();
+
+    // A tiny working window so we hit the limit after a handful of decodes.
+    let n_ctx: usize = 48;
+    let n_keep: usize = 4;
+
+    let prompt = m.tokenize("The lazy dog").unwrap();
+    assert!(prompt.len() < n_ctx, "prompt must fit the tiny window");
+
+    let mk_req = |last: Option<i32>, ctx_len: usize| InferenceRequestForModel {
+        id: 1,
+        prompt_tokens: prompt.clone(),
+        last_token: last,
+        generated_tokens: 0,
+        max_new_tokens: 1,
+        context_len: ctx_len,
+        kv_seq_id: 0,
+        temperature: 0.0,
+        top_p: 1.0,
+        top_k: 0,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        seed: None,
+        generated_token_ids: vec![],
+        skip_prefix_tokens: 0,
+        prefix_seq_id: None,
+        prefill_pos: 0,
+    };
+
+    // Prefill the prompt on seq 0.
+    let pre = m.do_prefill(&[1], &[mk_req(None, 0)], 0).unwrap();
+    let mut next = pre[0].logits.clone().unwrap().sampled_token;
+    // Live length of the sequence in the KV cache (== next write position).
+    let mut live = prompt.len();
+    // Absolute count of tokens generated (drives context_len before subtracting rolls).
+    let mut rolled = 0usize;
+
+    // Decode well past n_ctx — without rolling this would fail once live == n_ctx.
+    for step in 0..(n_ctx * 3) {
+        if live >= n_ctx {
+            let n_discard = ((live - n_keep) / 2).max(1);
+            m.roll_context(0, n_keep, n_discard)
+                .expect("shiftable KV must roll");
+            live -= n_discard;
+            rolled += n_discard;
+        }
+
+        // context_len passed to the model = live length (raw count minus rolled).
+        let ctx_len = live + 1; // this token will be written at position `live`
+        let out = m.do_decode(&[1], &[mk_req(Some(next), ctx_len)]).unwrap();
+        let logits = &out[0].1;
+        assert!(
+            logits.values.iter().all(|v| v.is_finite()),
+            "logits after roll must be finite (step {step}, rolled {rolled})"
+        );
+        next = logits.sampled_token;
+        live += 1;
+    }
+
+    assert!(rolled > 0, "the loop must have triggered at least one roll");
+}
+
 /// tokenize → detokenize must reconstruct tricky text. Uses the raw-byte piece
 /// path so multi-token UTF-8 sequences (emoji, CJK) survive; normalizes the SPM
 /// word-boundary marker so the comparison works for SentencePiece models too.

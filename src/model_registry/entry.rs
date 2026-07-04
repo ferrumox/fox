@@ -45,7 +45,8 @@ impl EngineEntry {
             kv,
             name.to_string(),
             None,
-            0, // single-shot prefill in tests
+            0,    // single-shot prefill in tests
+            None, // no context rolling in tests
         ));
         let loop_handle = {
             let e = engine.clone();

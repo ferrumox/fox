@@ -218,6 +218,7 @@ impl Scheduler {
                 evicted.prefilled_tokens = 0;
                 evicted.skip_prefix_tokens = 0;
                 evicted.prefix_seq_id = None;
+                evicted.rolled_tokens = 0;
                 info!(
                     request_id = evicted.id,
                     "LIFO preemption: evicted from batch"
@@ -271,6 +272,20 @@ impl Scheduler {
             for req in running.iter_mut() {
                 if req.id == req_id {
                     req.prefill_pos = new_prefill_pos;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Record that context rolling discarded `n_discard` of a request's oldest KV
+    /// tokens. Reduces its logical context length (via `rolled_tokens`) so the next
+    /// decode position matches the shifted KV cache.
+    pub fn record_context_roll(&self, req_id: u64, n_discard: usize) {
+        if let Ok(mut running) = self.running_batch.lock() {
+            for req in running.iter_mut() {
+                if req.id == req_id {
+                    req.rolled_tokens += n_discard;
                     break;
                 }
             }

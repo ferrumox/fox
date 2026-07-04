@@ -71,7 +71,7 @@ sliding window, MLA, state-space). This is why a single source of truth (`ModelI
 | ❌ | Guided/structured decoding (grammar / JSON-schema / regex) | prompt-only today |
 | ⚠️ | Tool/function calling | generic prompt-based, no per-model parsers |
 | ❌ | `n>1` / best_of / beam search; logprobs / echo | |
-| ⚠️ | Context management: RoPE scaling partial; **no context-shift/rolling** when context fills | |
+| ⚠️ | Context management: RoPE scaling partial; **context-shift/rolling** on full (`--context-shift`, shiftable caches) ✅; RoPE scaling still not exposed | |
 | ❌ | LoRA / adapters (incl. multi-LoRA) | |
 | ⚠️ | Thinking/reasoning (`<think>` separation) | fragile heuristic |
 

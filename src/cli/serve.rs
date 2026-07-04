@@ -51,6 +51,16 @@ pub struct ServeArgs {
     #[arg(long, default_value = DEFAULT_MAX_PREFILL_CHUNK, env = "FOX_MAX_PREFILL_CHUNK")]
     pub max_prefill_chunk: usize,
 
+    /// Roll the context window when a sequence fills n_ctx: discard the oldest KV window
+    /// and keep generating, instead of stopping the request with `length`. Automatically
+    /// skipped for recurrent/hybrid models whose KV cache cannot shift.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, env = "FOX_CONTEXT_SHIFT")]
+    pub context_shift: bool,
+
+    /// Tokens preserved at the front (BOS + system prompt) when the context is rolled.
+    #[arg(long, default_value = "0", env = "FOX_CONTEXT_KEEP")]
+    pub context_keep: usize,
+
     /// Tokens per KV block
     #[arg(long, default_value = DEFAULT_BLOCK_SIZE, env = "FOX_BLOCK_SIZE")]
     pub block_size: usize,
@@ -250,6 +260,8 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         max_models: args.max_models.max(1),
         max_batch_size: args.max_batch_size,
         max_prefill_chunk: args.max_prefill_chunk,
+        context_shift: args.context_shift,
+        context_keep: args.context_keep,
         max_context_len: args.max_context_len,
         block_size: args.block_size,
         gpu_memory_bytes,

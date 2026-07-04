@@ -143,7 +143,8 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         kv_cache,
         model_name.clone(),
         None,
-        0, // single-shot prefill (benchmark)
+        0,    // single-shot prefill (benchmark)
+        None, // no context rolling (benchmark)
     ));
 
     // ── Tokenize prompt ──────────────────────────────────────────────────────

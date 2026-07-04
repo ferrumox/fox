@@ -147,6 +147,10 @@ pub struct InferenceRequest {
     /// the request is sampled and transitions to `Decoding`. Starts at the effective
     /// skip (0, or the prefix-hit boundary); reset to 0 on preemption (KV freed).
     pub prefill_pos: usize,
+    /// Total tokens discarded from the KV window by context rolling (shift-on-full).
+    /// Subtracted from the raw token count in [`Self::context_len`] so decode positions
+    /// track the shifted KV. Reset to 0 on preemption (the KV — and any rolls — are gone).
+    pub rolled_tokens: usize,
 }
 
 impl InferenceRequest {
@@ -175,6 +179,7 @@ impl InferenceRequest {
             submitted_at: std::time::Instant::now(),
             prefilled_tokens: 0,
             prefill_pos: 0,
+            rolled_tokens: 0,
         }
     }
 
@@ -183,12 +188,15 @@ impl InferenceRequest {
     /// consecutive with the last prefill position, even when `effective_skip` caused
     /// fewer tokens to be submitted than `prompt_tokens.len()`.
     pub fn context_len(&self) -> usize {
-        if self.prefilled_tokens > 0 {
+        let raw = if self.prefilled_tokens > 0 {
             self.prefilled_tokens + self.generated_tokens
         } else {
             // Fallback before prefill completes (prefilled_tokens not yet set).
             self.prompt_tokens.len() + self.generated_tokens
-        }
+        };
+        // Context rolling discards the oldest KV window; the live sequence length — and
+        // thus the next decode position — is reduced by everything rolled out so far.
+        raw.saturating_sub(self.rolled_tokens)
     }
 
     /// Whether this request has reached a terminal state.

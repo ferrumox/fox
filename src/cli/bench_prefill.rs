@@ -156,6 +156,7 @@ async fn run_scenario(
         model_name.to_string(),
         None,
         chunk, // the knob under test
+        None,  // no context rolling (benchmark)
     ));
 
     let long_tokens = synth_long_prompt(&engine, args.long_prompt_tokens);

@@ -491,4 +491,55 @@ mod tests {
         );
         assert_eq!(b.decode, vec![1], "completed request must decode");
     }
+
+    #[test]
+    fn context_roll_reduces_logical_context_len() {
+        // context_len() = prefilled + generated - rolled. A roll must shift the next
+        // decode position down by exactly the discarded amount, and rolls accumulate.
+        let config = ModelConfig {
+            num_layers: 2,
+            num_heads: 2,
+            num_heads_kv: 2,
+            head_dim: 64,
+            n_embd: 128,
+            vocab_size: 1000,
+        };
+        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1, 1));
+        let sched = Scheduler::new(kv, 8);
+
+        // Put a request in the running batch that has "filled" 100 tokens of context.
+        {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut req =
+                InferenceRequest::new(7, (0..40).collect(), 200, SamplingParams::default(), tx);
+            req.kv_seq_id = 0;
+            req.prefilled_tokens = 40;
+            req.generated_tokens = 60; // context_len = 100
+            req.state = RequestState::Decoding;
+            sched.running_batch.lock().unwrap().push(req);
+        }
+
+        let ctx_len = |s: &Scheduler| s.get_running(&[7])[0].context_len();
+        assert_eq!(ctx_len(&sched), 100);
+
+        // Roll away 30 oldest tokens → live length drops to 70 (next decode pos = 69).
+        sched.record_context_roll(7, 30);
+        assert_eq!(
+            ctx_len(&sched),
+            70,
+            "rolled tokens subtract from context_len"
+        );
+
+        // Generation keeps advancing on top of the reduced length.
+        sched.update_after_token(7, 123, false);
+        assert_eq!(
+            ctx_len(&sched),
+            71,
+            "generated token adds above the rolled window"
+        );
+
+        // A second roll accumulates with the first.
+        sched.record_context_roll(7, 20);
+        assert_eq!(ctx_len(&sched), 51, "rolls accumulate");
+    }
 }

@@ -43,6 +43,11 @@ pub struct InferenceEngine {
     /// Chunking a long prompt keeps it from head-of-line-blocking other requests'
     /// decode steps in the engine loop.
     max_prefill_chunk: usize,
+    /// Context rolling: when a sequence fills `n_ctx`, discard its oldest KV window and
+    /// shift the rest down so decode continues instead of stopping with `Length`.
+    /// `None` disables it; `Some(n_keep)` enables it, preserving the first `n_keep`
+    /// tokens (BOS + system prompt). Only applied to shiftable (non-recurrent) caches.
+    context_shift: Option<usize>,
 }
 
 impl InferenceEngine {
@@ -53,6 +58,7 @@ impl InferenceEngine {
         model_name: String,
         metrics: Option<Arc<Metrics>>,
         max_prefill_chunk: usize,
+        context_shift: Option<usize>,
     ) -> Self {
         let supports_prefix_cache = model.supports_seq_copy();
         if supports_prefix_cache {
@@ -77,6 +83,7 @@ impl InferenceEngine {
             supports_prefix_cache,
             model_stop_tokens,
             max_prefill_chunk,
+            context_shift,
         }
     }
 
