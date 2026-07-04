@@ -66,9 +66,12 @@ step that submits the *final* chunk requests logits and transitions it to `Decod
   chunk, logits only on the last) and reports progress via `PrefillStep`; `run.rs` only
   samples on completion. Golden `golden_chunked_prefill_matches_single_shot` proves a
   chunked prefill picks the same next token as single-shot on a real model.
-- **S3 — validation** (pending): bench that a long prompt no longer stalls a concurrent
-  short request (measure the short request's inter-token latency during the long
-  prefill).
+- **S3 — validation** ✅: `fox bench-prefill` submits a long prompt and a concurrent
+  short request and reports the short request's *worst stall* (largest gap between its
+  tokens, including time-to-first-token) for each `--max-prefill-chunk` value. With
+  chunking on, that stall is bounded by one chunk's prefill; with chunking off
+  (single-shot) it balloons to the full long-prompt prefill, so a single run shows the
+  win as a ratio.
 
 ## 2. Context rolling on full
 

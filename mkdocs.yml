@@ -81,6 +81,7 @@ nav:
     - fox alias: cli/alias.md
     - fox bench: cli/bench.md
     - fox bench-kv: cli/bench-kv.md
+    - fox bench-prefill: cli/bench-prefill.md
 
 extra:
   social:

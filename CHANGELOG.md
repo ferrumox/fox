@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   equivalent to single-shot on a real model (`golden_chunked_prefill_matches_single_shot`)
   plus a scheduler state-machine unit test. First flagship item of the 0.13
   serving-robustness work (`docs/design/serving-robustness.md`).
+- **`fox bench-prefill`** — a validation benchmark for chunked prefill. It submits a
+  long prompt and a concurrent short request, then reports the short request's *worst
+  stall* (largest gap between its tokens, including time-to-first-token) for each
+  `--max-prefill-chunk` value. Chunking bounds that stall to one chunk's prefill;
+  single-shot (`--chunks 0`) balloons it to the full long-prompt prefill, so one run
+  quantifies the win (`docs/cli/bench-prefill.md`).
 
 ### Changed
 
