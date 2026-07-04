@@ -33,6 +33,8 @@ pub async fn completions(
         tool_choice: None,
         parallel_tool_calls: None,
         response_format: None,
+        logprobs: None,
+        top_logprobs: None,
         think: None,
         stream_options: None,
         frequency_penalty: None,

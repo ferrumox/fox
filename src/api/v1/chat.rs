@@ -20,8 +20,8 @@ use crate::api::shared::sampling_defaults as defaults;
 use crate::api::shared::streaming::finish_reason_str;
 use crate::api::types::{
     ChatCompletionChoice, ChatCompletionChunk, ChatCompletionChunkChoice, ChatCompletionRequest,
-    ChatCompletionResponse, ChatMessageDelta, ChatMessageResponse, ToolCallDelta,
-    ToolCallFunctionDelta, Usage,
+    ChatCompletionResponse, ChatLogprobEntry, ChatLogprobs, ChatMessageDelta, ChatMessageResponse,
+    ToolCallDelta, ToolCallFunctionDelta, Usage,
 };
 use crate::scheduler::{InferenceRequest, SamplingParams, Token};
 
@@ -114,6 +114,10 @@ pub async fn chat_completions(
         None => None,
     };
 
+    // Per-token logprobs: OpenAI caps top_logprobs at 20.
+    let want_logprobs = req.logprobs == Some(true);
+    let logprobs_top_n = req.top_logprobs.unwrap_or(0).min(20);
+
     let sampling = SamplingParams {
         temperature: req.temperature.unwrap_or(defaults::TEMPERATURE).max(0.0),
         top_p: req.top_p.unwrap_or(defaults::TOP_P).clamp(0.0, 1.0),
@@ -134,6 +138,11 @@ pub async fn chat_completions(
         initial_in_thinking: enable_thinking,
         max_thinking_chars: defaults::MAX_THINKING_CHARS,
         grammar,
+        logprobs: if want_logprobs {
+            Some(logprobs_top_n)
+        } else {
+            None
+        },
     };
 
     let req_id = entry.engine.next_request_id();
@@ -161,7 +170,8 @@ pub async fn chat_completions(
     if req.stream {
         if has_tools {
             // With tools: buffer all tokens, parse tool call, emit as SSE deltas.
-            let (full_content, completion_tokens, stop_reason) = buffer_tokens(&mut rx).await;
+            // (logprobs are not surfaced for tool-call responses.)
+            let (full_content, completion_tokens, stop_reason, _lp) = buffer_tokens(&mut rx).await;
 
             let (content, mut tool_calls) = try_parse_tool_call(&full_content, eff_tools);
 
@@ -216,6 +226,7 @@ pub async fn chat_completions(
                             tool_calls: None,
                         },
                         finish_reason: None,
+                        logprobs: None,
                     }],
                     usage: None,
                     system_fingerprint: None,
@@ -262,6 +273,7 @@ pub async fn chat_completions(
                         index: 0,
                         delta,
                         finish_reason: Some(finish_c),
+                        logprobs: None,
                     }],
                     usage: Some(usage),
                     system_fingerprint: None,
@@ -320,6 +332,9 @@ pub async fn chat_completions(
                     (None, Some(token.text.clone()))
                 };
 
+                let chunk_logprobs = token
+                    .logprob
+                    .map(|l| ChatLogprobs { content: vec![l.into()] });
                 let chunk = ChatCompletionChunk {
                     id: id.clone(),
                     object: "chat.completion.chunk".to_string(),
@@ -333,6 +348,7 @@ pub async fn chat_completions(
                             tool_calls: None,
                         },
                         finish_reason,
+                        logprobs: chunk_logprobs,
                     }],
                     usage,
                     system_fingerprint: None,
@@ -353,7 +369,8 @@ pub async fn chat_completions(
             .keep_alive(KeepAlive::default())
             .into_response()
     } else {
-        let (full_content, completion_tokens, stop_reason) = buffer_tokens(&mut rx).await;
+        let (full_content, completion_tokens, stop_reason, logprob_entries) =
+            buffer_tokens(&mut rx).await;
         let stop_str = stop_reason
             .as_ref()
             .map(finish_reason_str)
@@ -406,6 +423,13 @@ pub async fn chat_completions(
                     tool_calls,
                 },
                 finish_reason: Some(finish_reason),
+                logprobs: if want_logprobs {
+                    Some(ChatLogprobs {
+                        content: logprob_entries,
+                    })
+                } else {
+                    None
+                },
             }],
             usage: Some(Usage {
                 prompt_tokens: prompt_tokens_len as u32,
@@ -418,22 +442,32 @@ pub async fn chat_completions(
     }
 }
 
-/// Buffer all tokens from the receiver into `(text, count, stop_reason)`.
+/// Buffer all tokens from the receiver into `(text, count, stop_reason, logprobs)`.
+/// `logprobs` is empty unless the request asked for them.
 async fn buffer_tokens(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Token>,
-) -> (String, u32, Option<crate::scheduler::StopReason>) {
+) -> (
+    String,
+    u32,
+    Option<crate::scheduler::StopReason>,
+    Vec<ChatLogprobEntry>,
+) {
     let mut text = String::new();
     let mut count = 0u32;
     let mut stop_reason = None;
+    let mut logprobs = Vec::new();
     while let Some(token) = rx.recv().await {
         text.push_str(&token.text);
         count += 1;
+        if let Some(lp) = token.logprob {
+            logprobs.push(lp.into());
+        }
         if token.stop_reason.is_some() {
             stop_reason = token.stop_reason;
             break;
         }
     }
-    (text, count, stop_reason)
+    (text, count, stop_reason, logprobs)
 }
 
 #[cfg(test)]

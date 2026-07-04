@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Verified on a real model (golden `golden_grammar_constrains_output`,
   `golden_json_schema_constrains_to_valid_json`). First item of the 0.14
   structured-output work (`docs/design/structured-output.md`).
+- **Token log-probabilities** — the OpenAI chat endpoint now honours `logprobs` and
+  `top_logprobs` (0–20). Each generated token reports its natural-log probability plus
+  the most-likely alternatives (`choices[].logprobs.content[]`), on both streaming
+  chunks and non-streaming responses. Computed from the logits fox already produces, so
+  no extra inference cost; the log-softmax core is unit-tested. logprobs reflect the
+  model's raw distribution (before any guided-decoding grammar mask).
 
 ## [0.13.0]
 

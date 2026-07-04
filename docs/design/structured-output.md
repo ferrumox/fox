@@ -123,16 +123,24 @@ trigger pattern (e.g. `</think>`). Called out so it isn't a silent gap.
 
 ---
 
-## 2. logprobs / top_logprobs
+## 2. logprobs / top_logprobs ✅
 
 fox already carries the full logits vector (`Logits::values`) out of every decode step,
-so this is pure plumbing, no extra compute. Compute a log-softmax over `values`, then
-return the chosen token's logprob plus the top-N alternatives per position.
+so this is pure plumbing, no extra compute — a log-softmax over `values` for the chosen
+token plus its top-N alternatives.
 
-- OpenAI: chat `logprobs` + `top_logprobs` (0–20), and the completions `logprobs` field.
-- Wire through the streaming and non-streaming response types in `src/api/types/`; the
-  numbers come from `engine/logits.rs`, which already has `values` in hand.
-- Contained to `logits.rs` + response types; no scheduler/KV impact.
+- **Engine** (`engine/logits.rs`): `logprob_core` (pure, unit-tested) does the
+  numerically-stable log-sum-exp and top-N selection; `compute_token_logprob` adds the
+  token pieces. `handle_logits` attaches a `TokenLogprob` to each streamed `Token` when
+  `SamplingParams.logprobs` is set. `Logits::values` is already golden-covered (the
+  chunked/context goldens read it), so only the transform needed new tests.
+- **API** (OpenAI chat): request `logprobs` + `top_logprobs` (capped at 20); response
+  `choices[].logprobs.content[]` with `token` / `logprob` / `bytes` / `top_logprobs`,
+  on both the streaming chunks and the non-streaming choice.
+- Note: logprobs are over the model's **raw** distribution (before any grammar mask), so
+  with guided decoding active they report the unconstrained model probabilities.
+- Contained to `logits.rs` + response types; no scheduler/KV impact. Not surfaced for
+  tool-call responses or the legacy completions endpoint.
 
 ## 3. Missing sampling params
 

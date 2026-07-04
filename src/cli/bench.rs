@@ -196,6 +196,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
             initial_in_thinking: false,
             max_thinking_chars: 8192,
             grammar: None,
+            logprobs: None,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

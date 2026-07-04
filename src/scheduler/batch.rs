@@ -42,6 +42,9 @@ pub struct SamplingParams {
     /// sampler picks within the allowed set. Held behind `Arc` so cloning a request's
     /// sampling params (done per step) doesn't re-copy the grammar text.
     pub grammar: Option<std::sync::Arc<str>>,
+    /// Emit per-token log-probabilities when `Some(n)`: the sampled token's logprob plus
+    /// the top-`n` alternatives (`n = 0` → just the sampled token). `None` = off.
+    pub logprobs: Option<u8>,
 }
 
 impl Default for SamplingParams {
@@ -59,6 +62,7 @@ impl Default for SamplingParams {
             initial_in_thinking: false,
             max_thinking_chars: 8192,
             grammar: None,
+            logprobs: None,
         }
     }
 }
@@ -72,6 +76,30 @@ pub struct Token {
     pub is_eos: bool,
     /// Set on the final token of a request; indicates why generation stopped.
     pub stop_reason: Option<StopReason>,
+    /// Per-token log-probabilities, populated only when the request asked for them
+    /// (`SamplingParams.logprobs`). `None` on EOS/empty tokens and unconstrained requests.
+    pub logprob: Option<TokenLogprob>,
+}
+
+/// Log-probability detail for one generated token (OpenAI `logprobs`).
+#[derive(Debug, Clone)]
+pub struct TokenLogprob {
+    /// The sampled token's piece text (lossy UTF-8 of `bytes`).
+    pub token: String,
+    /// Natural-log probability of the sampled token under the model's distribution.
+    pub logprob: f32,
+    /// Raw bytes of the sampled token's piece.
+    pub bytes: Vec<u8>,
+    /// The most-likely alternatives at this position (highest logprob first).
+    pub top: Vec<TopLogprob>,
+}
+
+/// One alternative token and its log-probability (OpenAI `top_logprobs`).
+#[derive(Debug, Clone)]
+pub struct TopLogprob {
+    pub token: String,
+    pub logprob: f32,
+    pub bytes: Vec<u8>,
 }
 
 /// Stop reason when generation ends.

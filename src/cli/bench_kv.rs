@@ -175,6 +175,7 @@ async fn run_one_type(
             initial_in_thinking: false,
             max_thinking_chars: 8192,
             grammar: None,
+            logprobs: None,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

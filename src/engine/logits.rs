@@ -1,7 +1,7 @@
 use anyhow::Result;
 use tracing::debug;
 
-use crate::scheduler::{StopReason, Token};
+use crate::scheduler::{StopReason, Token, TokenLogprob, TopLogprob};
 
 use super::model::Logits;
 use super::output_filter::{
@@ -10,6 +10,41 @@ use super::output_filter::{
 use super::{InferenceEngine, SPM_SPACE};
 
 impl InferenceEngine {
+    /// Compute the OpenAI-style log-probabilities for a sampled token from the full
+    /// logits vector: the chosen token's logprob plus the `top_n` most-likely
+    /// alternatives. Returns `None` when logits are unavailable (e.g. EOS with no
+    /// vector). The distribution is the model's raw output (before any grammar mask).
+    fn compute_token_logprob(
+        &self,
+        values: &[f32],
+        token_id: i32,
+        top_n: u8,
+    ) -> Option<TokenLogprob> {
+        let (chosen_lp, tops) = logprob_core(values, token_id, top_n)?;
+        let piece = |id: i32| -> (String, Vec<u8>) {
+            let bytes = self.model.token_to_piece_bytes(id);
+            let text = String::from_utf8_lossy(&bytes).replace(SPM_SPACE, " ");
+            (text, bytes)
+        };
+        let (token, bytes) = piece(token_id);
+        Some(TokenLogprob {
+            token,
+            logprob: chosen_lp,
+            bytes,
+            top: tops
+                .into_iter()
+                .map(|(id, lp)| {
+                    let (token, bytes) = piece(id as i32);
+                    TopLogprob {
+                        token,
+                        logprob: lp,
+                        bytes,
+                    }
+                })
+                .collect(),
+        })
+    }
+
     pub(super) async fn handle_logits(
         &self,
         results: &[(u64, Logits)],
@@ -98,6 +133,15 @@ impl InferenceEngine {
                 None
             };
 
+            // Per-token logprobs, only when requested (and there is a real token piece).
+            let logprob = if is_eos {
+                None
+            } else {
+                req.sampling
+                    .logprobs
+                    .and_then(|top_n| self.compute_token_logprob(&logits.values, token_id, top_n))
+            };
+
             let send_ok = req
                 .response_tx
                 .send(Token {
@@ -106,6 +150,7 @@ impl InferenceEngine {
                     text,
                     is_eos,
                     stop_reason: stop_reason.clone(),
+                    logprob,
                 })
                 .is_ok();
 
@@ -175,5 +220,85 @@ impl InferenceEngine {
         }
 
         Ok(())
+    }
+}
+
+/// Numeric core of per-token logprobs (no model access, so it's unit-testable):
+/// returns the sampled token's natural-log softmax value and the `top_n` highest
+/// `(token_id, logprob)` pairs (descending). `None` if `values` is empty or `token_id`
+/// is out of range.
+fn logprob_core(values: &[f32], token_id: i32, top_n: u8) -> Option<(f32, Vec<(usize, f32)>)> {
+    if values.is_empty() || token_id < 0 || token_id as usize >= values.len() {
+        return None;
+    }
+    // log-softmax via a numerically-stable log-sum-exp.
+    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let lse = max + values.iter().map(|&l| (l - max).exp()).sum::<f32>().ln();
+    let logprob_of = |id: usize| values[id] - lse;
+
+    let top = if top_n == 0 {
+        Vec::new()
+    } else {
+        let n = (top_n as usize).min(values.len());
+        let mut idx: Vec<usize> = (0..values.len()).collect();
+        let cmp = |a: &usize, b: &usize| {
+            values[*b]
+                .partial_cmp(&values[*a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        };
+        idx.select_nth_unstable_by(n - 1, cmp);
+        idx.truncate(n);
+        idx.sort_by(cmp);
+        idx.into_iter().map(|id| (id, logprob_of(id))).collect()
+    };
+
+    Some((logprob_of(token_id as usize), top))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::logprob_core;
+
+    #[test]
+    fn logprob_core_out_of_range_or_empty_is_none() {
+        assert!(logprob_core(&[], 0, 0).is_none());
+        assert!(logprob_core(&[1.0, 2.0], 5, 0).is_none());
+        assert!(logprob_core(&[1.0, 2.0], -1, 0).is_none());
+    }
+
+    #[test]
+    fn logprob_core_matches_manual_log_softmax() {
+        // Uniform logits over 4 tokens → each prob = 0.25 → logprob = ln(0.25).
+        let (lp, _) = logprob_core(&[0.0, 0.0, 0.0, 0.0], 2, 0).unwrap();
+        assert!((lp - 0.25f32.ln()).abs() < 1e-5, "got {lp}");
+
+        // Probabilities always sum to 1: exp of every token's logprob sums to ~1.
+        let vals = [2.0f32, -1.0, 0.5, 3.5, -2.0];
+        let total: f32 = (0..vals.len())
+            .map(|i| logprob_core(&vals, i as i32, 0).unwrap().0.exp())
+            .sum();
+        assert!(
+            (total - 1.0).abs() < 1e-5,
+            "softmax must sum to 1, got {total}"
+        );
+    }
+
+    #[test]
+    fn logprob_core_top_n_is_descending_and_capped() {
+        let vals = [0.1f32, 5.0, 0.2, 9.0, 3.0];
+        let (_, top) = logprob_core(&vals, 3, 3).unwrap();
+        assert_eq!(top.len(), 3);
+        // Highest logits first: token 3 (9.0), token 1 (5.0), token 4 (3.0).
+        assert_eq!(top[0].0, 3);
+        assert_eq!(top[1].0, 1);
+        assert_eq!(top[2].0, 4);
+        assert!(
+            top[0].1 >= top[1].1 && top[1].1 >= top[2].1,
+            "must be descending"
+        );
+
+        // top_n larger than the vocab is clamped, not a panic.
+        let (_, all) = logprob_core(&vals, 0, 200).unwrap();
+        assert_eq!(all.len(), vals.len());
     }
 }

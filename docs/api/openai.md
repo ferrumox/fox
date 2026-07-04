@@ -68,6 +68,8 @@ The primary inference endpoint. Accepts a conversation history and returns a mod
 | `tools` | `array` | `null` | List of tools (functions) the model can call. See [Function calling](#function-calling). |
 | `tool_choice` | `string \| object` | `null` | Controls tool selection. `"auto"`, `"none"`, or `{"type":"function","function":{"name":"..."}}`. |
 | `response_format` | `object` | `null` | Guided decoding. `{"type":"json_object"}` forces any valid JSON; `{"type":"json_schema","json_schema":{"schema":…}}` forces JSON conforming to the schema. See [Structured output](#structured-output-guided-decoding). |
+| `logprobs` | `boolean` | `false` | Return per-token log-probabilities in `choices[].logprobs.content`. |
+| `top_logprobs` | `integer` | `0` | With `logprobs: true`, also return this many most-likely alternatives per token (0–20). |
 
 > **Sampling defaults.** The OpenAI surface mirrors OpenAI: no `top_k` and no repeat
 > penalty (use `frequency_penalty`/`presence_penalty`, both `0.0` = off). The Ollama
@@ -520,6 +522,48 @@ HTTP `400`.
   emitted. The output is always schema-valid.
 - Guided decoding constrains *syntax*, not semantics — pair it with a clear prompt so the
   content is meaningful, not just well-formed.
+
+---
+
+## Log-probabilities
+
+Set `logprobs: true` to get the model's per-token log-probabilities, and `top_logprobs`
+(0–20) to also get the most-likely alternatives at each position.
+
+```json
+{
+  "model": "llama3.2",
+  "messages": [{"role": "user", "content": "The sky is"}],
+  "logprobs": true,
+  "top_logprobs": 2
+}
+```
+
+Each generated token appears in `choices[0].logprobs.content`:
+
+```json
+{
+  "logprobs": {
+    "content": [
+      {
+        "token": " blue",
+        "logprob": -0.02,
+        "bytes": [32, 98, 108, 117, 101],
+        "top_logprobs": [
+          {"token": " blue", "logprob": -0.02, "bytes": [32, 98, 108, 117, 101]},
+          {"token": " grey", "logprob": -4.10, "bytes": [32, 103, 114, 101, 121]}
+        ]
+      }
+    ]
+  }
+}
+```
+
+`logprob` is a natural log (so `exp(logprob)` is the probability). Values near `0` mean
+high confidence; large negatives mean the model was unsure. In streaming mode the
+logprobs for each token arrive on that token's chunk. The numbers are the model's **raw**
+distribution — if guided decoding (`response_format`) is also active, they reflect the
+unconstrained probabilities, not the grammar-masked ones.
 
 ---
 

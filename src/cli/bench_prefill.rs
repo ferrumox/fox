@@ -104,6 +104,7 @@ fn sampling() -> SamplingParams {
         initial_in_thinking: false,
         max_thinking_chars: 8192,
         grammar: None,
+        logprobs: None,
     }
 }
 
