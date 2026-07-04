@@ -283,6 +283,31 @@ pub(crate) fn active_backend_description() -> String {
     })
 }
 
+/// Owning handle to a llama.cpp GBNF grammar sampler for one in-flight request.
+///
+/// The raw `*mut llama_sampler` is not `Send`/`Sync` on its own, but every access
+/// happens under the model's `_ctx` mutex (held during `do_prefill`/`do_decode`
+/// sampling), so concurrent use is already serialized. `Drop` frees the sampler, so
+/// removing the entry from the `grammars` map — or dropping the model — releases it.
+#[cfg(not(fox_stub))]
+struct GrammarSampler {
+    ptr: *mut ffi::llama_sampler,
+}
+
+#[cfg(not(fox_stub))]
+unsafe impl Send for GrammarSampler {}
+#[cfg(not(fox_stub))]
+unsafe impl Sync for GrammarSampler {}
+
+#[cfg(not(fox_stub))]
+impl Drop for GrammarSampler {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe { ffi::llama_sampler_free(self.ptr) };
+        }
+    }
+}
+
 /// Llama.cpp model via FFI.
 #[cfg(not(fox_stub))]
 pub struct LlamaCppModel {
@@ -301,6 +326,10 @@ pub struct LlamaCppModel {
     /// means the model has no usable embedded template. Cached so the template is
     /// parsed once, not on every request (see `render_chat_jinja`).
     pub(super) chat_env: std::sync::OnceLock<Option<minijinja::Environment<'static>>>,
+    /// Per-request GBNF grammar samplers for guided decoding, keyed by request id.
+    /// Created lazily on the first constrained sample and freed via `free_grammar` on
+    /// every terminal path (so they never leak). Empty unless a request set a grammar.
+    pub(super) grammars: dashmap::DashMap<u64, GrammarSampler>,
 }
 
 #[cfg(not(fox_stub))]
@@ -510,6 +539,7 @@ impl LlamaCppModel {
             effective_ctx: effective_max_ctx,
             owns_model: true,
             chat_env: std::sync::OnceLock::new(),
+            grammars: dashmap::DashMap::new(),
         })
     }
 
@@ -581,6 +611,7 @@ impl LlamaCppModel {
             effective_ctx: effective_max_ctx,
             owns_model: false, // weights are owned by the original LlamaCppModel
             chat_env: std::sync::OnceLock::new(),
+            grammars: dashmap::DashMap::new(),
         })
     }
 }
@@ -779,6 +810,11 @@ impl Model for LlamaCppModel {
             ffi::llama_memory_seq_add(mem, seq_id, keep + discard, -1, -discard);
         }
         Ok(())
+    }
+
+    fn free_grammar(&self, req_id: u64) {
+        // Removing the entry drops its GrammarSampler, which frees the llama.cpp sampler.
+        self.grammars.remove(&req_id);
     }
 
     fn embedding_dim(&self) -> usize {

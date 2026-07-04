@@ -120,6 +120,10 @@ pub struct InferenceRequestForModel {
     /// `prompt_tokens.len()`. Starts at the effective skip (0, or the prefix-hit
     /// boundary). Lets a long prompt be prefilled in chunks across scheduler steps.
     pub prefill_pos: usize,
+    /// GBNF grammar constraining generation (None = unconstrained). The model keeps a
+    /// stateful grammar sampler per request id and, when this is set, masks forbidden
+    /// tokens before sampling and advances the grammar with the chosen token.
+    pub grammar: Option<std::sync::Arc<str>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +251,12 @@ pub trait Model: Send + Sync {
     fn roll_context(&self, _seq_id: i32, _n_keep: usize, _n_discard: usize) -> Result<()> {
         Ok(())
     }
+
+    /// Free the per-request grammar sampler (guided decoding), if any. Called by the
+    /// engine on every terminal path a request can take (completion, length, stop,
+    /// disconnect) so grammar samplers never leak. A no-op for requests without a
+    /// grammar and for backends that don't do constrained decoding (the default).
+    fn free_grammar(&self, _req_id: u64) {}
 
     /// Returns true if the loaded model's memory backend supports sequence copying
     /// (`llama_memory_seq_cp`).  Standard transformer (attention-only) models return true;

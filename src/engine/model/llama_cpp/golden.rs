@@ -179,6 +179,7 @@ fn golden_chunked_prefill_matches_single_shot() {
         skip_prefix_tokens: 0,
         prefix_seq_id: None,
         prefill_pos,
+        grammar: None,
     };
 
     // argmax of the final-position logits — robust to tiny fp reduction-order diffs.
@@ -254,6 +255,7 @@ fn golden_context_shift_continues_past_n_ctx() {
         skip_prefix_tokens: 0,
         prefix_seq_id: None,
         prefill_pos: 0,
+        grammar: None,
     };
 
     // Prefill the prompt on seq 0.
@@ -287,6 +289,81 @@ fn golden_context_shift_continues_past_n_ctx() {
     }
 
     assert!(rolled > 0, "the loop must have triggered at least one roll");
+}
+
+/// Guided decoding (0.14, S1) must constrain output to the grammar. A grammar that
+/// only admits `yes` or `no` must force the generated text to be exactly one of them —
+/// every other token is masked to -inf before sampling, so the model cannot escape it.
+#[test]
+fn golden_grammar_constrains_output() {
+    let m = golden!();
+    let grammar: std::sync::Arc<str> = std::sync::Arc::from("root ::= \"yes\" | \"no\"");
+    let prompt = m
+        .tokenize("Is the sky blue? Answer with one word:")
+        .unwrap();
+
+    let mk_req = |last: Option<i32>, ctx_len: usize| InferenceRequestForModel {
+        id: 1,
+        prompt_tokens: prompt.clone(),
+        last_token: last,
+        generated_tokens: 0,
+        max_new_tokens: 8,
+        context_len: ctx_len,
+        kv_seq_id: 0,
+        temperature: 0.0, // greedy *within* the grammar-allowed set
+        top_p: 1.0,
+        top_k: 0,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        seed: None,
+        generated_token_ids: vec![],
+        skip_prefix_tokens: 0,
+        prefix_seq_id: None,
+        prefill_pos: 0,
+        grammar: Some(grammar.clone()),
+    };
+
+    // Prefill seeds the grammar sampler and yields the first constrained token.
+    let pre = m.do_prefill(&[1], &[mk_req(None, 0)], 0).unwrap();
+    let mut next = pre[0].logits.clone().unwrap().sampled_token;
+
+    // Decode until the grammar allows an end-of-generation token, collecting the
+    // constrained pieces. Same position bookkeeping as the context-shift golden:
+    // the token is written at position `live` (ctx_len = live + 1).
+    let mut gen: Vec<i32> = Vec::new();
+    let mut live = prompt.len();
+    for _ in 0..8 {
+        if m.is_eog_token(next) {
+            break;
+        }
+        gen.push(next);
+        let out = m.do_decode(&[1], &[mk_req(Some(next), live + 1)]).unwrap();
+        next = out[0].1.sampled_token;
+        live += 1;
+    }
+
+    let mut bytes = Vec::new();
+    for &t in &gen {
+        bytes.extend(m.token_to_piece_bytes(t));
+    }
+    let text = String::from_utf8_lossy(&bytes).replace(super::SPM_SPACE, " ");
+    let out = text.trim();
+    assert!(
+        out == "yes" || out == "no",
+        "grammar `root ::= \"yes\" | \"no\"` must force output to yes/no, got {out:?}"
+    );
+
+    // The grammar sampler exists after use and frees cleanly (no leak / no double-free).
+    assert!(
+        m.grammars.contains_key(&1),
+        "grammar sampler must be cached"
+    );
+    m.free_grammar(1);
+    assert!(
+        !m.grammars.contains_key(&1),
+        "free_grammar must drop the sampler"
+    );
 }
 
 /// tokenize → detokenize must reconstruct tricky text. Uses the raw-byte piece

@@ -67,6 +67,7 @@ impl InferenceEngine {
                         );
                         for req_id in &prefill_ids {
                             engine.scheduler.mark_finished(*req_id, StopReason::Length);
+                            engine.model.free_grammar(*req_id);
                         }
                     }
                 }
@@ -90,6 +91,7 @@ impl InferenceEngine {
                         );
                         for req_id in &decode_ids {
                             engine.scheduler.mark_finished(*req_id, StopReason::Length);
+                            engine.model.free_grammar(*req_id);
                         }
                     }
                 }
@@ -179,6 +181,7 @@ impl InferenceEngine {
                 skip_prefix_tokens: r.skip_prefix_tokens,
                 prefix_seq_id: r.prefix_seq_id,
                 prefill_pos: r.prefill_pos,
+                grammar: r.sampling.grammar.clone(),
             })
             .collect();
 
@@ -274,6 +277,7 @@ impl InferenceEngine {
                 skip_prefix_tokens: 0,
                 prefix_seq_id: None,
                 prefill_pos: r.prefill_pos,
+                grammar: r.sampling.grammar.clone(),
             })
             .collect();
         let model = self.model.clone();

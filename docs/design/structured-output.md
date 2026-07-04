@@ -82,13 +82,16 @@ trigger pattern (e.g. `</think>`). Called out so it isn't a silent gap.
 
 ### Staging
 
-- **S1 — grammar plumbing + raw GBNF** (real build, golden-verified): `grammar` on
-  `SamplingParams`/`InferenceRequestForModel`; the per-request `GrammarSampler` map,
-  apply/accept in the sampling path, and reliable `free_grammar` cleanup. Accepts a raw
-  GBNF string end-to-end (no API surface yet — driven by a golden test). Golden
-  `golden_grammar_constrains_output`: a grammar that only admits `yes`/`no` must yield
-  output in `{yes, no}` on a real model; and grammar-`None` must match the unconstrained
-  sample bit-for-bit.
+- **S1 — grammar plumbing + raw GBNF** ✅ (real build, golden-verified): `grammar` on
+  `SamplingParams`/`InferenceRequestForModel`; the per-request `GrammarSampler` map
+  (a `Send + Sync` newtype over `*mut llama_sampler`, freed on `Drop`), `sample_constrained`
+  masking forbidden tokens via `llama_sampler_apply` before fox's Rust sampler and
+  advancing with `llama_sampler_accept`, and reliable `free_grammar` on every terminal
+  path (completion, length, stop, disconnect). Accepts a raw GBNF string end-to-end (no
+  API surface yet — driven by the golden test). Golden `golden_grammar_constrains_output`:
+  a grammar that only admits `yes`/`no` forces output into `{yes, no}` on a real model,
+  and asserts the sampler is cached then freed (no leak). Grammar-`None` keeps the
+  original sampling path unchanged.
 - **S2 — JSON-schema → GBNF (Rust)**: since `json_schema_to_grammar` is in `common/`
   (not linked), implement a pragmatic converter in Rust covering the JSON-Schema subset
   that matters: `type` (object/array/string/number/integer/boolean/null), `properties` +

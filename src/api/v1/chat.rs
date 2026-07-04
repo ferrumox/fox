@@ -120,6 +120,7 @@ pub async fn chat_completions(
         show_thinking: false,
         initial_in_thinking: enable_thinking,
         max_thinking_chars: defaults::MAX_THINKING_CHARS,
+        grammar: None,
     };
 
     let req_id = entry.engine.next_request_id();

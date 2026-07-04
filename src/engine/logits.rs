@@ -122,6 +122,7 @@ impl InferenceEngine {
                 }
                 self.scheduler.mark_finished(*req_id, StopReason::Preempt);
                 self.per_request_state.remove(req_id);
+                self.model.free_grammar(*req_id);
                 continue;
             }
 
@@ -166,6 +167,7 @@ impl InferenceEngine {
                 self.scheduler.mark_finished(*req_id, stop_reason.unwrap());
 
                 self.per_request_state.remove(req_id);
+                self.model.free_grammar(*req_id);
             } else {
                 self.scheduler
                     .update_after_token(*req_id, token_id, from_prefill);

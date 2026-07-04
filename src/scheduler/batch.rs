@@ -37,6 +37,11 @@ pub struct SamplingParams {
     /// loops where the model never generates `</think>`.
     /// 0 = no limit.  Default: 8192 (roughly 2 000–3 000 tokens).
     pub max_thinking_chars: usize,
+    /// GBNF grammar constraining generation (None = unconstrained). When set, the model
+    /// masks every token the grammar forbids at the current position before fox's Rust
+    /// sampler picks within the allowed set. Held behind `Arc` so cloning a request's
+    /// sampling params (done per step) doesn't re-copy the grammar text.
+    pub grammar: Option<std::sync::Arc<str>>,
 }
 
 impl Default for SamplingParams {
@@ -53,6 +58,7 @@ impl Default for SamplingParams {
             show_thinking: false,
             initial_in_thinking: false,
             max_thinking_chars: 8192,
+            grammar: None,
         }
     }
 }
