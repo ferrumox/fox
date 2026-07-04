@@ -118,6 +118,16 @@ pub async fn chat_completions(
     let want_logprobs = req.logprobs == Some(true);
     let logprobs_top_n = req.top_logprobs.unwrap_or(0).min(20);
 
+    // logit_bias arrives as string token ids (OpenAI); parse to a numeric map, dropping
+    // any non-integer keys.
+    let logit_bias = req.logit_bias.as_ref().and_then(|m| {
+        let parsed: std::collections::HashMap<i32, f32> = m
+            .iter()
+            .filter_map(|(k, &v)| k.parse::<i32>().ok().map(|id| (id, v)))
+            .collect();
+        (!parsed.is_empty()).then(|| std::sync::Arc::new(parsed))
+    });
+
     let sampling = SamplingParams {
         temperature: req.temperature.unwrap_or(defaults::TEMPERATURE).max(0.0),
         top_p: req.top_p.unwrap_or(defaults::TOP_P).clamp(0.0, 1.0),
@@ -143,6 +153,9 @@ pub async fn chat_completions(
         } else {
             None
         },
+        min_p: req.min_p.unwrap_or(0.0).clamp(0.0, 1.0),
+        min_tokens: req.min_tokens.unwrap_or(0),
+        logit_bias,
     };
 
     let req_id = entry.engine.next_request_id();

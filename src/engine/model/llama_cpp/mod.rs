@@ -316,6 +316,9 @@ pub struct LlamaCppModel {
     pub(super) vocab: *const ffi::llama_vocab,
     pub(super) config: ModelConfig,
     pub(super) eos_token: i32,
+    /// All end-of-generation token ids (`llama_vocab_is_eog`), precomputed once so
+    /// `min_tokens` can mask them without a per-token vocab scan.
+    pub(super) eog_tokens: Vec<i32>,
     /// Effective per-sequence context length (tokens) used when creating the llama.cpp context.
     pub(super) effective_ctx: u32,
     /// Whether this instance owns the model pointer and should free it on drop.
@@ -530,12 +533,16 @@ impl LlamaCppModel {
         // across clone (e.g. future multi-backend); the unsafe impls guarantee thread safety.
         #[allow(clippy::arc_with_non_send_sync)]
         let ctx_arc = Arc::new(std::sync::Mutex::new(ctx));
+        let eog_tokens: Vec<i32> = (0..config.vocab_size as i32)
+            .filter(|&id| unsafe { ffi::llama_vocab_is_eog(vocab, id) })
+            .collect();
         Ok(Self {
             _model: model,
             _ctx: ctx_arc,
             vocab,
             config,
             eos_token,
+            eog_tokens,
             effective_ctx: effective_max_ctx,
             owns_model: true,
             chat_env: std::sync::OnceLock::new(),
@@ -608,6 +615,7 @@ impl LlamaCppModel {
             vocab: self.vocab,
             config: self.config.clone(),
             eos_token: self.eos_token,
+            eog_tokens: self.eog_tokens.clone(),
             effective_ctx: effective_max_ctx,
             owns_model: false, // weights are owned by the original LlamaCppModel
             chat_env: std::sync::OnceLock::new(),

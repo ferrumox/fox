@@ -142,20 +142,23 @@ token plus its top-N alternatives.
 - Contained to `logits.rs` + response types; no scheduler/KV impact. Not surfaced for
   tool-call responses or the legacy completions endpoint.
 
-## 3. Missing sampling params
+## 3. Missing sampling params ✅
 
-All three are pure additions to the Rust sampler (`engine/model/sampling.rs`) plus the
-request types — no llama.cpp involvement.
+Pure additions to the Rust sampler (`engine/model/sampling.rs`) plus the request types.
 
-- **min_p**: after temperature, drop tokens whose probability is below
-  `min_p × max_prob`. A cheap nucleus alternative; slots between steps 4 and 5 of
-  `sample_token`.
-- **logit_bias**: a `{token_id: bias}` map added to the raw logits before sampling
-  (OpenAI semantics; `-100`/`+100` effectively ban/force a token). Threaded from the API
-  as `HashMap<i32, f32>`.
-- **min_tokens**: suppress every EOG token (mask to `-inf`) until
-  `generated_tokens >= min_tokens`, so a request can be forced to keep going. Reuses the
-  model's EOG set (`is_eog_token`).
+- **min_p**: after the softmax sort, drop tokens whose probability is below
+  `min_p × max_prob` (kept at least one). OpenAI (`min_p`, fox extension) and Ollama
+  (`options.min_p`, native).
+- **logit_bias**: a `{token_id: bias}` map added to the raw logits before penalties
+  (OpenAI semantics; ±100 effectively bans/forces a token). Held as
+  `Arc<HashMap<i32, f32>>` so per-step request clones stay cheap; the API parses the
+  string token-id keys, dropping non-integer ones. OpenAI only.
+- **min_tokens**: suppress every end-of-generation token (mask to `-inf`) until
+  `generated_tokens >= min_tokens`. To avoid a per-token vocab scan, the model's EOG id
+  set is precomputed once at load (`eog_tokens`); `sample_constrained` masks it. OpenAI
+  (fox extension).
+- Tests: `logit_bias_forces_a_token` / `logit_bias_bans_a_token` / `min_p_keeps_only_dominant_token`
+  (stub) and golden `golden_min_tokens_suppresses_eog` (real model: no EOG below the floor).
 
 ---
 

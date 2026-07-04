@@ -499,6 +499,34 @@ async fn test_v1_chat_logprobs_absent_by_default() {
     );
 }
 
+#[tokio::test]
+async fn test_v1_chat_accepts_min_p_logit_bias_min_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state("stub", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": false,
+            "max_tokens": 4,
+            "min_p": 0.05,
+            "min_tokens": 2,
+            "logit_bias": {"100": 5.0, "200": -100.0},
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        resp.status(),
+        200,
+        "min_p / min_tokens / logit_bias must be accepted"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // NDJSON streaming – POST /api/chat  (stream: true)
 // ─────────────────────────────────────────────────────────────────────────────

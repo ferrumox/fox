@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chunks and non-streaming responses. Computed from the logits fox already produces, so
   no extra inference cost; the log-softmax core is unit-tested. logprobs reflect the
   model's raw distribution (before any guided-decoding grammar mask).
+- **More sampling controls** — `min_p` (drop tokens below `min_p × max_prob`; OpenAI
+  and Ollama `options.min_p`), `logit_bias` (per-token additive bias, OpenAI; ±100
+  bans/forces a token), and `min_tokens` (suppress end-of-generation until at least N
+  tokens are produced; OpenAI). All are honoured instead of being silently dropped.
 
 ## [0.13.0]
 

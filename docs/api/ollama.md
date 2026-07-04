@@ -89,6 +89,7 @@ Multi-turn conversation using the Ollama chat format. Supports streaming (NDJSON
 | `temperature` | `0.8` | Sampling temperature. |
 | `top_p` | `0.9` | Nucleus sampling probability. |
 | `top_k` | `40` | Top-K filter (mirrors upstream Ollama). `0` = disabled. |
+| `min_p` | `0.0` | Min-P sampling: drop tokens below `min_p × max_prob`. `0.0` = disabled. |
 | `repeat_penalty` | `1.1` | Repetition penalty (mirrors upstream Ollama). `1.0` = disabled. |
 | `seed` | `null` | RNG seed. |
 | `num_predict` | `512` | Maximum tokens to generate (`2048` when thinking is on). |

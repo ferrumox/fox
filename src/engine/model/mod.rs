@@ -124,6 +124,12 @@ pub struct InferenceRequestForModel {
     /// stateful grammar sampler per request id and, when this is set, masks forbidden
     /// tokens before sampling and advances the grammar with the chosen token.
     pub grammar: Option<std::sync::Arc<str>>,
+    /// Min-P sampling threshold (0.0 = disabled).
+    pub min_p: f32,
+    /// Suppress end-of-generation tokens until this many tokens are generated (0 = off).
+    pub min_tokens: usize,
+    /// Additive per-token logit bias (OpenAI `logit_bias`).
+    pub logit_bias: Option<std::sync::Arc<std::collections::HashMap<i32, f32>>>,
 }
 
 // ---------------------------------------------------------------------------

@@ -273,36 +273,56 @@ impl LlamaCppModel {
         Ok(results)
     }
 
-    /// Sample one token from `logits`, honoring the request's GBNF grammar if it set
-    /// one. Without a grammar this is exactly `sample_token`. With a grammar, tokens the
-    /// grammar forbids at the current position are masked to `-inf` first (so fox's Rust
-    /// sampler can never pick them), then the chosen token is fed back to advance the
-    /// grammar state.
+    /// Sample one token from `logits`, honoring the request's GBNF grammar (mask
+    /// forbidden tokens, then advance the grammar with the pick), `min_tokens` (suppress
+    /// end-of-generation until the floor is reached), and the sampler knobs (`min_p`,
+    /// `logit_bias`, temperature, top-k/p, penalties). Without a grammar or an active
+    /// EOG suppression it is exactly `sample_token`.
     pub(super) fn sample_constrained(&self, req: &InferenceRequestForModel, logits: &[f32]) -> i32 {
         let params = SamplerParams {
             temperature: req.temperature,
             top_p: req.top_p,
             top_k: req.top_k,
+            min_p: req.min_p,
             repetition_penalty: req.repetition_penalty,
             frequency_penalty: req.frequency_penalty,
             presence_penalty: req.presence_penalty,
+            logit_bias: req.logit_bias.as_deref(),
             generated_ids: &req.generated_token_ids,
             seed: req.seed,
             token_count: req.generated_tokens,
         };
-        let Some(grammar) = req.grammar.as_deref() else {
+
+        let grammar = req.grammar.as_deref();
+        let suppress_eog = req.min_tokens > req.generated_tokens && !self.eog_tokens.is_empty();
+
+        // Fast path: no grammar and nothing to mask → sample the raw logits directly.
+        if grammar.is_none() && !suppress_eog {
             return sample_token(logits, params);
-        };
-        match self.grammar_mask(req.id, grammar, logits) {
-            Some(masked) => {
-                let tok = sample_token(&masked, params);
-                self.grammar_accept(req.id, tok);
-                tok
-            }
-            // Grammar failed to parse — generate unconstrained rather than crash (the
-            // API layer validates and rejects bad grammars before they reach here).
-            None => sample_token(logits, params),
         }
+
+        // Otherwise build a working buffer: the grammar-masked logits if a grammar is
+        // set (falling back to a copy if it failed to parse), else a plain copy.
+        let mut buf = match grammar {
+            Some(g) => self
+                .grammar_mask(req.id, g, logits)
+                .unwrap_or_else(|| logits.to_vec()),
+            None => logits.to_vec(),
+        };
+        // min_tokens: forbid end-of-generation until enough tokens have been produced.
+        if suppress_eog {
+            for &id in &self.eog_tokens {
+                if (id as usize) < buf.len() {
+                    buf[id as usize] = f32::NEG_INFINITY;
+                }
+            }
+        }
+
+        let tok = sample_token(&buf, params);
+        if grammar.is_some() {
+            self.grammar_accept(req.id, tok);
+        }
+        tok
     }
 
     /// Mask every token the request's grammar forbids to `-inf`, creating the grammar

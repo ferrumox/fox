@@ -70,6 +70,9 @@ The primary inference endpoint. Accepts a conversation history and returns a mod
 | `response_format` | `object` | `null` | Guided decoding. `{"type":"json_object"}` forces any valid JSON; `{"type":"json_schema","json_schema":{"schema":…}}` forces JSON conforming to the schema. See [Structured output](#structured-output-guided-decoding). |
 | `logprobs` | `boolean` | `false` | Return per-token log-probabilities in `choices[].logprobs.content`. |
 | `top_logprobs` | `integer` | `0` | With `logprobs: true`, also return this many most-likely alternatives per token (0–20). |
+| `logit_bias` | `object` | `null` | Additive per-token bias keyed by token id (string): `{"123": 5, "456": -100}`. `±100` effectively forces/bans a token. |
+| `min_p` | `number` | `0.0` | Min-P sampling: drop tokens below `min_p × max_prob` (fox extension). |
+| `min_tokens` | `integer` | `0` | Suppress end-of-generation until at least this many tokens are produced (fox extension). |
 
 > **Sampling defaults.** The OpenAI surface mirrors OpenAI: no `top_k` and no repeat
 > penalty (use `frequency_penalty`/`presence_penalty`, both `0.0` = off). The Ollama

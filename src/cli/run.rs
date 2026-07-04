@@ -579,5 +579,8 @@ fn build_sampling_params(
         max_thinking_chars: 8192,
         grammar: None,
         logprobs: None,
+        min_p: 0.0,
+        min_tokens: 0,
+        logit_bias: None,
     }
 }

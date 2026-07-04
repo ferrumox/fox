@@ -183,6 +183,9 @@ pub fn sampling_from_ollama(
             max_thinking_chars: defaults::MAX_THINKING_CHARS,
             grammar: None,
             logprobs: None,
+            min_p: opts.and_then(|o| o.min_p).unwrap_or(0.0).clamp(0.0, 1.0),
+            min_tokens: 0,
+            logit_bias: None,
         },
         max_tokens,
     )
@@ -458,6 +461,7 @@ mod tests {
             temperature: Some(0.3),
             top_p: Some(0.5),
             top_k: Some(10),
+            min_p: Some(0.05),
             repeat_penalty: Some(1.2),
             seed: Some(42),
             num_predict: Some(64),

@@ -182,6 +182,9 @@ impl InferenceEngine {
                 prefix_seq_id: r.prefix_seq_id,
                 prefill_pos: r.prefill_pos,
                 grammar: r.sampling.grammar.clone(),
+                min_p: r.sampling.min_p,
+                min_tokens: r.sampling.min_tokens,
+                logit_bias: r.sampling.logit_bias.clone(),
             })
             .collect();
 
@@ -278,6 +281,9 @@ impl InferenceEngine {
                 prefix_seq_id: None,
                 prefill_pos: r.prefill_pos,
                 grammar: r.sampling.grammar.clone(),
+                min_p: r.sampling.min_p,
+                min_tokens: r.sampling.min_tokens,
+                logit_bias: r.sampling.logit_bias.clone(),
             })
             .collect();
         let model = self.model.clone();

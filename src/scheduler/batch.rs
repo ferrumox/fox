@@ -45,6 +45,14 @@ pub struct SamplingParams {
     /// Emit per-token log-probabilities when `Some(n)`: the sampled token's logprob plus
     /// the top-`n` alternatives (`n = 0` → just the sampled token). `None` = off.
     pub logprobs: Option<u8>,
+    /// Min-P sampling: drop tokens below `min_p × max_prob` (0.0 = disabled).
+    pub min_p: f32,
+    /// Suppress end-of-generation tokens until at least this many tokens are generated
+    /// (0 = disabled).
+    pub min_tokens: usize,
+    /// Additive per-token logit bias (OpenAI `logit_bias`). `Arc` so per-step request
+    /// clones stay cheap.
+    pub logit_bias: Option<std::sync::Arc<std::collections::HashMap<i32, f32>>>,
 }
 
 impl Default for SamplingParams {
@@ -63,6 +71,9 @@ impl Default for SamplingParams {
             max_thinking_chars: 8192,
             grammar: None,
             logprobs: None,
+            min_p: 0.0,
+            min_tokens: 0,
+            logit_bias: None,
         }
     }
 }

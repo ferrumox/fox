@@ -132,6 +132,17 @@ pub struct ChatCompletionRequest {
     /// with `logprobs: true`.
     #[serde(default)]
     pub top_logprobs: Option<u8>,
+    /// Additive per-token logit bias, keyed by token id (as a string, OpenAI style).
+    /// Values around ±100 effectively force or ban a token.
+    #[serde(default)]
+    pub logit_bias: Option<std::collections::HashMap<String, f32>>,
+    /// Min-P sampling: drop tokens below `min_p × max_prob` (fox extension).
+    #[serde(default)]
+    pub min_p: Option<f32>,
+    /// Suppress end-of-generation until at least this many tokens are produced (fox
+    /// extension).
+    #[serde(default)]
+    pub min_tokens: Option<usize>,
     /// fox extension: opt in to the model's native reasoning/thinking when it
     /// supports it. Default off — thinking is NOT enabled unless requested.
     #[serde(default)]

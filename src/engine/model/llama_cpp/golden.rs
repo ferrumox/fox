@@ -180,6 +180,9 @@ fn golden_chunked_prefill_matches_single_shot() {
         prefix_seq_id: None,
         prefill_pos,
         grammar: None,
+        min_p: 0.0,
+        min_tokens: 0,
+        logit_bias: None,
     };
 
     // argmax of the final-position logits — robust to tiny fp reduction-order diffs.
@@ -256,6 +259,9 @@ fn golden_context_shift_continues_past_n_ctx() {
         prefix_seq_id: None,
         prefill_pos: 0,
         grammar: None,
+        min_p: 0.0,
+        min_tokens: 0,
+        logit_bias: None,
     };
 
     // Prefill the prompt on seq 0.
@@ -322,6 +328,9 @@ fn golden_grammar_constrains_output() {
         prefix_seq_id: None,
         prefill_pos: 0,
         grammar: Some(grammar.clone()),
+        min_p: 0.0,
+        min_tokens: 0,
+        logit_bias: None,
     };
 
     // Prefill seeds the grammar sampler and yields the first constrained token.
@@ -402,6 +411,9 @@ fn golden_json_schema_constrains_to_valid_json() {
         prefix_seq_id: None,
         prefill_pos: 0,
         grammar: Some(grammar.clone()),
+        min_p: 0.0,
+        min_tokens: 0,
+        logit_bias: None,
     };
 
     let pre = m.do_prefill(&[1], &[mk_req(None, 0)], 0).unwrap();
@@ -432,6 +444,73 @@ fn golden_json_schema_constrains_to_valid_json() {
         "output must be an object with a boolean `answer`, got {parsed}"
     );
     m.free_grammar(1);
+}
+
+/// `min_tokens` (0.14) must suppress end-of-generation until the floor is reached. The
+/// model's EOG set is precomputed at load; with `min_tokens` active, `sample_constrained`
+/// masks those ids, so none of the first `min_tokens` generated tokens may be an EOG.
+#[test]
+fn golden_min_tokens_suppresses_eog() {
+    let m = golden!();
+    assert!(
+        !m.eog_tokens.is_empty(),
+        "the model's end-of-generation set must be precomputed"
+    );
+    assert!(
+        m.eog_tokens.iter().all(|&id| m.is_eog_token(id)),
+        "every precomputed eog id must actually be an EOG token"
+    );
+
+    // A prompt that invites a very short answer — a naive decode could emit EOS quickly.
+    let prompt = m.tokenize("Reply with just 'ok'.").unwrap();
+    let floor = 6usize;
+
+    let mk_req = |last: Option<i32>, ctx_len: usize, generated: usize| InferenceRequestForModel {
+        id: 1,
+        prompt_tokens: prompt.clone(),
+        last_token: last,
+        generated_tokens: generated,
+        max_new_tokens: 32,
+        context_len: ctx_len,
+        kv_seq_id: 0,
+        temperature: 0.0,
+        top_p: 1.0,
+        top_k: 0,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        seed: None,
+        generated_token_ids: vec![],
+        skip_prefix_tokens: 0,
+        prefix_seq_id: None,
+        prefill_pos: 0,
+        grammar: None,
+        min_p: 0.0,
+        min_tokens: floor,
+        logit_bias: None,
+    };
+
+    // Prefill must also respect min_tokens (generated_tokens == 0 < floor).
+    let pre = m.do_prefill(&[1], &[mk_req(None, 0, 0)], 0).unwrap();
+    let mut next = pre[0].logits.clone().unwrap().sampled_token;
+    assert!(
+        !m.is_eog_token(next),
+        "first token must not be EOG under min_tokens"
+    );
+
+    let mut live = prompt.len();
+    for i in 1..floor {
+        // generated_tokens = i (< floor) keeps EOG suppressed.
+        let out = m
+            .do_decode(&[1], &[mk_req(Some(next), live + 1, i)])
+            .unwrap();
+        next = out[0].1.sampled_token;
+        assert!(
+            !m.is_eog_token(next),
+            "token {i} must not be EOG while below the min_tokens floor"
+        );
+        live += 1;
+    }
 }
 
 /// tokenize → detokenize must reconstruct tricky text. Uses the raw-byte piece
