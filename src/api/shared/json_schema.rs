@@ -19,7 +19,11 @@
 // output is always a schema-valid object, just never *more* permissive than the
 // required core. Full optional-property flexibility can come later.
 
+use std::sync::Arc;
+
 use serde_json::Value;
+
+use crate::api::types::ResponseFormat;
 
 /// Shared primitive rules appended to every generated grammar. `value`/`object`/`array`
 /// back untyped nodes and `additionalProperties`-style "any JSON" positions.
@@ -51,6 +55,32 @@ pub fn schema_to_gbnf(schema: &Value) -> Result<String, String> {
     }
     out.push_str(PREAMBLE);
     Ok(out)
+}
+
+/// Grammar for an OpenAI `response_format`, if it requests constrained output.
+/// `text` → `None` (unconstrained); `json_object` → any JSON; `json_schema` → the
+/// schema (or any JSON when no schema is supplied). `Err` (→ HTTP 400) on a schema that
+/// can't be converted.
+pub fn grammar_from_response_format(rf: &ResponseFormat) -> Result<Option<Arc<str>>, String> {
+    match rf.format_type.as_str() {
+        "text" => Ok(None),
+        "json_object" => Ok(Some(Arc::from(any_json_gbnf()))),
+        "json_schema" => match rf.json_schema.as_ref().and_then(|s| s.schema.as_ref()) {
+            Some(schema) => Ok(Some(Arc::from(schema_to_gbnf(schema)?))),
+            None => Ok(Some(Arc::from(any_json_gbnf()))),
+        },
+        other => Err(format!("unsupported response_format type {other:?}")),
+    }
+}
+
+/// Grammar for an Ollama `format` field: the string `"json"` → any JSON, a JSON schema
+/// object → that schema, anything else → `None`. `Err` (→ HTTP 400) on a bad schema.
+pub fn grammar_from_ollama_format(format: Option<&Value>) -> Result<Option<Arc<str>>, String> {
+    match format {
+        Some(Value::String(s)) if s == "json" => Ok(Some(Arc::from(any_json_gbnf()))),
+        Some(v) if v.is_object() => Ok(Some(Arc::from(schema_to_gbnf(v)?))),
+        _ => Ok(None),
+    }
 }
 
 #[derive(Default)]
@@ -292,5 +322,64 @@ mod tests {
     fn unsupported_type_errors() {
         let err = schema_to_gbnf(&json!({"type": "widget"})).unwrap_err();
         assert!(err.contains("unsupported"), "got: {err}");
+    }
+
+    use crate::api::types::{JsonSchemaFormat, ResponseFormat};
+
+    fn rf(t: &str, schema: Option<Value>) -> ResponseFormat {
+        ResponseFormat {
+            format_type: t.to_string(),
+            json_schema: schema.map(|s| JsonSchemaFormat {
+                name: "x".to_string(),
+                strict: None,
+                schema: Some(s),
+            }),
+        }
+    }
+
+    #[test]
+    fn response_format_text_is_unconstrained() {
+        assert!(grammar_from_response_format(&rf("text", None))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn response_format_json_object_is_any_json() {
+        let g = grammar_from_response_format(&rf("json_object", None))
+            .unwrap()
+            .unwrap();
+        assert!(g.starts_with("root ::= ws value ws"));
+    }
+
+    #[test]
+    fn response_format_json_schema_uses_schema() {
+        let g = grammar_from_response_format(&rf("json_schema", Some(json!({"type": "string"}))))
+            .unwrap()
+            .unwrap();
+        assert!(g.starts_with("root ::= ws string ws"));
+    }
+
+    #[test]
+    fn response_format_json_schema_without_schema_falls_back_to_any() {
+        let g = grammar_from_response_format(&rf("json_schema", None))
+            .unwrap()
+            .unwrap();
+        assert!(g.starts_with("root ::= ws value ws"));
+    }
+
+    #[test]
+    fn ollama_format_json_string_and_schema_object() {
+        assert!(grammar_from_ollama_format(Some(&json!("json")))
+            .unwrap()
+            .unwrap()
+            .starts_with("root ::= ws value ws"));
+        assert!(
+            grammar_from_ollama_format(Some(&json!({"type": "integer"})))
+                .unwrap()
+                .unwrap()
+                .starts_with("root ::= ws integer ws")
+        );
+        assert!(grammar_from_ollama_format(None).unwrap().is_none());
     }
 }

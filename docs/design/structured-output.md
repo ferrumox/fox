@@ -101,11 +101,15 @@ trigger pattern (e.g. `</think>`). Called out so it isn't a silent gap.
   unit tests on the conversion + golden `golden_json_schema_constrains_to_valid_json`,
   which feeds a generated grammar to a real model and asserts the output parses as a
   conforming JSON object (proving the emitted GBNF is valid).
-- **S3 — API surface**: OpenAI `response_format` — `{ "type": "json_object" }` and
-  `{ "type": "json_schema", "json_schema": { "schema": … } }`; Ollama `format` — the
-  string `"json"` or a schema object. Build the grammar in the chat/completions handlers
-  of *both* families and set `SamplingParams.grammar`. A grammar that fails to
-  parse/convert is a `400`, not a silent fallback.
+- **S3 — API surface** ✅: OpenAI `response_format` — `{ "type": "json_object" }` and
+  `{ "type": "json_schema", "json_schema": { "schema": … } }` — wired in `v1/chat`;
+  Ollama `format` — the string `"json"` or a schema object — wired in `ollama/chat` and
+  `ollama/generate`, reading the raw `format` value so schema objects aren't flattened to
+  generic JSON. `grammar_from_response_format` / `grammar_from_ollama_format` build the
+  grammar and set `SamplingParams.grammar`; an unconvertible schema returns `400`, never
+  a silent fallback. Covered by adapter unit tests and integration tests
+  (`test_v1_chat_response_format_json_object_accepted`,
+  `test_v1_chat_response_format_bad_schema_rejected`).
 - **S4 — validation**: golden that a schema-constrained run parses as valid JSON matching
   the schema across several seeds; plus the S1 raw-GBNF golden. Stub-level: `grammar`
   threads through the scheduler; schema→GBNF unit tests.

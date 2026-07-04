@@ -101,6 +101,19 @@ pub async fn chat_completions(
         .or(req.max_completion_tokens)
         .unwrap_or(defaults::openai::MAX_TOKENS as u32) as usize;
 
+    // Guided decoding: convert `response_format` into a GBNF grammar. A json_schema
+    // that can't be converted is a 400, not a silent unconstrained fallback.
+    let grammar = match req.response_format.as_ref() {
+        Some(rf) => match crate::api::shared::json_schema::grammar_from_response_format(rf) {
+            Ok(g) => g,
+            Err(e) => {
+                return AppError::BadRequest(format!("invalid response_format: {e}"))
+                    .into_response()
+            }
+        },
+        None => None,
+    };
+
     let sampling = SamplingParams {
         temperature: req.temperature.unwrap_or(defaults::TEMPERATURE).max(0.0),
         top_p: req.top_p.unwrap_or(defaults::TOP_P).clamp(0.0, 1.0),
@@ -120,7 +133,7 @@ pub async fn chat_completions(
         show_thinking: false,
         initial_in_thinking: enable_thinking,
         max_thinking_chars: defaults::MAX_THINKING_CHARS,
-        grammar: None,
+        grammar,
     };
 
     let req_id = entry.engine.next_request_id();

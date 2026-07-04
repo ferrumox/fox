@@ -67,7 +67,7 @@ The primary inference endpoint. Accepts a conversation history and returns a mod
 | `stream` | `boolean` | `false` | Whether to stream tokens as they are generated (SSE). |
 | `tools` | `array` | `null` | List of tools (functions) the model can call. See [Function calling](#function-calling). |
 | `tool_choice` | `string \| object` | `null` | Controls tool selection. `"auto"`, `"none"`, or `{"type":"function","function":{"name":"..."}}`. |
-| `response_format` | `object` | `null` | Output format constraint. `{"type":"json_object"}` forces valid JSON output. |
+| `response_format` | `object` | `null` | Guided decoding. `{"type":"json_object"}` forces any valid JSON; `{"type":"json_schema","json_schema":{"schema":…}}` forces JSON conforming to the schema. See [Structured output](#structured-output-guided-decoding). |
 
 > **Sampling defaults.** The OpenAI surface mirrors OpenAI: no `top_k` and no repeat
 > penalty (use `frequency_penalty`/`presence_penalty`, both `0.0` = off). The Ollama
@@ -464,9 +464,13 @@ Add the tool call and its result to the conversation, then make another request:
 
 ---
 
-## Structured output (JSON mode)
+## Structured output (guided decoding)
 
-Set `response_format` to force the model to produce valid JSON output. fox injects a system instruction that constrains the model's output format.
+Set `response_format` to **constrain** generation with a grammar — fox masks every token
+the grammar forbids before sampling, so the output *always* parses (this is real guided
+decoding via llama.cpp's GBNF engine, not a prompt hint).
+
+**`json_object`** — force any valid JSON value:
 
 ```json
 {
@@ -479,21 +483,43 @@ Set `response_format` to force the model to produce valid JSON output. fox injec
 }
 ```
 
-Response:
+**`json_schema`** — force JSON conforming to a schema. fox converts the schema to a GBNF
+grammar (supports `type` object/array/string/integer/number/boolean/null, `properties` +
+`required`, `items`, `enum`, and nesting):
 
 ```json
 {
-  "choices": [{
-    "message": {
-      "role": "assistant",
-      "content": "{\"name\": \"Elena Vasquez\", \"age\": 34, \"occupation\": \"Marine biologist\", \"city\": \"Lisbon\"}"
-    },
-    "finish_reason": "stop"
-  }]
+  "model": "llama3.2",
+  "messages": [{"role": "user", "content": "Describe a fictional person."}],
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "person",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "age": {"type": "integer"},
+          "occupation": {"type": "string"}
+        },
+        "required": ["name", "age", "occupation"]
+      }
+    }
+  }
 }
 ```
 
-The `content` field is always a valid JSON string when `json_object` mode is active. Parse it with `JSON.parse()` / `json.loads()` after receiving it.
+Response `content` is always a valid JSON string when a JSON `response_format` is active —
+parse it with `JSON.parse()` / `json.loads()`. A schema fox cannot convert returns
+HTTP `400`.
+
+**Notes / limitations:**
+
+- The generated grammar requires exactly the `required` properties (or every declared
+  property when `required` is absent), in the order given; optional properties are not
+  emitted. The output is always schema-valid.
+- Guided decoding constrains *syntax*, not semantics — pair it with a clear prompt so the
+  content is meaningful, not just well-formed.
 
 ---
 

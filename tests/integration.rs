@@ -387,6 +387,64 @@ async fn test_v1_chat_streaming() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Guided decoding – response_format (0.14)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_v1_chat_response_format_json_object_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state("stub", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 4,
+            "response_format": {"type": "json_object"},
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        resp.status(),
+        200,
+        "a json_object response_format must be accepted"
+    );
+}
+
+#[tokio::test]
+async fn test_v1_chat_response_format_bad_schema_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state("stub", dir.path());
+    let app = make_router(&state);
+
+    // A schema fox can't convert to a grammar must be a 400, not a silent fallback.
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 4,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "x", "schema": {"type": "widget"}}
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "an unconvertible json_schema must be rejected with 400"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // NDJSON streaming – POST /api/chat  (stream: true)
 // ─────────────────────────────────────────────────────────────────────────────
 

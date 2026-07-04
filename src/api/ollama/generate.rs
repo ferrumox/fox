@@ -1,6 +1,7 @@
 // POST /api/generate handler.
 
 use axum::extract::State;
+use axum::response::IntoResponse;
 
 use crate::api::shared::extractor::LenientJson;
 use bytes::Bytes;
@@ -62,6 +63,15 @@ pub async fn ollama_generate(
     // /api/generate always suppresses thinking from output (no `thinking` field in response).
     let (mut sampling, max_tokens) = sampling_from_ollama(req.options.as_ref(), false);
     sampling.initial_in_thinking = supports_thinking;
+
+    // Guided decoding from the `format` field (`"json"` or a JSON schema object).
+    match crate::api::shared::json_schema::grammar_from_ollama_format(req.format.as_ref()) {
+        Ok(g) => sampling.grammar = g,
+        Err(e) => {
+            return crate::api::error::AppError::BadRequest(format!("invalid format: {e}"))
+                .into_response()
+        }
+    }
 
     let (prompt_tokens, prompt_tokens_len) = prepare_prompt(
         &entry,

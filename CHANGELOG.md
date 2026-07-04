@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Guided decoding / structured output** — fox can now *constrain* generation to a
+  grammar instead of hoping the model produces valid JSON. Set OpenAI
+  `response_format` (`{"type":"json_object"}` or `{"type":"json_schema","json_schema":
+  {"schema":…}}`) or Ollama `format` (`"json"` or a JSON-schema object), and every
+  sampled token is masked to the grammar-legal set via llama.cpp's core GBNF sampler
+  before fox's sampler picks within it — so the output always parses. JSON-schema is
+  converted to GBNF in Rust (`type`, `properties`+`required`, `items`, `enum`, nesting).
+  A schema fox can't convert is a `400`, never a silent unconstrained fallback.
+  Verified on a real model (golden `golden_grammar_constrains_output`,
+  `golden_json_schema_constrains_to_valid_json`). First item of the 0.14
+  structured-output work (`docs/design/structured-output.md`).
+
 ## [0.13.0]
 
 fox becomes a real server under concurrent, long-prompt, long-conversation load. The
