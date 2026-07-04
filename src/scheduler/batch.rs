@@ -141,6 +141,12 @@ pub struct InferenceRequest {
     /// boundary re-submission).  The decode position is based on this value, not
     /// `prompt_tokens.len()`, to avoid position gaps in recurrent/hybrid models.
     pub prefilled_tokens: usize,
+    /// Absolute prompt position already placed in the KV cache while this request is
+    /// still `Prefilling`. Prefill submits up to `max_prefill_chunk` tokens per step
+    /// and advances this cursor until it reaches `prompt_tokens.len()`, at which point
+    /// the request is sampled and transitions to `Decoding`. Starts at the effective
+    /// skip (0, or the prefix-hit boundary); reset to 0 on preemption (KV freed).
+    pub prefill_pos: usize,
 }
 
 impl InferenceRequest {
@@ -168,6 +174,7 @@ impl InferenceRequest {
             prefix_seq_id: None,
             submitted_at: std::time::Instant::now(),
             prefilled_tokens: 0,
+            prefill_pos: 0,
         }
     }
 

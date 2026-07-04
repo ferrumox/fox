@@ -39,6 +39,10 @@ pub struct InferenceEngine {
     supports_prefix_cache: bool,
     /// Text forms of the model's EOS and EOT tokens, used as base stop sequences.
     model_stop_tokens: Vec<String>,
+    /// Max prompt tokens submitted per request per prefill step (0 = single-shot).
+    /// Chunking a long prompt keeps it from head-of-line-blocking other requests'
+    /// decode steps in the engine loop.
+    max_prefill_chunk: usize,
 }
 
 impl InferenceEngine {
@@ -48,6 +52,7 @@ impl InferenceEngine {
         kv_cache: Arc<KVCacheManager>,
         model_name: String,
         metrics: Option<Arc<Metrics>>,
+        max_prefill_chunk: usize,
     ) -> Self {
         let supports_prefix_cache = model.supports_seq_copy();
         if supports_prefix_cache {
@@ -71,6 +76,7 @@ impl InferenceEngine {
             metrics,
             supports_prefix_cache,
             model_stop_tokens,
+            max_prefill_chunk,
         }
     }
 

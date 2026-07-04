@@ -35,7 +35,9 @@ use anyhow::anyhow;
 #[cfg(not(fox_stub))]
 use crate::engine::ffi;
 #[cfg(not(fox_stub))]
-use crate::engine::model::{InferenceRequestForModel, Logits, Model, ModelConfig, ModelInfo};
+use crate::engine::model::{
+    InferenceRequestForModel, Logits, Model, ModelConfig, ModelInfo, PrefillStep,
+};
 
 /// SentencePiece uses U+2581 (▁) for word boundaries.
 #[cfg(not(fox_stub))]
@@ -594,8 +596,9 @@ impl Model for LlamaCppModel {
         &self,
         req_ids: &[u64],
         requests: &[InferenceRequestForModel],
-    ) -> Result<Vec<(u64, Logits, usize)>> {
-        self.do_prefill(req_ids, requests)
+        max_prefill_chunk: usize,
+    ) -> Result<Vec<PrefillStep>> {
+        self.do_prefill(req_ids, requests, max_prefill_chunk)
     }
 
     fn decode_sync(

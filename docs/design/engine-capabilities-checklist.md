@@ -66,7 +66,7 @@ sliding window, MLA, state-space). This is why a single source of truth (`ModelI
 | | Feature | fox |
 |---|---------|-----|
 | ✅ | Continuous batching; paged KV + ref-count + CoW; automatic prefix caching; text stop sequences | |
-| 🎯❌ | Chunked prefill | without it, a long prompt head-of-line-blocks others — key for stability under load |
+| 🎯✅ | Chunked prefill | `--max-prefill-chunk` (default 512): a long prompt is prefilled in chunks across scheduler steps, interleaved with other requests' decode |
 | ❌ | Speculative decoding (draft / n-gram / EAGLE) | |
 | ❌ | Guided/structured decoding (grammar / JSON-schema / regex) | prompt-only today |
 | ⚠️ | Tool/function calling | generic prompt-based, no per-model parsers |

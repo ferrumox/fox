@@ -232,6 +232,7 @@ mod tests {
             models_dir: dir.to_path_buf(),
             max_models,
             max_batch_size: 4,
+            max_prefill_chunk: 0,
             max_context_len: Some(512),
             block_size: 16,
             gpu_memory_bytes: 4 * 1024 * 1024,

@@ -19,6 +19,7 @@ struct ConfigFile {
     system_prompt: Option<String>,
     gpu_memory_fraction: Option<f32>,
     max_batch_size: Option<usize>,
+    max_prefill_chunk: Option<usize>,
     block_size: Option<usize>,
     hf_token: Option<String>,
     alias_file: Option<String>,
@@ -75,6 +76,10 @@ pub fn load_config_into_env() {
     set_if_unset(
         "FOX_MAX_BATCH_SIZE",
         cfg.max_batch_size.map(|v| v.to_string()),
+    );
+    set_if_unset(
+        "FOX_MAX_PREFILL_CHUNK",
+        cfg.max_prefill_chunk.map(|v| v.to_string()),
     );
     set_if_unset("FOX_BLOCK_SIZE", cfg.block_size.map(|v| v.to_string()));
     set_if_unset("HF_TOKEN", cfg.hf_token);

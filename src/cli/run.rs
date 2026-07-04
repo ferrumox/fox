@@ -214,6 +214,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         kv_cache,
         model_name,
         None,
+        0, // single-shot prefill (single interactive request)
     ));
 
     match args.prompt.clone() {

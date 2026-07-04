@@ -5,7 +5,7 @@
 use anyhow::Result;
 
 #[cfg(fox_stub)]
-use crate::engine::model::{InferenceRequestForModel, Logits, Model, ModelConfig};
+use crate::engine::model::{InferenceRequestForModel, Logits, Model, ModelConfig, PrefillStep};
 
 #[cfg(fox_stub)]
 pub struct LlamaCppModel {
@@ -87,13 +87,21 @@ impl Model for LlamaCppModel {
         &self,
         req_ids: &[u64],
         requests: &[InferenceRequestForModel],
-    ) -> Result<Vec<(u64, Logits, usize)>> {
+        _max_prefill_chunk: usize,
+    ) -> Result<Vec<PrefillStep>> {
+        // The stub prefills the whole prompt in one step (chunking is a real-model
+        // concern), so every request completes immediately.
         let results: Vec<_> = req_ids
             .iter()
             .enumerate()
             .map(|(i, &id)| {
-                let tokens_in_kv = requests.get(i).map(|r| r.prompt_tokens.len()).unwrap_or(0);
-                (id, Logits::new(vec![], 2), tokens_in_kv)
+                let len = requests.get(i).map(|r| r.prompt_tokens.len()).unwrap_or(0);
+                PrefillStep {
+                    req_id: id,
+                    prefill_pos: len,
+                    logits: Some(Logits::new(vec![], 2)),
+                    tokens_in_kv: len,
+                }
             })
             .collect();
         Ok(results)

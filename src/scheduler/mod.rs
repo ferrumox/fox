@@ -431,4 +431,64 @@ mod tests {
             "seq_id pool not whole after drain"
         );
     }
+
+    /// Chunked prefill state machine (S1): a request whose prompt is prefilled over
+    /// several steps must stay `Prefilling` — and be re-emitted to the prefill batch —
+    /// until its cursor reaches the prompt end and the first token is sampled, at which
+    /// point it moves to the decode batch. The model (do_prefill) advances the cursor
+    /// via `advance_prefill`; here we drive those transitions directly (no FFI).
+    #[test]
+    fn chunked_prefill_stays_prefilling_until_complete() {
+        let config = ModelConfig {
+            num_layers: 2,
+            num_heads: 2,
+            num_heads_kv: 2,
+            head_dim: 64,
+            n_embd: 128,
+            vocab_size: 1000,
+        };
+        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1, 1));
+        let sched = Scheduler::new(kv, 8);
+
+        // 48-token prompt = 3 full blocks; chunked prefill would span several steps.
+        let prompt: Vec<i32> = (0..48).collect();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched.submit(InferenceRequest::new(
+            1,
+            prompt,
+            8,
+            SamplingParams::default(),
+            tx,
+        ));
+
+        // Step 1: admitted → emitted to prefill, not decode.
+        let b = sched.schedule_step();
+        assert_eq!(b.prefill, vec![1], "admitted request must prefill");
+        assert!(b.decode.is_empty());
+
+        // Model submitted a non-final chunk (16 of 48 tokens): still Prefilling.
+        sched.advance_prefill(1, 16);
+
+        // Step 2: incomplete prefill must be RE-EMITTED to prefill (the whole point —
+        // it no longer completes in a single step) and never to decode.
+        let b = sched.schedule_step();
+        assert_eq!(b.prefill, vec![1], "incomplete prefill must be re-emitted");
+        assert!(
+            b.decode.is_empty(),
+            "must not decode before prefill completes"
+        );
+
+        // Final chunk reaches the prompt end and the first token is sampled →
+        // update_after_token(from_prefill=true) transitions the request to Decoding.
+        sched.advance_prefill(1, 48);
+        sched.update_after_token(1, 42, true);
+
+        // Step 3: now Decoding → emitted to decode, no longer to prefill.
+        let b = sched.schedule_step();
+        assert!(
+            b.prefill.is_empty(),
+            "completed prefill must not re-emit to prefill"
+        );
+        assert_eq!(b.decode, vec![1], "completed request must decode");
+    }
 }

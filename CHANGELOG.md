@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Chunked prefill** (`--max-prefill-chunk` / `FOX_MAX_PREFILL_CHUNK`, default 512) —
+  a long prompt is now prefilled in chunks of at most N tokens per scheduler step
+  instead of one giant `llama_decode`, so it interleaves with other requests' token
+  generation instead of head-of-line-blocking the whole engine loop. A request stays
+  `Prefilling` across steps until its prompt is fully in the KV cache, then samples and
+  moves to `Decoding`. `0` disables chunking (single-shot). Verified byte-for-byte
+  equivalent to single-shot on a real model (`golden_chunked_prefill_matches_single_shot`)
+  plus a scheduler state-machine unit test. First flagship item of the 0.13
+  serving-robustness work (`docs/design/serving-robustness.md`).
+
 ### Changed
 
 - **Chat template compiled once, not per request** — the model's Jinja chat template

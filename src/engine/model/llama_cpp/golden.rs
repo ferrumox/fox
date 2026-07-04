@@ -16,7 +16,7 @@
 // coverage to another architecture class (MoE / MLA / recurrent / embeddings),
 // cache another tiny GGUF in that job and pass it through, per the support matrix.
 
-use crate::engine::model::{LlamaCppModel, Model};
+use crate::engine::model::{InferenceRequestForModel, LlamaCppModel, Logits, Model};
 use crate::model_registry::kv_type;
 
 /// Load the model named by FOX_GOLDEN_MODEL, or `None` (→ the test skips).
@@ -120,7 +120,10 @@ fn golden_embeddings_nondegenerate() {
 fn golden_chat_template_renders() {
     let m = golden!();
     let messages = vec![
-        ("system".to_string(), "You are a helpful assistant.".to_string()),
+        (
+            "system".to_string(),
+            "You are a helpful assistant.".to_string(),
+        ),
         ("user".to_string(), "Say hi in one word.".to_string()),
     ];
 
@@ -139,6 +142,80 @@ fn golden_chat_template_renders() {
     assert_eq!(
         first, second,
         "cached template render must be deterministic across calls"
+    );
+}
+
+/// Chunked prefill (0.13, S2) must produce the SAME result as single-shot prefill.
+/// Prefilling a prompt in small chunks across steps places the exact same tokens at
+/// the exact same positions in the KV cache, so the final-position logits must pick
+/// the same next token. Run on two separate sequences so they don't interfere.
+#[test]
+fn golden_chunked_prefill_matches_single_shot() {
+    let m = golden!();
+    let prompt = m
+        .tokenize("The quick brown fox jumps over the lazy dog and keeps on running through the forest at dawn.")
+        .unwrap();
+    assert!(
+        prompt.len() > 8,
+        "need a multi-chunk prompt to be meaningful"
+    );
+
+    let mk_req = |seq_id: i32, prefill_pos: usize| InferenceRequestForModel {
+        id: 1,
+        prompt_tokens: prompt.clone(),
+        last_token: None,
+        generated_tokens: 0,
+        max_new_tokens: 1,
+        context_len: 0,
+        kv_seq_id: seq_id,
+        temperature: 0.0,
+        top_p: 1.0,
+        top_k: 0,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        seed: None,
+        generated_token_ids: vec![],
+        skip_prefix_tokens: 0,
+        prefix_seq_id: None,
+        prefill_pos,
+    };
+
+    // argmax of the final-position logits — robust to tiny fp reduction-order diffs.
+    let argmax = |l: &Logits| -> usize {
+        l.values
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i)
+            .expect("non-empty logits")
+    };
+
+    // Single-shot prefill on sequence 0.
+    let single = m.do_prefill(&[1], &[mk_req(0, 0)], 0).unwrap();
+    let single_logits = single[0].logits.clone().expect("single-shot completes");
+
+    // Chunked prefill (4 tokens/step) on sequence 1, looping until the cursor reaches
+    // the prompt end. Only the final step carries logits.
+    let mut pos = 0usize;
+    let mut chunked_logits = None;
+    let mut steps = 0;
+    while pos < prompt.len() {
+        let out = m.do_prefill(&[1], &[mk_req(1, pos)], 4).unwrap();
+        pos = out[0].prefill_pos;
+        if let Some(l) = &out[0].logits {
+            chunked_logits = Some(l.clone());
+        }
+        steps += 1;
+        assert!(steps <= prompt.len(), "chunk loop failed to advance");
+    }
+    let chunked_logits = chunked_logits.expect("chunked prefill eventually completes");
+
+    assert!(steps > 1, "chunk size 4 should take several steps");
+    assert_eq!(
+        argmax(&single_logits),
+        argmax(&chunked_logits),
+        "chunked prefill must pick the same next token as single-shot"
     );
 }
 

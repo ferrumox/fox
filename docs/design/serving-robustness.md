@@ -57,13 +57,17 @@ step that submits the *final* chunk requests logits and transitions it to `Decod
 
 ### Staging
 
-- **S1 — scheduler state machine + config** (stub-testable): `prefill_pos`, the
-  `Prefilling`-across-steps loop in `schedule_step`, the flag. Unit tests on the stub
-  drive multi-step prefill and assert chunk boundaries + no premature completion.
-- **S2 — FFI batch** (real build, Docker/golden-verified): `do_prefill` submits one
-  chunk and reports progress; `run.rs` only samples on completion.
-- **S3 — validation**: golden/bench that a long prompt no longer stalls a concurrent
-  short request (measure inter-token latency of the short request during the long
+- **S1 — scheduler state machine + config** ✅ (stub-testable): `prefill_pos`, the
+  `Prefilling`-across-steps loop in `schedule_step`, the `--max-prefill-chunk` flag
+  (default 512). Unit test `chunked_prefill_stays_prefilling_until_complete` drives a
+  multi-step prefill and asserts re-emission + no premature completion.
+- **S2 — FFI batch** ✅ (real build, Docker/golden-verified): `do_prefill` submits one
+  chunk (`prompt_tokens[prefill_pos..prefill_pos+chunk]`, seq_cp only on the first
+  chunk, logits only on the last) and reports progress via `PrefillStep`; `run.rs` only
+  samples on completion. Golden `golden_chunked_prefill_matches_single_shot` proves a
+  chunked prefill picks the same next token as single-shot on a real model.
+- **S3 — validation** (pending): bench that a long prompt no longer stalls a concurrent
+  short request (measure the short request's inter-token latency during the long
   prefill).
 
 ## 2. Context rolling on full

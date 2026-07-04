@@ -116,6 +116,7 @@ impl InferenceEngine {
                 generated_token_ids: r.generated_token_ids.clone(),
                 skip_prefix_tokens: r.skip_prefix_tokens,
                 prefix_seq_id: r.prefix_seq_id,
+                prefill_pos: r.prefill_pos,
             })
             .collect();
 
@@ -126,27 +127,35 @@ impl InferenceEngine {
 
         let model = self.model.clone();
         let req_ids_vec = req_ids.to_vec();
-        let raw =
-            tokio::task::spawn_blocking(move || model.prefill_sync(&req_ids_vec, &model_requests))
-                .await
-                .map_err(|e| anyhow::anyhow!("prefill spawn_blocking: {}", e))??;
+        let max_chunk = self.max_prefill_chunk;
+        let raw = tokio::task::spawn_blocking(move || {
+            model.prefill_sync(&req_ids_vec, &model_requests, max_chunk)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("prefill spawn_blocking: {}", e))??;
 
         for prefix_seq_id in prefix_cleanup {
             self.model.clear_sequence(prefix_seq_id);
             self.scheduler.return_prefix_seq_id(prefix_seq_id);
         }
 
-        // Register how many tokens were actually placed in the KV for each request so
-        // decode positions are consecutive (no gaps for recurrent/hybrid models).
-        let result = raw
-            .into_iter()
-            .map(|(id, logits, tokens_in_kv)| {
-                if tokens_in_kv > 0 {
-                    self.scheduler.set_prefilled_tokens(id, tokens_in_kv);
-                }
-                (id, logits)
-            })
-            .collect();
+        // Advance each request's prefill cursor. A request only carries `logits` (and a
+        // non-zero `tokens_in_kv`) on its FINAL chunk; intermediate chunks just move the
+        // cursor forward and stay `Prefilling`, so they are re-emitted next step. Only
+        // completed requests reach `handle_logits` (which samples the first token and
+        // transitions them to `Decoding`).
+        let mut result = Vec::with_capacity(raw.len());
+        for step in raw {
+            self.scheduler
+                .advance_prefill(step.req_id, step.prefill_pos);
+            if step.tokens_in_kv > 0 {
+                self.scheduler
+                    .set_prefilled_tokens(step.req_id, step.tokens_in_kv);
+            }
+            if let Some(logits) = step.logits {
+                result.push((step.req_id, logits));
+            }
+        }
 
         Ok(result)
     }
@@ -202,6 +211,7 @@ impl InferenceEngine {
                 generated_token_ids: r.generated_token_ids.clone(),
                 skip_prefix_tokens: 0,
                 prefix_seq_id: None,
+                prefill_pos: r.prefill_pos,
             })
             .collect();
         let model = self.model.clone();

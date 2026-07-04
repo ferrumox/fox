@@ -14,6 +14,9 @@ pub struct RegistryConfig {
     pub models_dir: PathBuf,
     pub max_models: usize,
     pub max_batch_size: usize,
+    /// Max prompt tokens submitted per request per prefill step (0 = single-shot).
+    /// Chunking a long prompt lets it interleave with other requests' decode steps.
+    pub max_prefill_chunk: usize,
     /// Per-sequence context length. `None` = auto-detect from the model's trained context.
     pub max_context_len: Option<u32>,
     pub block_size: usize,

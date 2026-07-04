@@ -134,6 +134,9 @@ impl Scheduler {
                     req.page_table.extend(new_ids);
                     req.kv_seq_id = hit.seq_id;
                     req.skip_prefix_tokens = cached_tokens;
+                    // Prefill (re-)starts at the boundary token (effective skip), so a
+                    // chunked prefill submits [cached_tokens-1 .. len] across steps.
+                    req.prefill_pos = cached_tokens.saturating_sub(1);
                     req.prefix_seq_id = None;
                     req.stop_reason = None;
                     req.state = batch::RequestState::Prefilling;
@@ -146,7 +149,6 @@ impl Scheduler {
                         "block prefix cache hit — skipping prefill of cached tokens"
                     );
                     running.push(req);
-                    prefill.push(id);
                     continue 'admit;
                 } else {
                     // No room for new blocks — restore entry and fall through to preemption.
@@ -170,6 +172,12 @@ impl Scheduler {
                             let id = req.id;
                             req.page_table = PageTable::new(ids);
                             req.kv_seq_id = seq_id;
+                            // Fresh (non-hit) admission: prefill from the start with no
+                            // cached prefix. Reset in case this is a re-admission after
+                            // preemption (stale prefix state would corrupt positions).
+                            req.prefill_pos = 0;
+                            req.skip_prefix_tokens = 0;
+                            req.prefix_seq_id = None;
                             req.stop_reason = None;
                             req.state = batch::RequestState::Prefilling;
                             info!(
@@ -178,7 +186,6 @@ impl Scheduler {
                                 "request admitted to batch"
                             );
                             running.push(req);
-                            prefill.push(id);
                             continue 'admit;
                         }
                         Err(_) => {
@@ -205,6 +212,12 @@ impl Scheduler {
                     pool.push(evicted.kv_seq_id);
                     evicted.kv_seq_id = -1;
                 }
+                // Its KV is gone, so any partial prefill progress and prefix state is
+                // stale — reset so re-admission re-prefills the prompt from scratch.
+                evicted.prefill_pos = 0;
+                evicted.prefilled_tokens = 0;
+                evicted.skip_prefix_tokens = 0;
+                evicted.prefix_seq_id = None;
                 info!(
                     request_id = evicted.id,
                     "LIFO preemption: evicted from batch"
@@ -214,10 +227,15 @@ impl Scheduler {
             break;
         }
 
-        // 4. Build decode list
+        // 4. Build the prefill and decode lists from the running batch. A request stays
+        //    `Prefilling` across steps until its prompt is fully chunked into the KV, so
+        //    it is re-emitted to `prefill` each step (both freshly admitted and
+        //    still-in-progress); `Decoding` requests generate one token per step.
         for req in running.iter() {
-            if req.state == batch::RequestState::Decoding {
-                decode.push(req.id);
+            match req.state {
+                batch::RequestState::Prefilling => prefill.push(req.id),
+                batch::RequestState::Decoding => decode.push(req.id),
+                _ => {}
             }
         }
 
@@ -239,6 +257,20 @@ impl Scheduler {
                     if let Some(entry) = req.page_table.entries.get_mut(logical_idx) {
                         *entry = new_block_id;
                     }
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Advance a request's prefill cursor after a chunk was submitted to the model.
+    /// Called every prefill step; the request stays `Prefilling` (and is re-emitted
+    /// to the prefill batch) until its final chunk is sampled by `handle_logits`.
+    pub fn advance_prefill(&self, req_id: u64, new_prefill_pos: usize) {
+        if let Ok(mut running) = self.running_batch.lock() {
+            for req in running.iter_mut() {
+                if req.id == req_id {
+                    req.prefill_pos = new_prefill_pos;
                     break;
                 }
             }
