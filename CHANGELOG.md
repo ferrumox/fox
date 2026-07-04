@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0]
+
+fox becomes a real server under concurrent, long-prompt, long-conversation load. The
+three serving-robustness gaps from the 0.12 capabilities checklist are closed
+(`docs/design/serving-robustness.md`): **chunked prefill** breaks a long prompt into
+per-step chunks so it interleaves with other requests' generation instead of
+head-of-line-blocking the engine loop; **context rolling** discards the oldest KV
+window when a conversation fills `n_ctx` so generation continues instead of stopping
+with `length`; and the **Jinja chat template is compiled once and cached** instead of
+re-parsed on every request. A new `fox bench-prefill` quantifies the chunked-prefill
+win, and every change rides the 0.12 regression net (golden tests in CI + the scheduler
+conservation stress test).
+
 ### Added
 
 - **Chunked prefill** (`--max-prefill-chunk` / `FOX_MAX_PREFILL_CHUNK`, default 512) —
