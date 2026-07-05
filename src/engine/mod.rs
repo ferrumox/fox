@@ -52,6 +52,10 @@ pub struct InferenceEngine {
     /// Speculative decoding: `Some((ngram, draft_len))` enables n-gram / prompt-lookup
     /// speculation for single-request decode steps (no grammar); `None` disables it.
     speculative: Option<(usize, usize)>,
+    /// Lifetime draft tokens proposed by speculation (for the acceptance metrics).
+    spec_proposed: AtomicU64,
+    /// Lifetime draft tokens the target model accepted.
+    spec_accepted: AtomicU64,
 }
 
 impl InferenceEngine {
@@ -94,6 +98,8 @@ impl InferenceEngine {
             max_prefill_chunk,
             context_shift,
             speculative,
+            spec_proposed: AtomicU64::new(0),
+            spec_accepted: AtomicU64::new(0),
         }
     }
 
@@ -178,5 +184,14 @@ impl InferenceEngine {
 
     pub fn prefix_cache_misses(&self) -> u64 {
         self.scheduler.prefix_misses.load(Ordering::Relaxed)
+    }
+
+    /// Lifetime speculative-decoding stats: `(drafts proposed, drafts accepted)`.
+    /// Both zero when speculation is disabled or never triggered.
+    pub fn spec_stats(&self) -> (u64, u64) {
+        (
+            self.spec_proposed.load(Ordering::Relaxed),
+            self.spec_accepted.load(Ordering::Relaxed),
+        )
     }
 }

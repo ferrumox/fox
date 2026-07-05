@@ -831,7 +831,7 @@ impl Model for LlamaCppModel {
         request: &InferenceRequestForModel,
         ngram: usize,
         draft_len: usize,
-    ) -> Result<Vec<Logits>> {
+    ) -> Result<(Vec<Logits>, usize)> {
         self.do_speculative_decode(request, ngram, draft_len)
     }
 

@@ -577,7 +577,7 @@ fn golden_speculative_matches_greedy() {
     let mut accepted_total = 0usize;
     while spec.len() < steps {
         let last = *spec.last().unwrap();
-        let committed = m
+        let (committed, _proposed) = m
             .do_speculative_decode(&mk_req(1, Some(last), live + 1, spec.clone()), 2, 4)
             .unwrap();
         assert!(!committed.is_empty(), "must commit at least one token");

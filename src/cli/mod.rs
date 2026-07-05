@@ -4,6 +4,7 @@ pub mod alias;
 pub mod bench;
 pub mod bench_kv;
 pub mod bench_prefill;
+pub mod bench_spec;
 pub mod list;
 pub mod models;
 pub mod probe;
@@ -46,6 +47,8 @@ pub enum Command {
     BenchKv(bench_kv::BenchKvArgs),
     /// Validate chunked prefill: a long prompt must not stall a concurrent short request
     BenchPrefill(bench_prefill::BenchPrefillArgs),
+    /// Quantify speculative decoding: tokens/s and acceptance, spec off vs on
+    BenchSpec(bench_spec::BenchSpecArgs),
     /// Download a GGUF model from HuggingFace Hub
     Pull(pull::PullArgs),
     /// List downloaded models
@@ -73,6 +76,7 @@ const SUBCOMMANDS: &[&str] = &[
     "bench",
     "bench-kv",
     "bench-prefill",
+    "bench-spec",
     "pull",
     "list",
     "rm",
@@ -109,6 +113,7 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Bench(args) => bench::run_bench(args).await,
         Command::BenchKv(args) => bench_kv::run_bench_kv(args).await,
         Command::BenchPrefill(args) => bench_prefill::run_bench_prefill(args).await,
+        Command::BenchSpec(args) => bench_spec::run_bench_spec(args).await,
         Command::Pull(args) => pull::run_pull(args).await,
         Command::List(args) => list::run_list(args).await,
         Command::Rm(args) => rm::run_rm(args).await,

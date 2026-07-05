@@ -15,6 +15,8 @@ impl InferenceEngine {
         // We increment the Prometheus IntCounters by the step delta each loop iteration.
         let mut last_prefix_hits: u64 = 0;
         let mut last_prefix_misses: u64 = 0;
+        let mut last_spec_proposed: u64 = 0;
+        let mut last_spec_accepted: u64 = 0;
 
         loop {
             let batch = engine.scheduler.schedule_step();
@@ -40,6 +42,22 @@ impl InferenceEngine {
                 }
                 last_prefix_hits = cur_hits;
                 last_prefix_misses = cur_misses;
+
+                let (cur_proposed, cur_accepted) = engine.spec_stats();
+                let dp = cur_proposed.saturating_sub(last_spec_proposed);
+                let da = cur_accepted.saturating_sub(last_spec_accepted);
+                if dp > 0 {
+                    m.spec_tokens_proposed_total.inc_by(dp);
+                }
+                if da > 0 {
+                    m.spec_tokens_accepted_total.inc_by(da);
+                }
+                if cur_proposed > 0 {
+                    m.spec_acceptance_ratio
+                        .set(cur_accepted as f64 / cur_proposed as f64);
+                }
+                last_spec_proposed = cur_proposed;
+                last_spec_accepted = cur_accepted;
             }
 
             for seq_id in &batch.preempted_seq_ids {
@@ -305,11 +323,17 @@ impl InferenceEngine {
             if no_grammar {
                 let only_id = *only_id;
                 let request = model_requests.into_iter().next().unwrap();
-                let committed = tokio::task::spawn_blocking(move || {
+                let (committed, proposed) = tokio::task::spawn_blocking(move || {
                     model.speculative_decode_sync(only_id, &request, ngram, draft_len)
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("speculative decode spawn_blocking: {}", e))??;
+                // Acceptance accounting: committed = accepted drafts + 1 bonus token.
+                use std::sync::atomic::Ordering;
+                self.spec_proposed
+                    .fetch_add(proposed as u64, Ordering::Relaxed);
+                self.spec_accepted
+                    .fetch_add((committed.len() - 1) as u64, Ordering::Relaxed);
                 return Ok(vec![(only_id, committed)]);
             }
         }

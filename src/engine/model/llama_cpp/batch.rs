@@ -405,7 +405,7 @@ impl LlamaCppModel {
         req: &InferenceRequestForModel,
         ngram: usize,
         draft_len: usize,
-    ) -> Result<Vec<Logits>> {
+    ) -> Result<(Vec<Logits>, usize)> {
         // Full logical sequence so far (prompt + generated) for the n-gram lookup.
         let mut seq: Vec<i32> =
             Vec::with_capacity(req.prompt_tokens.len() + req.generated_token_ids.len());
@@ -489,7 +489,7 @@ impl LlamaCppModel {
         if committed.is_empty() {
             return Err(anyhow!("speculative decode produced no token"));
         }
-        Ok(committed)
+        Ok((committed, drafts.len()))
     }
 
     /// Sample the target at one verify position, mirroring `sample_constrained` minus the

@@ -26,6 +26,12 @@ pub struct Metrics {
     pub prefix_cache_hits_total: IntCounter,
     /// Total prefix cache misses.
     pub prefix_cache_misses_total: IntCounter,
+    /// Draft tokens proposed by speculative decoding.
+    pub spec_tokens_proposed_total: IntCounter,
+    /// Draft tokens the target model accepted during verification.
+    pub spec_tokens_accepted_total: IntCounter,
+    /// Lifetime accepted/proposed ratio (the headline speculation health number).
+    pub spec_acceptance_ratio: Gauge,
 }
 
 impl Metrics {
@@ -65,6 +71,18 @@ impl Metrics {
             prefix_cache_misses_total: register_int_counter!(
                 "ferrumox_prefix_cache_misses_total",
                 "Prefix cache misses (full prefill required)"
+            )?,
+            spec_tokens_proposed_total: register_int_counter!(
+                "ferrumox_spec_tokens_proposed_total",
+                "Draft tokens proposed by speculative decoding (n-gram lookup)"
+            )?,
+            spec_tokens_accepted_total: register_int_counter!(
+                "ferrumox_spec_tokens_accepted_total",
+                "Draft tokens accepted by the target model during speculative verification"
+            )?,
+            spec_acceptance_ratio: register_gauge!(
+                "ferrumox_spec_acceptance_ratio",
+                "Lifetime accepted/proposed ratio of speculative decoding (0 when unused)"
             )?,
         })
     }

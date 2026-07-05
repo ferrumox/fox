@@ -46,10 +46,11 @@ impl Model for StubModel {
         _request: &InferenceRequestForModel,
         _ngram: usize,
         _draft_len: usize,
-    ) -> Result<Vec<Logits>> {
-        // Two non-EOS text tokens per step, so the engine's multi-token commit path is
-        // exercised and generation stops on max_tokens rather than immediate EOS.
-        Ok(vec![Logits::new(vec![], 65), Logits::new(vec![], 65)])
+    ) -> Result<(Vec<Logits>, usize)> {
+        // Two non-EOS text tokens per step (1 proposed draft, accepted), so the engine's
+        // multi-token commit path and acceptance accounting are exercised, and generation
+        // stops on max_tokens rather than immediate EOS.
+        Ok((vec![Logits::new(vec![], 65), Logits::new(vec![], 65)], 1))
     }
 
     fn model_config(&self) -> ModelConfig {

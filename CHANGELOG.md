@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   context-echoing output (code edits, JSON, RAG, repetition). Needs no draft model and
   no extra memory. Skipped while a request uses guided decoding; multi-request batches
   decode normally. Flagship of the 0.15 work (`docs/design/speculative-decoding.md`).
+- **Speculation observability** — Prometheus counters
+  `ferrumox_spec_tokens_proposed_total` / `ferrumox_spec_tokens_accepted_total` and the
+  `ferrumox_spec_acceptance_ratio` gauge report how well drafting is working on a live
+  server.
+- **`fox bench-spec`** — runs the same greedy generation with speculation off and on
+  (repetitive and prose workloads), reports tok/s, acceptance and speedup, and verifies
+  the off/on outputs are byte-identical — the exactness invariant checked end-to-end
+  (`docs/cli/bench-spec.md`).
 
 ## [0.14.0]
 
