@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0]
+
+fox gains **structured and controllable output**. Guided decoding constrains generation
+to a grammar via llama.cpp's core GBNF sampler, so `response_format` / Ollama `format`
+now *guarantee* valid (and schema-conforming) JSON instead of hoping for it — with the
+JSON-schema→GBNF converter written in Rust. Alongside it, the OpenAI chat endpoint
+exposes token `logprobs`/`top_logprobs`, and the sampler grows `min_p`, `logit_bias`
+and `min_tokens` — knobs that were previously accepted and silently dropped. Every piece
+rides the regression net (golden tests on a real model + stub unit/integration tests).
+See `docs/design/structured-output.md`.
+
 ### Added
 
 - **Guided decoding / structured output** — fox can now *constrain* generation to a
