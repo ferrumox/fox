@@ -73,7 +73,7 @@ this is **achievable** at medium effort.
 | MoE (Mixtral, DeepSeek-MoE, Qwen-MoE) | ✅ optimized | ⚠️ loads + CPU offload, approximate sizing |
 | MLA / latent KV (DeepSeek V2/V3) | ✅ | ❌ positional sizing wrong |
 | Vision / multimodal (LLaVA, Qwen-VL) | ✅ | ❌ image blocks silently dropped |
-| Embeddings (BERT, nomic) | ✅ | ⚠️ dimension bug |
+| Embeddings (BERT, nomic) | ✅ | ✅ dim + pooling fixed (0.11); mean-pool only, CLS not auto-detected |
 | Encoder-decoder (T5) | ✅ | ❌ |
 | Recurrent / hybrid (Mamba, RWKV) | ✅ | ⚠️ detected, prefix-cache off |
 
@@ -115,14 +115,22 @@ context rolling (0.13), OpenAI + Ollama compat, Prometheus metrics, auth, health
 
 ## Prioritized shortlist (best ROI given the llama.cpp wrapper)
 
-1. **Guided / structured decoding via GBNF** — llama.cpp already has the grammar
-   engine; JSON mode is the most-requested app feature. Biggest impact, least effort.
-2. **logprobs** — unlocks evals, classification, and many OpenAI-compatible clients.
-3. **Missing sampling** (min_p, logit_bias, min_tokens) — cheap, frequently requested.
-4. **Speculative decoding (n-gram / draft)** — the largest real latency win still in
-   reach.
-5. **Fix embeddings** (dimension bug) — an API fox already exposes but that is broken today.
-6. **OOM recovery + backpressure** — makes it a real server under overload.
+Shipped since this analysis was written:
+
+- ✅ **Guided / structured decoding via GBNF** (0.14) — `response_format` / Ollama
+  `format`, JSON-schema→GBNF in Rust.
+- ✅ **logprobs / top_logprobs** (0.14).
+- ✅ **min_p, logit_bias, min_tokens** (0.14).
+- ✅ **Embeddings** were already fixed back in 0.11 (correct `n_embd` length, mean-pool +
+  L2, non-degenerate — golden-verified); the only remaining nuance is that dedicated
+  embedding models' native pooling (CLS) isn't auto-detected (fox always mean-pools).
+
+Still open, in priority order:
+
+1. **Speculative decoding (n-gram / draft)** — the largest real latency win still in
+   reach; llama.cpp has the draft/n-gram primitives.
+2. **OOM recovery + backpressure / max-queue** — makes it a real server under overload.
+3. **Per-model tool-call parsers** — today's tool calling is generic prompt-based.
 
 ## What NOT to chase (outside the niche)
 
