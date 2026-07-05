@@ -167,11 +167,13 @@ impl LlamaCppModel {
                 continue;
             }
 
-            // Final chunk: total tokens submitted across all chunks equals
-            // prompt_len - effective_skip (identical to the single-shot path).
-            let tokens_in_kv = req
-                .map(|r| r.prompt_tokens.len() - effective_skip(r))
-                .unwrap_or(0);
+            // Final chunk: the sequence's KV now holds the WHOLE prompt — the donated
+            // prefix cells [0, effective_skip) plus everything submitted across chunks
+            // at [effective_skip, prompt_len). tokens_in_kv must be the total (not the
+            // submitted count): the scheduler derives the next decode POSITION from it,
+            // and reporting only the submitted count made hit requests decode
+            // `effective_skip` positions short — inside occupied cells → llama_decode -1.
+            let tokens_in_kv = req.map(|r| r.prompt_tokens.len()).unwrap_or(0);
 
             let logits_ptr = unsafe { ffi::llama_get_logits_ith(ctx, batch_idx) };
             if logits_ptr.is_null() {

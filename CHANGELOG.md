@@ -46,15 +46,25 @@ trade-off on any model. See `docs/design/speculative-decoding.md`.
 ### Fixed
 
 - **Prefix-cache reuse no longer breaks the server** (pre-existing, found by
-  exercising a real server end-to-end on the target machine). Two related bugs: a
-  finished request that donated its prompt prefix to the cache left its *whole* KV
-  (prompt + generated tokens) in the sequence, so the next cache hit re-submitted
-  tokens at occupied positions and `llama_decode` failed; and the decode/prefill
-  error paths recycled the sequence id without clearing its KV, permanently poisoning
-  it — every later request assigned that sequence failed too. Donated sequences are
-  now trimmed to exactly the cached prefix, and failed requests clear their sequence
-  before the id returns to the pool. Guarded by a new golden
-  (`golden_prefix_reuse_after_trim`) that mirrors the donate→hit lifecycle.
+  exercising a real server end-to-end on the target machine). Three related bugs in
+  the same subsystem: (1) a finished request that donated its prompt prefix to the
+  cache left its *whole* KV (prompt + generated tokens) in the sequence, so the next
+  cache hit re-submitted tokens at occupied positions and `llama_decode` failed;
+  (2) the decode/prefill error paths recycled the sequence id without clearing its
+  KV, permanently poisoning it — every later request assigned that sequence failed
+  too; and (3) after a cache hit, `prefilled_tokens` recorded only the *submitted*
+  token count instead of the KV's true length, so the hit request's first decode
+  landed `skip` positions short — inside occupied cells — and died after one token.
+  Donated sequences are now trimmed to exactly the cached prefix, failed requests
+  clear their sequence before the id returns to the pool, and the decode position is
+  derived from the KV's total length. Guarded by a new golden
+  (`golden_prefix_reuse_after_trim`) and the new end-to-end smoke suite.
+- **New `make e2e` smoke suite** (`scripts/e2e_smoke.sh`) — starts a real server with
+  a real model and drives it over HTTP across multiple requests: the prefix-cache
+  donate→hit lifecycle, guided decoding, logprobs, sampling controls, the Ollama
+  surface, and speculation. Runs in CI's golden job on every push; it covers the
+  cross-request layer that unit/golden/stub tests structurally cannot reach (which is
+  exactly where the three bugs above were hiding).
 
 ## [0.14.0]
 
