@@ -390,6 +390,145 @@ impl LlamaCppModel {
         }
     }
 
+    /// One speculative-decoding step (0.15, S1): propose draft tokens from an n-gram
+    /// match over the request's own token history, verify them all in a single
+    /// `llama_decode`, and commit the longest prefix the model would itself have produced.
+    /// Returns the committed tokens — always ≥ 1 (the ordinary next token), plus any
+    /// accepted drafts and one bonus token.
+    ///
+    /// Exact: each committed token is a genuine target sample conditioned on the accepted
+    /// prefix, so with a fixed seed the output is byte-identical to non-speculative
+    /// decoding. Grammar is not applied here — the engine only speculates when no grammar
+    /// is active.
+    pub(super) fn do_speculative_decode(
+        &self,
+        req: &InferenceRequestForModel,
+        ngram: usize,
+        draft_len: usize,
+    ) -> Result<Vec<i32>> {
+        // Full logical sequence so far (prompt + generated) for the n-gram lookup.
+        let mut seq: Vec<i32> =
+            Vec::with_capacity(req.prompt_tokens.len() + req.generated_token_ids.len());
+        seq.extend_from_slice(&req.prompt_tokens);
+        seq.extend_from_slice(&req.generated_token_ids);
+
+        let last_token = req
+            .last_token
+            .or_else(|| seq.last().copied())
+            .unwrap_or(self.eos_token);
+        let base_pos = req.context_len as i32 - 1;
+        let seq_id = req.kv_seq_id;
+
+        let drafts = crate::engine::speculative::propose_ngram(&seq, ngram, draft_len);
+        let n = 1 + drafts.len(); // last_token + drafts
+
+        // Verify batch: last_token then each draft at consecutive positions, all with logits.
+        let mut batch = unsafe { ffi::llama_batch_init(n as i32, 0, 1) };
+        let tokens_in: Vec<i32> = std::iter::once(last_token)
+            .chain(drafts.iter().copied())
+            .collect();
+        for (i, &tok) in tokens_in.iter().enumerate() {
+            unsafe {
+                *batch.token.add(i) = tok;
+                *batch.pos.add(i) = base_pos + i as i32;
+                *batch.n_seq_id.add(i) = 1;
+                let arr = *batch.seq_id.add(i);
+                *arr.add(0) = seq_id;
+                *batch.logits.add(i) = 1i8;
+            }
+        }
+        batch.n_tokens = n as i32;
+
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+        let ctx = ctx_guard.as_ptr();
+        let ret = unsafe { ffi::llama_decode(ctx, batch) };
+        if ret != 0 {
+            unsafe { ffi::llama_batch_free(batch) };
+            return Err(anyhow!("llama_decode (speculative) failed: {}", ret));
+        }
+
+        let n_vocab = self.config.vocab_size as usize;
+        let mut committed: Vec<i32> = Vec::with_capacity(n);
+        // Penalty context grows with each committed token so per-position sampling matches
+        // the non-speculative path exactly (repetition/frequency/presence penalties).
+        let mut running_generated = req.generated_token_ids.clone();
+        let mut accepted = 0usize;
+        for i in 0..n {
+            let logits_ptr = unsafe { ffi::llama_get_logits_ith(ctx, i as i32) };
+            if logits_ptr.is_null() {
+                break;
+            }
+            let logits = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab) };
+            let gen_count = req.generated_tokens + i;
+            let tok = self.sample_verify_position(req, logits, &running_generated, gen_count);
+            committed.push(tok);
+            running_generated.push(tok);
+            // Accept only if this matches the drafted token; otherwise this is the bonus /
+            // first-mismatch token and we stop.
+            if i < drafts.len() && tok == drafts[i] {
+                accepted += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Keep last_token + accepted drafts (positions base_pos ..= base_pos+accepted);
+        // drop the rejected draft tail from the KV cache.
+        let keep_end = base_pos + accepted as i32 + 1;
+        unsafe {
+            let mem = ffi::llama_get_memory(ctx as *const _);
+            if !mem.is_null() {
+                ffi::llama_memory_seq_rm(mem, seq_id, keep_end, -1);
+            }
+        }
+        unsafe { ffi::llama_batch_free(batch) };
+
+        if committed.is_empty() {
+            return Err(anyhow!("speculative decode produced no token"));
+        }
+        Ok(committed)
+    }
+
+    /// Sample the target at one verify position, mirroring `sample_constrained` minus the
+    /// grammar (speculation runs only when no grammar is active): `min_p` / `logit_bias`
+    /// via `SamplerParams`, and EOG suppression below `min_tokens`. `generated` is the
+    /// penalty context up to (not including) this position.
+    fn sample_verify_position(
+        &self,
+        req: &InferenceRequestForModel,
+        logits: &[f32],
+        generated: &[i32],
+        gen_count: usize,
+    ) -> i32 {
+        let params = SamplerParams {
+            temperature: req.temperature,
+            top_p: req.top_p,
+            top_k: req.top_k,
+            min_p: req.min_p,
+            repetition_penalty: req.repetition_penalty,
+            frequency_penalty: req.frequency_penalty,
+            presence_penalty: req.presence_penalty,
+            logit_bias: req.logit_bias.as_deref(),
+            generated_ids: generated,
+            seed: req.seed,
+            token_count: gen_count,
+        };
+        if req.min_tokens > gen_count && !self.eog_tokens.is_empty() {
+            let mut buf = logits.to_vec();
+            for &id in &self.eog_tokens {
+                if (id as usize) < buf.len() {
+                    buf[id as usize] = f32::NEG_INFINITY;
+                }
+            }
+            sample_token(&buf, params)
+        } else {
+            sample_token(logits, params)
+        }
+    }
+
     pub(super) fn do_get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>> {
         if tokens.is_empty() {
             return Ok(vec![]);

@@ -86,11 +86,14 @@ rejected drafts.
 
 ### Staging
 
-- **S1 — propose + verify + cleanup, single request** (real build, golden): the Rust
-  n-gram proposer over the sequence, the multi-token verify decode with accept-on-match,
-  and `seq_rm` of rejects. Golden `golden_speculative_matches_greedy`: on a repetitive
-  prompt, seeded speculative output is byte-identical to the non-speculative output, and
-  the acceptance count is > 0 (proving drafts were actually taken).
+- **S1 — propose + verify + cleanup, single request** ✅ (real build, golden-verified):
+  `engine/speculative.rs::propose_ngram` (pure, unit-tested) does the n-gram lookup;
+  `LlamaCppModel::do_speculative_decode` builds the multi-token verify batch, samples the
+  target at each position with a growing penalty context (so it's exact under penalties),
+  accepts on match, and `seq_rm`s the rejected KV tail. Golden
+  `golden_speculative_matches_greedy`: on a repetitive prompt the committed tokens are
+  byte-identical to a plain decode loop and the acceptance count is > 0. Model-level only
+  — the scheduler/engine wiring is S2.
 - **S2 — scheduler / continuous-batching integration**: per-step advance by `a + 1`,
   block-headroom cap on `draft_len`, and the grammar/min_tokens/stop interactions above.
 - **S3 — config + metrics**: `--speculative` (default off in 0.15, opt-in), `--spec-ngram`

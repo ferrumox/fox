@@ -5,6 +5,7 @@ mod logits;
 pub mod model;
 mod output_filter;
 mod run;
+mod speculative;
 
 use output_filter::PerRequestState;
 

@@ -513,6 +513,90 @@ fn golden_min_tokens_suppresses_eog() {
     }
 }
 
+/// Speculative decoding (0.15, S1) must be output-exact: with a fixed sampler, the
+/// tokens committed by `do_speculative_decode` are identical to a plain decode loop —
+/// speculation only changes speed. Uses a repetitive prompt so n-gram lookup actually
+/// finds and accepts drafts (asserted). Two sequences so the runs don't interfere.
+#[test]
+fn golden_speculative_matches_greedy() {
+    let m = golden!();
+    // A short repeating cycle the model will continue → frequent n-gram matches.
+    let prompt = m
+        .tokenize("1 2 3 1 2 3 1 2 3 1 2 3 1 2 3 1 2 3 1 2 3")
+        .unwrap();
+    let steps = 24usize;
+
+    let mk_req = |seq_id: i32, last: Option<i32>, ctx_len: usize, generated: Vec<i32>| {
+        InferenceRequestForModel {
+            id: 1,
+            prompt_tokens: prompt.clone(),
+            last_token: last,
+            generated_tokens: generated.len(),
+            max_new_tokens: 256,
+            context_len: ctx_len,
+            kv_seq_id: seq_id,
+            temperature: 0.0, // greedy → deterministic reference
+            top_p: 1.0,
+            top_k: 0,
+            repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            seed: None,
+            generated_token_ids: generated,
+            skip_prefix_tokens: 0,
+            prefix_seq_id: None,
+            prefill_pos: 0,
+            grammar: None,
+            min_p: 0.0,
+            min_tokens: 0,
+            logit_bias: None,
+        }
+    };
+
+    // ── Reference: plain one-token-at-a-time decode on sequence 0. ──
+    let pre0 = m
+        .do_prefill(&[1], &[mk_req(0, None, 0, vec![])], 0)
+        .unwrap();
+    let mut plain = vec![pre0[0].logits.clone().unwrap().sampled_token];
+    let mut live = prompt.len();
+    while plain.len() < steps {
+        let last = *plain.last().unwrap();
+        let out = m
+            .do_decode(&[1], &[mk_req(0, Some(last), live + 1, plain.clone())])
+            .unwrap();
+        plain.push(out[0].1.sampled_token);
+        live += 1;
+    }
+
+    // ── Speculative decode on sequence 1: same prompt, same greedy sampler. ──
+    let pre1 = m
+        .do_prefill(&[1], &[mk_req(1, None, 0, vec![])], 0)
+        .unwrap();
+    let mut spec = vec![pre1[0].logits.clone().unwrap().sampled_token];
+    let mut live = prompt.len();
+    let mut accepted_total = 0usize;
+    while spec.len() < steps {
+        let last = *spec.last().unwrap();
+        let committed = m
+            .do_speculative_decode(&mk_req(1, Some(last), live + 1, spec.clone()), 2, 4)
+            .unwrap();
+        assert!(!committed.is_empty(), "must commit at least one token");
+        accepted_total += committed.len() - 1; // committed = accepted + 1
+        live += committed.len();
+        spec.extend(committed);
+    }
+    spec.truncate(steps);
+
+    assert_eq!(
+        plain, spec,
+        "speculative output must be byte-identical to plain decode"
+    );
+    assert!(
+        accepted_total > 0,
+        "n-gram speculation must accept at least one draft on a repetitive prompt"
+    );
+}
+
 /// tokenize → detokenize must reconstruct tricky text. Uses the raw-byte piece
 /// path so multi-token UTF-8 sequences (emoji, CJK) survive; normalizes the SPM
 /// word-boundary marker so the comparison works for SentencePiece models too.
