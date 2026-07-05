@@ -46,7 +46,7 @@ throughput it cannot, and that's fine — different hardware target.
 |---|---|---|---|
 | Guided / structured decoding (JSON-schema, regex, grammar) | ✅ (outlines / xgrammar) | ❌ prompt-only | **achievable** |
 | logprobs / prompt_logprobs / echo | ✅ | ❌ | **achievable** |
-| Speculative decoding (draft / n-gram / EAGLE / Medusa) | ✅ | ❌ | **achievable** |
+| Speculative decoding (draft / n-gram / EAGLE / Medusa) | ✅ | ⚠️ n-gram/prompt-lookup ✅ (0.15); draft-model ❌ | **achievable** |
 | `n>1` / best_of / beam search | ✅ | ❌ | achievable |
 
 **llama.cpp has native GBNF grammar support** → structured/JSON decoding is the single
@@ -124,13 +124,16 @@ Shipped since this analysis was written:
 - ✅ **Embeddings** were already fixed back in 0.11 (correct `n_embd` length, mean-pool +
   L2, non-degenerate — golden-verified); the only remaining nuance is that dedicated
   embedding models' native pooling (CLS) isn't auto-detected (fox always mean-pools).
+- ✅ **Speculative decoding — n-gram / prompt-lookup** (0.15) — exact (byte-identical
+  output), off by default; 1.78× on repetitive output at 98% acceptance. Draft-model
+  speculation is a later extension reusing the same verify/accept machinery.
 
 Still open, in priority order:
 
-1. **Speculative decoding (n-gram / draft)** — the largest real latency win still in
-   reach; llama.cpp has the draft/n-gram primitives.
-2. **OOM recovery + backpressure / max-queue** — makes it a real server under overload.
-3. **Per-model tool-call parsers** — today's tool calling is generic prompt-based.
+1. **OOM recovery + backpressure / max-queue** — makes it a real server under overload.
+2. **Per-model tool-call parsers** — today's tool calling is generic prompt-based.
+3. **Draft-model speculation** — generalizes the 0.15 n-gram win beyond context-echoing
+   output, at the cost of a second resident model.
 
 ## What NOT to chase (outside the niche)
 

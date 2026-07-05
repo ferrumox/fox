@@ -59,7 +59,7 @@ sliding window, MLA, state-space). This is why a single source of truth (`ModelI
 ## 4. Inference features
 
 **Sampling:** ✅ temp, top_p, top_k, seed, repetition_penalty, frequency/presence_penalty
-(additive, OpenAI semantics) · ❌ min_p, typical_p, mirostat, logit_bias, min_tokens.
+(additive, OpenAI semantics) · ✅ min_p, logit_bias, min_tokens (0.14) · ❌ typical_p, mirostat.
 
 **Decoding / scheduling:**
 
@@ -67,10 +67,10 @@ sliding window, MLA, state-space). This is why a single source of truth (`ModelI
 |---|---------|-----|
 | ✅ | Continuous batching; paged KV + ref-count + CoW; automatic prefix caching; text stop sequences | |
 | 🎯✅ | Chunked prefill | `--max-prefill-chunk` (default 512): a long prompt is prefilled in chunks across scheduler steps, interleaved with other requests' decode |
-| ❌ | Speculative decoding (draft / n-gram / EAGLE) | |
-| ❌ | Guided/structured decoding (grammar / JSON-schema / regex) | prompt-only today |
+| ⚠️ | Speculative decoding (draft / n-gram / EAGLE) | n-gram/prompt-lookup ✅ (`--speculative`, 0.15, exact + golden-verified); draft-model/EAGLE ❌ |
+| ✅ | Guided/structured decoding (grammar / JSON-schema) | GBNF-constrained via `response_format`/`format` (0.14, golden-verified); regex ❌ |
 | ⚠️ | Tool/function calling | generic prompt-based, no per-model parsers |
-| ❌ | `n>1` / best_of / beam search; logprobs / echo | |
+| ⚠️ | `n>1` / best_of / beam search; logprobs / echo | logprobs/top_logprobs ✅ (0.14); n>1/beam/echo ❌ |
 | ⚠️ | Context management: RoPE scaling partial; **context-shift/rolling** on full (`--context-shift`, shiftable caches) ✅; RoPE scaling still not exposed | |
 | ❌ | LoRA / adapters (incl. multi-LoRA) | |
 | ⚠️ | Thinking/reasoning (`<think>` separation) | fragile heuristic |
