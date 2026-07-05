@@ -89,6 +89,15 @@ impl InferenceEngine {
                             e,
                             prefill_ids.len()
                         );
+                        // Clear each request's KV BEFORE its seq_id returns to the pool:
+                        // a failed llama_decode can leave partial cells behind, and the
+                        // next occupant of the seq would collide with them and fail too
+                        // (poisoned sequence).
+                        for req in engine.scheduler.get_running(&prefill_ids) {
+                            if req.kv_seq_id >= 0 {
+                                engine.model.clear_sequence(req.kv_seq_id);
+                            }
+                        }
                         for req_id in &prefill_ids {
                             engine.scheduler.mark_finished(*req_id, StopReason::Length);
                             engine.model.free_grammar(*req_id);
@@ -113,6 +122,12 @@ impl InferenceEngine {
                             e,
                             decode_ids.len()
                         );
+                        // Same poisoned-sequence guard as the prefill error path.
+                        for req in engine.scheduler.get_running(&decode_ids) {
+                            if req.kv_seq_id >= 0 {
+                                engine.model.clear_sequence(req.kv_seq_id);
+                            }
+                        }
                         for req_id in &decode_ids {
                             engine.scheduler.mark_finished(*req_id, StopReason::Length);
                             engine.model.free_grammar(*req_id);

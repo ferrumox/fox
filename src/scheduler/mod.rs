@@ -148,7 +148,11 @@ mod tests {
 
         // try_insert_prefix computes the hash internally; only block 0 should be cached.
         let inserted = sched.try_insert_prefix(42);
-        assert!(inserted, "prefix should be inserted when cache has room");
+        assert_eq!(
+            inserted,
+            Some(16),
+            "prefix should be inserted when cache has room (1 block = 16 tokens)"
+        );
         assert_eq!(sched.prefix_cache_size(), 1);
 
         // Submit a new request with the same 18-token prefix.
@@ -202,7 +206,11 @@ mod tests {
             sched.running_batch.lock().unwrap().push(req);
         }
         let inserted = sched.try_insert_prefix(1);
-        assert!(inserted, "request A prefix should be cached");
+        assert_eq!(
+            inserted,
+            Some(16),
+            "request A prefix should be cached (1 block = 16 tokens)"
+        );
         sched.return_prefix_seq_id(0); // return cached seq_id to pool
 
         // Submit request B (diverges after the shared first block)
@@ -384,7 +392,7 @@ mod tests {
             if let Some(id) = finish_id {
                 let cache_full = sched.prefix_cache_size() >= sched.prefix_cache_max;
                 let cached = sched.try_insert_prefix(id);
-                if cache_full && !cached {
+                if cache_full && cached.is_none() {
                     observed_full_refuse = true;
                 }
             }

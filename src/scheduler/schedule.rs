@@ -345,24 +345,25 @@ impl Scheduler {
     /// and all generation blocks are freed immediately.  The cache key is the chain hash
     /// of the last complete block, which encodes the full block prefix transitively.
     ///
-    /// Returns `true` if an entry was inserted, `false` if the prompt has no complete
-    /// blocks or the cache is at capacity.
+    /// Returns `Some(cached_tokens)` if an entry was inserted (so the engine can trim
+    /// the donated sequence's KV to exactly that prefix), `None` if the prompt has no
+    /// complete blocks or the cache is at capacity.
     ///
     /// Lock ordering: running_batch → prefix_cache (matches schedule_step order).
-    pub fn try_insert_prefix(&self, req_id: u64) -> bool {
+    pub fn try_insert_prefix(&self, req_id: u64) -> Option<usize> {
         let block_size = self.kv_cache.block_size();
 
         let mut running = match self.running_batch.lock() {
             Ok(g) => g,
-            Err(_) => return false,
+            Err(_) => return None,
         };
         let mut pcache = match self.prefix_cache.lock() {
             Ok(g) => g,
-            Err(_) => return false,
+            Err(_) => return None,
         };
 
         if pcache.len() >= self.prefix_cache_max {
-            return false;
+            return None;
         }
 
         // Do not cache if the inference seq_id pool is currently empty.
@@ -372,10 +373,10 @@ impl Scheduler {
         {
             let pool = match self.seq_id_pool.lock() {
                 Ok(g) => g,
-                Err(_) => return false,
+                Err(_) => return None,
             };
             if pool.is_empty() {
-                return false;
+                return None;
             }
         }
 
@@ -386,7 +387,7 @@ impl Scheduler {
 
             let full_blocks = req.prompt_tokens.len() / block_size;
             if full_blocks == 0 {
-                return false; // prompt too short to cache even one block
+                return None; // prompt too short to cache even one block
             }
 
             // Compute the chain hash for the full-block prefix.
@@ -406,7 +407,7 @@ impl Scheduler {
             } else {
                 // Fewer blocks than expected — free all and skip caching.
                 self.kv_cache.free_blocks(&all_blocks);
-                return false;
+                return None;
             };
 
             if !excess.is_empty() {
@@ -429,9 +430,9 @@ impl Scheduler {
                 cached_tokens = full_blocks * block_size,
                 "cached block prefix KV state"
             );
-            return true;
+            return Some(full_blocks * block_size);
         }
-        false
+        None
     }
 
     /// Return a prefix seq_id back to the pool after the engine has copied and cleared it.

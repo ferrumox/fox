@@ -757,6 +757,20 @@ impl Model for LlamaCppModel {
         }
     }
 
+    fn trim_sequence(&self, seq_id: i32, from_pos: usize) {
+        let ctx_guard = match self._ctx.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        unsafe {
+            let mem = ffi::llama_get_memory(ctx_guard.as_ptr() as *const _);
+            if !mem.is_null() {
+                // p1 = -1 → remove [from_pos, ∞) for this sequence.
+                ffi::llama_memory_seq_rm(mem, seq_id, from_pos as i32, -1);
+            }
+        }
+    }
+
     fn copy_sequence_range(&self, src_seq_id: i32, dst_seq_id: i32, token_count: i32) {
         if token_count <= 0 {
             return;

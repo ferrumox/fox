@@ -205,7 +205,20 @@ impl InferenceEngine {
                                 | Some(StopReason::Length)
                                 | Some(StopReason::StopSequence)
                         ) {
-                        !self.scheduler.try_insert_prefix(*req_id)
+                        match self.scheduler.try_insert_prefix(*req_id) {
+                            Some(cached_tokens) => {
+                                // Donated: trim the sequence's KV to exactly the cached
+                                // prefix. The boundary token (cached_tokens-1) is
+                                // re-submitted on a hit, so keep [0, cached_tokens-1).
+                                // Without this, the stale tail (rest of prompt +
+                                // generated tokens) collides with the next occupant's
+                                // prefill positions and llama_decode fails.
+                                self.model
+                                    .trim_sequence(req.kv_seq_id, cached_tokens.saturating_sub(1));
+                                false
+                            }
+                            None => true,
+                        }
                     } else {
                         true
                     };

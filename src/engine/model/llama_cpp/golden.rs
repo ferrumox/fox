@@ -597,6 +597,121 @@ fn golden_speculative_matches_greedy() {
     );
 }
 
+/// Prefix-cache donate→hit must be decodable (regression: poisoned sequence).
+/// When a finished request donates its prefix, its sequence still holds KV for the
+/// whole prompt + generated tokens; the engine now trims it to the cached prefix
+/// (`trim_sequence`). This test mirrors that lifecycle at the model level: prefill +
+/// decode on seq 0, trim to the 16-token boundary, then re-prefill a same-prefix
+/// prompt on the SAME sequence from the boundary — exactly what a cache hit does.
+/// Without the trim, the re-submitted positions collide with stale cells and
+/// llama_decode fails with -1 (found on a real server, not by the other goldens).
+#[test]
+fn golden_prefix_reuse_after_trim() {
+    let m = golden!();
+    let prompt_a = m
+        .tokenize(
+            "The quick brown fox jumps over the lazy dog while the curious cat watches \
+             quietly from the old wooden fence nearby, waiting patiently for the evening \
+             sun to set behind the distant snowy mountains.",
+        )
+        .unwrap();
+    assert!(
+        prompt_a.len() >= 20,
+        "need ≥ 20 tokens for a 16-token prefix (got {})",
+        prompt_a.len()
+    );
+    let cached_tokens = 16usize; // one scheduler block
+
+    let mk_req =
+        |prompt: Vec<i32>, last: Option<i32>, ctx_len: usize, skip: usize, prefill_pos: usize| {
+            InferenceRequestForModel {
+                id: 1,
+                prompt_tokens: prompt,
+                last_token: last,
+                generated_tokens: 0,
+                max_new_tokens: 8,
+                context_len: ctx_len,
+                kv_seq_id: 0,
+                temperature: 0.0,
+                top_p: 1.0,
+                top_k: 0,
+                repetition_penalty: 1.0,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+                seed: None,
+                generated_token_ids: vec![],
+                skip_prefix_tokens: skip,
+                prefix_seq_id: None,
+                prefill_pos,
+                grammar: None,
+                min_p: 0.0,
+                min_tokens: 0,
+                logit_bias: None,
+            }
+        };
+
+    // Request 1: full prefill + 2 decode steps (a finished generation on seq 0).
+    let pre = m
+        .do_prefill(&[1], &[mk_req(prompt_a.clone(), None, 0, 0, 0)], 0)
+        .unwrap();
+    let mut next = pre[0].logits.clone().unwrap().sampled_token;
+    let mut live = prompt_a.len();
+    for _ in 0..2 {
+        let out = m
+            .do_decode(
+                &[1],
+                &[mk_req(prompt_a.clone(), Some(next), live + 1, 0, 0)],
+            )
+            .unwrap();
+        next = out[0].1.sampled_token;
+        live += 1;
+    }
+
+    // Donate: keep exactly the cached prefix [0, cached-1); the boundary token is
+    // re-submitted on the hit (same as the engine's trim_sequence call).
+    m.trim_sequence(0, cached_tokens - 1);
+
+    // Request 2 (cache hit): same 16-token prefix, different tail, SAME sequence.
+    let mut prompt_b = prompt_a[..cached_tokens].to_vec();
+    prompt_b.extend(m.tokenize(" and then everything changed suddenly").unwrap());
+    let hit = m
+        .do_prefill(
+            &[1],
+            &[mk_req(
+                prompt_b.clone(),
+                None,
+                0,
+                cached_tokens,     // skip_prefix_tokens
+                cached_tokens - 1, // prefill_pos = boundary
+            )],
+            0,
+        )
+        .expect("re-prefill on a trimmed donated sequence must not fail");
+    let logits = hit[0].logits.clone().expect("hit prefill completes");
+    assert!(
+        logits.values.iter().all(|v| v.is_finite()),
+        "post-hit logits must be finite"
+    );
+
+    // And the hit request must be able to keep decoding.
+    let tok = logits.sampled_token;
+    let out = m
+        .do_decode(
+            &[1],
+            &[mk_req(
+                prompt_b.clone(),
+                Some(tok),
+                prompt_b.len() + 1,
+                0,
+                0,
+            )],
+        )
+        .expect("decode after a cache-hit prefill must work");
+    assert!(out[0].1.values.iter().all(|v| v.is_finite()));
+
+    m.clear_sequence(0);
+}
+
 /// tokenize → detokenize must reconstruct tricky text. Uses the raw-byte piece
 /// path so multi-token UTF-8 sequences (emoji, CJK) survive; normalizes the SPM
 /// word-boundary marker so the comparison works for SentencePiece models too.
