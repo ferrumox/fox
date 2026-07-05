@@ -94,8 +94,19 @@ rejected drafts.
   `golden_speculative_matches_greedy`: on a repetitive prompt the committed tokens are
   byte-identical to a plain decode loop and the acceptance count is > 0. Model-level only
   — the scheduler/engine wiring is S2.
-- **S2 — scheduler / continuous-batching integration**: per-step advance by `a + 1`,
-  block-headroom cap on `draft_len`, and the grammar/min_tokens/stop interactions above.
+- **S2 — engine / continuous-batching integration** ✅: `run_decode` takes the
+  speculative path for a **single** decoding request with no grammar when the engine is
+  built with `Some((ngram, draft_len))` (multi-request batches decode normally —
+  speculation helps most at low concurrency, and this sidesteps mixed-length batch
+  bookkeeping). `speculative_decode_sync` on the `Model` trait (default = plain 1-token
+  decode; stub override commits 2 tokens to exercise the path). `handle_logits` now
+  processes a per-request **list** of committed tokens, checking stop conditions
+  (EOS / stop strings / max_tokens) per token in order and truncating the commit at the
+  first stop; `min_tokens` EOG masking is applied inside the verify sampler. Config
+  plumbed: `--speculative` / `--spec-ngram` / `--spec-draft-len` on `fox serve` (+ env +
+  config file), `--speculative` on `fox run`. Integration test
+  `test_speculative_engine_commits_multiple_tokens_and_respects_max` covers the
+  multi-token commit path on the stub.
 - **S3 — config + metrics**: `--speculative` (default off in 0.15, opt-in), `--spec-ngram`
   (suffix length to match, default 2), `--spec-draft-len` (max drafted tokens, default 4);
   a `spec_acceptance_ratio` gauge + accepted/proposed counters.

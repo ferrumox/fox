@@ -405,7 +405,7 @@ impl LlamaCppModel {
         req: &InferenceRequestForModel,
         ngram: usize,
         draft_len: usize,
-    ) -> Result<Vec<i32>> {
+    ) -> Result<Vec<Logits>> {
         // Full logical sequence so far (prompt + generated) for the n-gram lookup.
         let mut seq: Vec<i32> =
             Vec::with_capacity(req.prompt_tokens.len() + req.generated_token_ids.len());
@@ -451,7 +451,7 @@ impl LlamaCppModel {
         }
 
         let n_vocab = self.config.vocab_size as usize;
-        let mut committed: Vec<i32> = Vec::with_capacity(n);
+        let mut committed: Vec<Logits> = Vec::with_capacity(n);
         // Penalty context grows with each committed token so per-position sampling matches
         // the non-speculative path exactly (repetition/frequency/presence penalties).
         let mut running_generated = req.generated_token_ids.clone();
@@ -464,7 +464,7 @@ impl LlamaCppModel {
             let logits = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab) };
             let gen_count = req.generated_tokens + i;
             let tok = self.sample_verify_position(req, logits, &running_generated, gen_count);
-            committed.push(tok);
+            committed.push(Logits::new(logits.to_vec(), tok));
             running_generated.push(tok);
             // Accept only if this matches the drafted token; otherwise this is the bonus /
             // first-mismatch token and we stop.

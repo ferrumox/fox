@@ -49,9 +49,16 @@ pub struct InferenceEngine {
     /// `None` disables it; `Some(n_keep)` enables it, preserving the first `n_keep`
     /// tokens (BOS + system prompt). Only applied to shiftable (non-recurrent) caches.
     context_shift: Option<usize>,
+    /// Speculative decoding: `Some((ngram, draft_len))` enables n-gram / prompt-lookup
+    /// speculation for single-request decode steps (no grammar); `None` disables it.
+    speculative: Option<(usize, usize)>,
 }
 
 impl InferenceEngine {
+    // Three trailing engine knobs (prefill chunking, context shift, speculation) push
+    // this over clippy's argument limit; call sites annotate each one. If another knob
+    // lands, fold them into an options struct.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         model: Arc<dyn Model>,
         scheduler: Arc<crate::scheduler::Scheduler>,
@@ -60,6 +67,7 @@ impl InferenceEngine {
         metrics: Option<Arc<Metrics>>,
         max_prefill_chunk: usize,
         context_shift: Option<usize>,
+        speculative: Option<(usize, usize)>,
     ) -> Self {
         let supports_prefix_cache = model.supports_seq_copy();
         if supports_prefix_cache {
@@ -85,6 +93,7 @@ impl InferenceEngine {
             model_stop_tokens,
             max_prefill_chunk,
             context_shift,
+            speculative,
         }
     }
 

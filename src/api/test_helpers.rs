@@ -30,6 +30,9 @@ pub fn make_test_registry(
         max_prefill_chunk: 0,
         context_shift: false,
         context_keep: 0,
+        speculative: false,
+        spec_ngram: 2,
+        spec_draft_len: 4,
         max_context_len: Some(512),
         block_size: 16,
         gpu_memory_bytes: 4 * 1024 * 1024,
@@ -65,6 +68,52 @@ pub fn make_test_state(name: &str, dir: &std::path::Path) -> (AppState, Arc<Engi
     (state, entry)
 }
 
+/// Build a test `AppState` with speculative decoding enabled (StubModel emits two
+/// tokens per speculative step). Exercises the engine's multi-token commit path.
+pub fn make_test_state_speculative(
+    name: &str,
+    dir: &std::path::Path,
+) -> (AppState, Arc<EngineEntry>) {
+    std::fs::write(dir.join(format!("{name}.gguf")), b"").unwrap();
+    let cfg = RegistryConfig {
+        models_dir: dir.to_path_buf(),
+        max_models: 4,
+        max_batch_size: 4,
+        max_prefill_chunk: 0,
+        context_shift: false,
+        context_keep: 0,
+        speculative: true,
+        spec_ngram: 2,
+        spec_draft_len: 4,
+        max_context_len: Some(512),
+        block_size: 16,
+        gpu_memory_bytes: 4 * 1024 * 1024,
+        gpu_memory_fraction: 0.9,
+        metrics: None,
+        keep_alive_secs: 0,
+        type_k: 1,
+        type_v: 1,
+        main_gpu: 0,
+        split_mode: 1,
+        tensor_split: vec![],
+        moe_offload_cpu: false,
+    };
+    let registry = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
+    let entry = EngineEntry::for_test_speculative(name);
+    registry.preload_for_test(name, entry.clone());
+    let state = AppState {
+        registry,
+        primary_model: name.to_string(),
+        system_prompt: None,
+        started_at: 0,
+        models_dir: dir.to_path_buf(),
+        digest_cache: Arc::new(Mutex::new(HashMap::new())),
+        hf_token: None,
+        api_key: None,
+    };
+    (state, entry)
+}
+
 /// Build a test `AppState` backed by `ThinkingStubModel`.
 /// The model reports `supports_thinking() = true` and produces the token
 /// sequence: "thought" → "</think>" → "answer" → EOS.
@@ -77,6 +126,9 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         max_prefill_chunk: 0,
         context_shift: false,
         context_keep: 0,
+        speculative: false,
+        spec_ngram: 2,
+        spec_draft_len: 4,
         max_context_len: Some(512),
         block_size: 16,
         gpu_memory_bytes: 4 * 1024 * 1024,

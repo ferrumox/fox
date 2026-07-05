@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Speculative decoding — n-gram / prompt-lookup** (`--speculative` /
+  `FOX_SPECULATIVE`, default off; `--spec-ngram`, default 2; `--spec-draft-len`,
+  default 4) — on single-request decode steps, fox guesses the next few tokens by
+  matching the recent output against the request's own history and verifies all the
+  guesses in **one** forward pass, committing however many the model agrees with.
+  Output is provably unchanged — every committed token is a genuine model sample, so a
+  fixed sampler produces byte-identical text with speculation on or off (golden
+  `golden_speculative_matches_greedy`); only speed changes. Fastest on
+  context-echoing output (code edits, JSON, RAG, repetition). Needs no draft model and
+  no extra memory. Skipped while a request uses guided decoding; multi-request batches
+  decode normally. Flagship of the 0.15 work (`docs/design/speculative-decoding.md`).
+
 ## [0.14.0]
 
 fox gains **structured and controllable output**. Guided decoding constrains generation

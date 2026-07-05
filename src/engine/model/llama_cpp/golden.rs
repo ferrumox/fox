@@ -583,7 +583,7 @@ fn golden_speculative_matches_greedy() {
         assert!(!committed.is_empty(), "must commit at least one token");
         accepted_total += committed.len() - 1; // committed = accepted + 1
         live += committed.len();
-        spec.extend(committed);
+        spec.extend(committed.iter().map(|l| l.sampled_token));
     }
     spec.truncate(steps);
 

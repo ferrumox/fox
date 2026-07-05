@@ -825,6 +825,16 @@ impl Model for LlamaCppModel {
         self.grammars.remove(&req_id);
     }
 
+    fn speculative_decode_sync(
+        &self,
+        _req_id: u64,
+        request: &InferenceRequestForModel,
+        ngram: usize,
+        draft_len: usize,
+    ) -> Result<Vec<Logits>> {
+        self.do_speculative_decode(request, ngram, draft_len)
+    }
+
     fn embedding_dim(&self) -> usize {
         self.config.n_embd
     }

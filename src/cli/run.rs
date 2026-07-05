@@ -119,6 +119,11 @@ pub struct RunArgs {
     /// Show engine logs (hidden by default for cleaner output)
     #[arg(long)]
     pub verbose: bool,
+
+    /// Enable n-gram / prompt-lookup speculative decoding (faster on repetitive output;
+    /// output is unchanged). Off by default.
+    #[arg(long, env = "FOX_SPECULATIVE")]
+    pub speculative: bool,
 }
 
 pub async fn run_run(args: RunArgs) -> Result<()> {
@@ -216,6 +221,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         None,
         0,       // single-shot prefill (single interactive request)
         Some(0), // roll context on full so long single-shot generations don't stop early
+        if args.speculative { Some((2, 4)) } else { None },
     ));
 
     match args.prompt.clone() {

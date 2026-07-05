@@ -56,6 +56,9 @@ fox serve --json-logs --port 8080 --max-models 2 --keep-alive-secs 600
 | `--max-prefill-chunk <N>` | `FOX_MAX_PREFILL_CHUNK` | `512` | Maximum prompt tokens prefilled per request per scheduler step. Chunking a long prompt lets it interleave with other requests' token generation instead of blocking the engine loop for the whole prefill. `0` disables chunking (single-shot). |
 | `--context-shift <BOOL>` | `FOX_CONTEXT_SHIFT` | `true` | When a conversation fills the context window, discard the oldest KV window and keep generating instead of stopping the request with `length`. Automatically skipped for recurrent/hybrid models whose KV cache cannot shift. Pass `--context-shift false` to disable. |
 | `--context-keep <N>` | `FOX_CONTEXT_KEEP` | `0` | Tokens preserved at the front (BOS + system prompt) when the context is rolled. Only meaningful with `--context-shift true`. |
+| `--speculative <BOOL>` | `FOX_SPECULATIVE` | `false` | N-gram / prompt-lookup speculative decoding: verify several guessed tokens per forward pass on single-request decode steps. Output is unchanged — only speed. Fastest on repetitive output (code, JSON, RAG). Skipped while a request uses guided decoding. |
+| `--spec-ngram <N>` | `FOX_SPEC_NGRAM` | `2` | Suffix length matched against the request's history when speculating. |
+| `--spec-draft-len <N>` | `FOX_SPEC_DRAFT_LEN` | `4` | Maximum draft tokens proposed per speculative step. |
 | `--gpu-memory-fraction <F>` | `FOX_GPU_MEMORY_FRACTION` | `0.85` | Fraction of GPU VRAM reserved for the KV cache. Must be between 0.0 and 1.0. The remaining memory is left for model weights and other allocations. |
 | `--type-kv <TYPE>` | `FOX_TYPE_KV` | `f16` | KV cache element type for both K and V: `f16`, `q8_0`, or `q4_0`. |
 | `--type-k <TYPE>` | `FOX_TYPE_K` | — | Override K cache type independently (same values as `--type-kv`). Takes precedence over `--type-kv` for the K cache. |

@@ -57,7 +57,13 @@ impl InferenceEngine {
             if !prefill_ids.is_empty() {
                 match engine.run_prefill(&prefill_ids).await {
                     Ok(prefill_results) => {
-                        engine.handle_logits(&prefill_results, true).await?;
+                        // Prefill yields one token per request; wrap each so handle_logits
+                        // sees the same per-request token-list shape as decode.
+                        let wrapped: Vec<(u64, Vec<Logits>)> = prefill_results
+                            .into_iter()
+                            .map(|(id, l)| (id, vec![l]))
+                            .collect();
+                        engine.handle_logits(&wrapped, true).await?;
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -228,7 +234,7 @@ impl InferenceEngine {
         Ok(result)
     }
 
-    pub(super) async fn run_decode(&self, req_ids: &[u64]) -> Result<Vec<(u64, Logits)>> {
+    pub(super) async fn run_decode(&self, req_ids: &[u64]) -> Result<Vec<(u64, Vec<Logits>)>> {
         // Copy-on-write: if any block in a decoding request is shared (ref_count > 1),
         // allocate a new exclusive copy before llama.cpp writes to it.
         //
@@ -288,8 +294,31 @@ impl InferenceEngine {
             .collect();
         let model = self.model.clone();
         let req_ids_vec = req_ids.to_vec();
-        tokio::task::spawn_blocking(move || model.decode_sync(&req_ids_vec, &model_requests))
-            .await
-            .map_err(|e| anyhow::anyhow!("decode spawn_blocking: {}", e))?
+
+        // Speculative fast path: a single decoding request with no grammar, when enabled.
+        // Speculation helps most at low concurrency; multi-request batches decode normally.
+        if let (Some((ngram, draft_len)), [only_id]) = (self.speculative, req_ids) {
+            let no_grammar = model_requests
+                .first()
+                .map(|r| r.grammar.is_none())
+                .unwrap_or(false);
+            if no_grammar {
+                let only_id = *only_id;
+                let request = model_requests.into_iter().next().unwrap();
+                let committed = tokio::task::spawn_blocking(move || {
+                    model.speculative_decode_sync(only_id, &request, ngram, draft_len)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("speculative decode spawn_blocking: {}", e))??;
+                return Ok(vec![(only_id, committed)]);
+            }
+        }
+
+        // Normal batched decode: one token per request.
+        let out =
+            tokio::task::spawn_blocking(move || model.decode_sync(&req_ids_vec, &model_requests))
+                .await
+                .map_err(|e| anyhow::anyhow!("decode spawn_blocking: {}", e))??;
+        Ok(out.into_iter().map(|(id, l)| (id, vec![l])).collect())
     }
 }

@@ -160,6 +160,21 @@ pub trait Model: Send + Sync {
         requests: &[InferenceRequestForModel],
     ) -> Result<Vec<(u64, Logits)>>;
 
+    /// Speculative decode for a single request: propose draft tokens via n-gram lookup
+    /// over the request's own history, verify them in one pass, and return the committed
+    /// tokens' logits (always ≥ 1). The default performs an ordinary single-token decode
+    /// (no speculation), so the stub and non-speculative backends still work.
+    fn speculative_decode_sync(
+        &self,
+        req_id: u64,
+        request: &InferenceRequestForModel,
+        _ngram: usize,
+        _draft_len: usize,
+    ) -> Result<Vec<Logits>> {
+        let out = self.decode_sync(&[req_id], std::slice::from_ref(request))?;
+        Ok(out.into_iter().map(|(_, l)| l).collect())
+    }
+
     fn model_config(&self) -> ModelConfig;
 
     fn eos_token_id(&self) -> i32;

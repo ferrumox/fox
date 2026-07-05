@@ -133,6 +133,7 @@ async fn run_one_type(
         None,
         0,    // single-shot prefill (benchmark)
         None, // no context rolling (benchmark)
+        None, // no speculative decoding (benchmark)
     ));
 
     let messages = vec![

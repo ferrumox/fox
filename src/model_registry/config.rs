@@ -23,6 +23,12 @@ pub struct RegistryConfig {
     pub context_shift: bool,
     /// Tokens preserved at the front (BOS + system prompt) when context rolling fires.
     pub context_keep: usize,
+    /// Enable n-gram / prompt-lookup speculative decoding for single-request decode steps.
+    pub speculative: bool,
+    /// Suffix length matched against history when speculating.
+    pub spec_ngram: usize,
+    /// Maximum draft tokens proposed per speculative step.
+    pub spec_draft_len: usize,
     /// Per-sequence context length. `None` = auto-detect from the model's trained context.
     pub max_context_len: Option<u32>,
     pub block_size: usize,
