@@ -43,6 +43,19 @@ trade-off on any model. See `docs/design/speculative-decoding.md`.
   the off/on outputs are byte-identical — the exactness invariant checked end-to-end
   (`docs/cli/bench-spec.md`).
 
+### Fixed
+
+- **Prefix-cache reuse no longer breaks the server** (pre-existing, found by
+  exercising a real server end-to-end on the target machine). Two related bugs: a
+  finished request that donated its prompt prefix to the cache left its *whole* KV
+  (prompt + generated tokens) in the sequence, so the next cache hit re-submitted
+  tokens at occupied positions and `llama_decode` failed; and the decode/prefill
+  error paths recycled the sequence id without clearing its KV, permanently poisoning
+  it — every later request assigned that sequence failed too. Donated sequences are
+  now trimmed to exactly the cached prefix, and failed requests clear their sequence
+  before the id returns to the pool. Guarded by a new golden
+  (`golden_prefix_reuse_after_trim`) that mirrors the donate→hit lifecycle.
+
 ## [0.14.0]
 
 fox gains **structured and controllable output**. Guided decoding constrains generation
