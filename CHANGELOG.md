@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0]
+
+fox gets **speculative decoding**. On single-request decode steps it guesses the next
+few tokens by matching the recent output against the request's own history (n-gram /
+prompt-lookup — no draft model, no extra memory) and verifies all the guesses in one
+forward pass. The output is provably unchanged — a fixed sampler produces byte-identical
+text with speculation on or off; only speed changes. Measured on a real model:
+**1.78× faster at 98% draft acceptance on repetitive output** (code edits, JSON, RAG),
+0.92× at 9% on free-form prose — which is why `--speculative` ships off by default.
+Acceptance is observable in Prometheus, and a new `fox bench-spec` quantifies the
+trade-off on any model. See `docs/design/speculative-decoding.md`.
+
 ### Added
 
 - **Speculative decoding — n-gram / prompt-lookup** (`--speculative` /
