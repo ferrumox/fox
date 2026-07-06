@@ -345,6 +345,12 @@ impl KVCacheManager {
     pub fn total_blocks(&self) -> usize {
         self.total_blocks
     }
+
+    /// Number of blocks currently allocated (ref_count > 0). `total_blocks() -
+    /// allocated_blocks()` is the number free. Used for metrics and leak assertions.
+    pub fn allocated_blocks(&self) -> usize {
+        self.allocated_count.load(Ordering::Relaxed)
+    }
 }
 
 unsafe impl Send for KVCacheManager {}

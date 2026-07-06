@@ -269,9 +269,16 @@ Each phase is shippable on its own and gated by the net from P0.
 
 ## 7. Open questions / risks
 
-- **Prefix-cache eviction**: a read of `schedule.rs` suggests `pop`-before-`put` and the
+- **Prefix-cache eviction**: ~~a read of `schedule.rs` suggests `pop`-before-`put` and the
   `len >= max` guard keep blocks/seq-ids balanced (i.e. *no* leak), contradicting an
-  initial automated flag. Unresolved by reading alone — **P0's stress test settles it.**
+  initial automated flag. Unresolved by reading alone — P0's stress test settles it.~~
+  **RESOLVED (no leak).** `scheduler::tests::stress_prefix_cache_no_leak` drives 400
+  admit/finish/cache/hit/refuse-when-full cycles and asserts, after every step, that
+  every seq_id and every KV block is owned by exactly one of {pool, running request,
+  cache entry} — never dropped, never duplicated — and that allocation returns to zero
+  after draining. `try_insert_prefix` *refuses* when the cache is full (it never
+  LRU-evicts through `put`), so the balance holds. The initial automated flag was a
+  false positive.
 - **Tiny GGUF fixtures**: do suitable miniature models exist for MLA / recurrent, or do
   we record fixtures / synthesize? Affects P2 cost.
 - **CI hardware**: golden generation tests ideally want a GPU runner for the real

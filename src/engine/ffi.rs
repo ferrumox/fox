@@ -25,3 +25,15 @@ extern "C" {
     /// to be allocated in RAM instead of VRAM.
     pub fn ggml_backend_cpu_buffer_type() -> ggml_backend_buffer_type_t;
 }
+
+// ── GGML backend device introspection ────────────────────────────────────────
+// Used to report the active compute backend at startup. `ggml_backend_dev_t` is
+// already provided by the generated bindings; dev_type: 0 = CPU, 1 = GPU, 2 = iGPU.
+#[cfg(not(fox_stub))]
+extern "C" {
+    pub fn ggml_backend_dev_count() -> usize;
+    pub fn ggml_backend_dev_get(index: usize) -> ggml_backend_dev_t;
+    pub fn ggml_backend_dev_name(device: ggml_backend_dev_t) -> *const std::os::raw::c_char;
+    pub fn ggml_backend_dev_description(device: ggml_backend_dev_t) -> *const std::os::raw::c_char;
+    pub fn ggml_backend_dev_type(device: ggml_backend_dev_t) -> std::os::raw::c_int;
+}

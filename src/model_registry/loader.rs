@@ -74,6 +74,7 @@ pub(super) async fn load_model(
     // (llama_n_ctx), so the pool can never claim room llama.cpp didn't allocate.
     let kv_tokens = model.kv_cache_capacity();
     let model: Arc<dyn Model> = Arc::new(model);
+    tracing::info!(model = %name, backend = %model.active_backend(), "model ready");
     let kv_cache = Arc::new(KVCacheManager::from_kv_tokens(kv_tokens, block_size));
 
     let scheduler = Arc::new(Scheduler::new(kv_cache.clone(), max_batch_size));

@@ -58,9 +58,9 @@ The primary inference endpoint. Accepts a conversation history and returns a mod
 | `model` | `string` | (required) | Model name. Resolved using aliases and filename matching. See [Configuration](../configuration.md). |
 | `messages` | `array` | (required) | Conversation history. Each item has `role` (`system`, `user`, `assistant`, or `tool`) and `content`. |
 | `max_tokens` | `integer` | `256` | Maximum number of tokens to generate. |
-| `temperature` | `float` | `1.0` | Sampling temperature. `0.0` = greedy, higher = more random. |
-| `top_p` | `float` | `1.0` | Nucleus sampling probability. `1.0` = disabled. |
-| `top_k` | `integer` | `0` | Top-K filter. `0` = disabled. |
+| `temperature` | `float` | `0.8` | Sampling temperature. `0.0` = greedy, higher = more random. |
+| `top_p` | `float` | `0.9` | Nucleus sampling probability. `1.0` = disabled. |
+| `top_k` | `integer` | `0` | Top-K filter. `0` = disabled — OpenAI exposes no `top_k`. |
 | `repetition_penalty` | `float` | `1.0` | Repetition penalty. `1.0` = disabled. Values above `1.0` reduce repetition. |
 | `seed` | `integer` | `null` | RNG seed for reproducible output. |
 | `stop` | `string \| array` | `null` | Stop sequences. Generation halts when any of these strings is produced. |
@@ -68,6 +68,12 @@ The primary inference endpoint. Accepts a conversation history and returns a mod
 | `tools` | `array` | `null` | List of tools (functions) the model can call. See [Function calling](#function-calling). |
 | `tool_choice` | `string \| object` | `null` | Controls tool selection. `"auto"`, `"none"`, or `{"type":"function","function":{"name":"..."}}`. |
 | `response_format` | `object` | `null` | Output format constraint. `{"type":"json_object"}` forces valid JSON output. |
+
+> **Sampling defaults.** The OpenAI surface mirrors OpenAI: no `top_k` and no repeat
+> penalty (use `frequency_penalty`/`presence_penalty`, both `0.0` = off). The Ollama
+> surface (`/api/*`) mirrors upstream Ollama instead (`top_k = 40`,
+> `repeat_penalty = 1.1`). This divergence is deliberate; the single source of truth is
+> `src/api/shared/sampling_defaults.rs`.
 
 ### Response (non-streaming)
 
