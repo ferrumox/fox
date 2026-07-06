@@ -41,3 +41,5 @@ Thumbs.db
 *.log
 
 .lab
+# mkdocs build output
+site/
