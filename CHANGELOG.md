@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+## [0.12.0] - 2026-07-06
+
+GPU inference becomes a first-class, reproducible path, and the model-architecture
+rework (started in 0.11) is finished off. Vulkan is validated end-to-end on an AMD
+Radeon 890M (`gfx1150`, RDNA 3.5) and shipped three ways — a Docker image, a prebuilt
+release tarball, and a `make vulkan` bundle — with fox now reporting the active
+backend at startup. On the correctness side, P4 (API consistency) lands, and the
+rework's regression net is wired up for real: golden tests run in CI against a live
+model, and a stress test settles the last open question (§7) by proving the prefix
+cache doesn't leak.
+
+### Added
+
+- **`Dockerfile.vulkan`** — a reproducible Vulkan build for AMD/Intel iGPUs and any
+  Vulkan-capable GPU (no CUDA/ROCm). Validated end-to-end on an AMD Radeon 890M
+  (`gfx1150`, RDNA 3.5): coherent output, GPU-accelerated, both by extracting the
+  binary to run natively and by running the image with `--device /dev/dri`. The image
+  ships the Mesa Vulkan driver and falls back to CPU when no GPU is present.
+  CONTRIBUTING documents the GPU-build story, including the exact toolchain
+  (`glslc`, `glslang-tools`, `libvulkan-dev`, `spirv-headers`) and the
+  build-in-container / run-on-host split.
+- **fox reports the active compute backend at startup.** `fox run`, `fox serve` (in
+  the log) and `fox probe` now show whether inference runs on the GPU (e.g.
+  `Vulkan0 — AMD Radeon 890M`) or the CPU, read from the ggml device registry —
+  closing the "is it actually using my GPU?" gap. Exposed on `ModelInfo.backend`.
+- **Prebuilt Vulkan binary in releases** — `release.yml` now builds a
+  `x86_64-unknown-linux-gnu-vulkan` tarball (on Ubuntu 24.04) alongside the CPU one,
+  so GPU users get a ready-to-run binary. The Vulkan tarball needs glibc 2.39+ and a
+  Vulkan driver (Mesa RADV/ANV, etc.) at runtime.
+- **`make vulkan`** — builds the `Dockerfile.vulkan` image and extracts the bundle
+  (`fox`, `fox-bench`, `libggml-vulkan.so`) to `./fox-vulkan/`, so you get a
+  GPU-enabled binary that runs natively on any host with a Vulkan driver — no build
+  toolchain needed on the host.
+- **Golden tests now run in CI** — a new `golden` job builds llama.cpp for real (the
+  only CI job that does; the rest stay on the fast stub) and runs the golden suite
+  against a tiny GGUF (Qwen2.5-0.5B) on CPU: `ModelInfo` invariants, non-degenerate
+  embeddings, and tokenize round-trips on emoji/CJK. The model and the llama.cpp build
+  are cached so it only pays the full cost when either changes. This wires up the
+  regression net that P0 built but only ran locally.
+- **Prefix-cache leak stress test** (`scheduler::tests::stress_prefix_cache_no_leak`) —
+  settles the last open question of the model-architecture rework (§7). It drives 400
+  admit/finish/cache/hit/refuse-when-full cycles and asserts, after every step, that
+  every seq_id and KV block is owned by exactly one of {pool, running request, cache
+  entry} — never dropped, never duplicated — and that allocation returns to zero after
+  draining. Confirms the prefix cache does **not** leak (the initial automated flag was
+  a false positive). Adds `KVCacheManager::allocated_blocks()` for the assertion.
+
+### Changed
+
+- **Sampling defaults centralized** (`src/api/shared/sampling_defaults.rs`) — the
+  per-request defaults were duplicated as magic literals across the OpenAI and Ollama
+  handlers. They now live in one table keyed by API surface, with the cross-surface
+  divergence documented as a **deliberate** decision: the OpenAI surface (`/v1/*`)
+  mirrors OpenAI (no `top_k`, no repeat penalty) while the Ollama surface (`/api/*`)
+  mirrors upstream Ollama (`top_k = 40`, `repeat_penalty = 1.1`). A unit test locks
+  the divergence so it can't be "unified" by accident. (Model-architecture rework P4.)
+
+### Fixed
+
+- **API docs listed the wrong sampling defaults.** `docs/api/{openai,ollama}.md`
+  claimed `temperature = 1.0` / `top_p = 1.0` (actual: `0.8` / `0.9`) and the Ollama
+  page showed `top_k = 0` / `repeat_penalty = 1.0` when fox actually applies Ollama's
+  `40` / `1.1`. Corrected, with a note explaining the deliberate `/v1` vs `/api`
+  divergence.
+- **`--max-models` help now states the default-1 trade-off** — a request for a second
+  model evicts the first (logged), which is the safe choice for small-VRAM iGPUs;
+  raise it if you have the VRAM.
+
+---
+
 ## [0.11.0] - 2026-07-03
 
 Model-architecture correctness rework (see

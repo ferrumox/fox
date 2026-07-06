@@ -6,10 +6,9 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+-rc*'
 
-# NOTE: simplified to a single reliable target (x86_64 linux) for now. The
-# previous multi-platform matrix (ROCm bundle, aarch64 cross, macOS, Windows +
-# Vulkan) was fragile and failed often. Re-add platforms one at a time once each
-# is verified — GPU users can meanwhile use the Docker image or build locally.
+# Two reliable Linux x86_64 targets: a plain CPU build (broad compatibility) and a
+# Vulkan build (AMD/Intel iGPUs and any Vulkan GPU). Both validated. Other platforms
+# (ROCm bundle, aarch64, macOS, Windows) can be re-added once each is verified.
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,8 +18,24 @@ permissions:
 
 jobs:
   build:
-    name: Build x86_64-unknown-linux-gnu
-    runs-on: ubuntu-22.04
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CPU — built on 22.04 for broad glibc compatibility.
+          - name: x86_64-linux
+            runner: ubuntu-22.04
+            suffix: ""
+            gpu_deps: ""
+          # Vulkan — needs Ubuntu 24.04 for glslc/spirv-headers. The resulting binary
+          # needs glibc 2.39+ and a Vulkan driver at runtime (Mesa RADV/ANV, etc.).
+          - name: x86_64-linux-vulkan
+            runner: ubuntu-24.04
+            suffix: "-vulkan"
+            gpu_deps: "glslc glslang-tools libvulkan-dev spirv-headers"
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,13 +51,17 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-release-
+          # Separate keys per variant so a CPU build's cmake configuration can't
+          # leak into the Vulkan build's target cache (or vice versa).
+          key: ${{ matrix.runner }}-release${{ matrix.suffix }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.runner }}-release${{ matrix.suffix }}-
 
       - name: Install build dependencies
+        # llama.cpp's ggml-vulkan CMake needs both the Vulkan/glslc tooling AND
+        # SPIRV-Headers. build.rs auto-enables the Vulkan backend when they're present.
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y cmake clang libclang-dev ninja-build
+          sudo apt-get install -y build-essential cmake clang libclang-dev ninja-build ${{ matrix.gpu_deps }}
 
       - name: Build
         run: cargo build --release --bin fox --bin fox-bench
@@ -51,10 +70,10 @@ jobs:
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          TARBALL="fox-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          TARBALL="fox-${VERSION}-x86_64-unknown-linux-gnu${{ matrix.suffix }}.tar.gz"
           RELEASE_DIR="target/release"
-          # Bundle the binaries + any backend shared libraries built alongside them
-          # (the fox binary has RPATH=$ORIGIN, so it finds them in the same dir).
+          # Bundle binaries + any backend shared libraries built alongside them
+          # (fox has RPATH=$ORIGIN, so it finds them in the same directory).
           FILES=(fox fox-bench)
           for so in "$RELEASE_DIR"/libggml*.so* "$RELEASE_DIR"/libllama*.so*; do
             [[ -f "$so" ]] && FILES+=("$so")

@@ -16,6 +16,9 @@ pub struct ModelInfo {
     /// GGUF `general.architecture`, verbatim (e.g. "llama", "gemma3"), or "unknown".
     pub arch_name: String,
 
+    /// Active compute backend (e.g. "Vulkan0 — AMD Radeon 890M", or "CPU").
+    pub backend: String,
+
     // dimensions — each read from the model, never reconstructed by formula.
     pub n_embd: usize,
     pub n_head: usize,

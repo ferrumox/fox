@@ -6,15 +6,20 @@ on:
   pull_request:
     branches: [main, develop]
 
+# NOTE: FOX_SKIP_LLAMA is intentionally NOT set at the workflow level. build.rs
+# treats the variable as set if it is present at all (even empty), so a job that
+# needs a REAL llama.cpp build (the `golden` job) must never inherit it. The stub
+# jobs opt in individually below.
 env:
   CARGO_TERM_COLOR: always
-  FOX_SKIP_LLAMA: "1"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
+    env:
+      FOX_SKIP_LLAMA: "1"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -44,6 +49,8 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
+    env:
+      FOX_SKIP_LLAMA: "1"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -69,6 +76,8 @@ jobs:
     name: Release Build
     runs-on: ubuntu-latest
     needs: [check, test]
+    env:
+      FOX_SKIP_LLAMA: "1"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -89,3 +98,55 @@ jobs:
 
       - name: cargo build --release
         run: cargo build --release --all
+
+  # Real-model regression net (design doc §5.2). This is the ONE job that builds
+  # llama.cpp for real (no FOX_SKIP_LLAMA) and runs the golden suite against a tiny
+  # GGUF on CPU — ModelInfo invariants, non-degenerate embeddings, tokenize
+  # round-trip. To add an architecture class: cache another GGUF and pass it too.
+  golden:
+    name: Golden (real model, CPU)
+    runs-on: ubuntu-latest
+    needs: [check, test]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        # Real llama.cpp build: cmake + a C/C++ toolchain, plus libclang for bindgen.
+        # No GPU toolchain, so build.rs configures the CPU backend only.
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y build-essential cmake ninja-build clang libclang-dev
+
+      - name: Cache cargo + llama.cpp build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-golden-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-golden-
+
+      - name: Cache golden model
+        id: golden-model
+        uses: actions/cache@v5
+        with:
+          path: golden-model.gguf
+          # Bump this key to change the model.
+          key: golden-model-qwen2.5-0.5b-instruct-q4_k_m
+
+      - name: Download golden model
+        if: steps.golden-model.outputs.cache-hit != 'true'
+        run: |
+          curl -fL --retry 3 -o golden-model.gguf \
+            https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+
+      - name: Run golden tests
+        # `make golden` builds for real, copies the ggml backend .so next to the test
+        # binary so dlopen finds them, then runs the suite against the model.
+        run: make golden GOLDEN_MODEL="$PWD/golden-model.gguf"

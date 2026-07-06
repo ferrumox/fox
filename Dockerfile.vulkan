@@ -1,0 +1,80 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Vulkan build — for AMD / Intel iGPUs and any Vulkan-capable GPU (no CUDA/ROCm).
+# Validated on an AMD Radeon 890M (gfx1150, RDNA 3.5) with Mesa RADV.
+#
+# Build:
+#   docker build -f Dockerfile.vulkan -t fox:vulkan .
+#
+# Run with the host GPU passed through (AMD/Intel Mesa driver ships in the image):
+#   docker run --rm --device /dev/dri --group-add video \
+#     -p 8080:8080 -v ~/.cache/ferrumox/models:/root/.cache/ferrumox/models \
+#     fox:vulkan serve
+#
+# Or extract the bundle and run it natively on a host that already has a Vulkan
+# driver (the fox binary + backend .so are self-contained via RPATH=$ORIGIN):
+#   id=$(docker create fox:vulkan) \
+#     && docker cp "$id:/usr/local/lib/fox" ./fox-vulkan && docker rm "$id" \
+#     && ./fox-vulkan/fox serve --model-path <model.gguf>
+#
+# Without a GPU it falls back to CPU automatically — no flag or separate image.
+# ──────────────────────────────────────────────────────────────────────────────
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# build.rs auto-enables the Vulkan backend when glslc + vulkan.h are present.
+# llama.cpp's ggml-vulkan CMake requires BOTH the Vulkan/glslc tooling AND
+# SPIRV-Headers, so all of these are needed (Ubuntu 24.04 packages them all;
+# 22.04 does not ship glslc easily — hence 24.04):
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates git \
+    build-essential cmake ninja-build clang libclang-dev \
+    glslc glslang-tools libvulkan-dev spirv-headers \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:$PATH"
+
+WORKDIR /app
+
+# Fetch deps first so this layer caches while source changes.
+COPY Cargo.toml Cargo.lock ./
+COPY vendor/ vendor/
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    cargo fetch
+
+COPY . .
+# Isolate the target cache (id) so a CUDA/CPU build's cmake configuration can't
+# leak into this Vulkan build via the default shared cache mount.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/app/target,id=fox-vulkan-target \
+    cargo build --release --bin fox --bin fox-bench && \
+    mkdir -p /bundle && \
+    cp target/release/fox target/release/fox-bench /bundle/ && \
+    find target/release -maxdepth 1 -name 'lib*.so*' -exec cp {} /bundle/ \;
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Runtime — Ubuntu 24.04 to match the builder's glibc; ships the Mesa Vulkan
+# drivers so `docker run --device /dev/dri` uses the host AMD/Intel GPU. The
+# Vulkan backend .so is dlopen-ed lazily; with no GPU the engine uses the CPU.
+# ──────────────────────────────────────────────────────────────────────────────
+FROM ubuntu:24.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libgomp1 libvulkan1 mesa-vulkan-drivers \
+    && rm -rf /var/lib/apt/lists/*
+
+# All binaries + backend .so in one dir so RPATH=$ORIGIN resolves them.
+COPY --from=builder /bundle/ /usr/local/lib/fox/
+RUN echo "/usr/local/lib/fox" > /etc/ld.so.conf.d/fox.conf && ldconfig && \
+    ln -s /usr/local/lib/fox/fox      /usr/local/bin/fox && \
+    ln -s /usr/local/lib/fox/fox-bench /usr/local/bin/fox-bench
+
+ENV FOX_HOST=0.0.0.0
+ENV FOX_PORT=8080
+EXPOSE 8080
+
+ENTRYPOINT ["fox"]
+CMD ["serve"]

@@ -140,24 +140,31 @@ pub fn sampling_from_ollama(
     opts: Option<&OllamaOptions>,
     show_thinking: bool,
 ) -> (SamplingParams, usize) {
+    use super::sampling_defaults as defaults;
+    let default_max_tokens = if show_thinking {
+        defaults::ollama::MAX_TOKENS_THINKING
+    } else {
+        defaults::ollama::MAX_TOKENS
+    };
     let (temp, top_p, top_k, rep, seed, max_tokens, stop) = match opts {
         Some(o) => (
-            o.temperature.unwrap_or(0.8),
-            o.top_p.unwrap_or(0.9),
-            o.top_k.unwrap_or(40),
-            o.repeat_penalty.unwrap_or(1.1),
+            o.temperature.unwrap_or(defaults::TEMPERATURE),
+            o.top_p.unwrap_or(defaults::TOP_P),
+            o.top_k.unwrap_or(defaults::ollama::TOP_K),
+            o.repeat_penalty.unwrap_or(defaults::ollama::REPEAT_PENALTY),
             o.seed,
             o.num_predict
-                .unwrap_or(if show_thinking { 2048 } else { 512 }) as usize,
+                .map(|n| n as usize)
+                .unwrap_or(default_max_tokens),
             o.stop.clone(),
         ),
         None => (
-            0.8,
-            0.9,
-            40,
-            1.1,
+            defaults::TEMPERATURE,
+            defaults::TOP_P,
+            defaults::ollama::TOP_K,
+            defaults::ollama::REPEAT_PENALTY,
             None,
-            if show_thinking { 2048 } else { 512 },
+            default_max_tokens,
             None,
         ),
     };
@@ -173,7 +180,7 @@ pub fn sampling_from_ollama(
             stop,
             show_thinking,
             initial_in_thinking: show_thinking,
-            max_thinking_chars: 8192,
+            max_thinking_chars: defaults::MAX_THINKING_CHARS,
         },
         max_tokens,
     )

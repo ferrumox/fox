@@ -11,9 +11,10 @@
 //   FOX_GOLDEN_MODEL=~/.cache/ferrumox/models/gemma-4-E2B-it-Q4_K_M.gguf \
 //     cargo test golden -- --nocapture
 //
-// TODO: wire a real-build CPU CI job that runs this on one tiny GGUF per
-// architecture class (dense / GQA / non-standard-head_dim / MoE / MLA / recurrent
-// / embeddings), per the support matrix.
+// CI: the `golden` job in .github/workflows/ci.yml runs this on a tiny GGUF
+// (Qwen2.5-0.5B) on CPU — the one job that builds llama.cpp for real. To extend
+// coverage to another architecture class (MoE / MLA / recurrent / embeddings),
+// cache another tiny GGUF in that job and pass it through, per the support matrix.
 
 use crate::engine::model::{LlamaCppModel, Model};
 use crate::model_registry::kv_type;

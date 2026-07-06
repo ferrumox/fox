@@ -85,6 +85,9 @@ pub struct ServeArgs {
     pub hf_token: Option<String>,
 
     /// Maximum number of models to keep in memory simultaneously (LRU eviction).
+    /// Defaults to 1: a request for a second model evicts the first (logged), which
+    /// is the safe choice for the small-VRAM iGPUs fox targets. Raise it if you have
+    /// the VRAM to serve several models at once.
     #[arg(long, default_value = DEFAULT_MAX_MODELS, env = "FOX_MAX_MODELS")]
     pub max_models: usize,
 

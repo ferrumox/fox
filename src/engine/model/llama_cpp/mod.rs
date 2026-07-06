@@ -235,6 +235,52 @@ pub(crate) fn resolve_context_len(user_limit: Option<u32>, model_train_ctx: u32)
     user_limit.unwrap_or(model_train_ctx)
 }
 
+/// Human description of the active compute backend, read from the ggml devices
+/// registered by `ggml_backend_load_all`. Prefers a GPU/iGPU device (that is where
+/// inference runs when one is present); otherwise reports CPU. Shown at startup so
+/// users can tell whether they are running on the GPU.
+#[cfg(not(fox_stub))]
+pub(crate) fn active_backend_description() -> String {
+    use std::ffi::CStr;
+    let read = |p: *const std::os::raw::c_char| -> String {
+        if p.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+        }
+    };
+    let count = unsafe { ffi::ggml_backend_dev_count() };
+    let mut accelerator: Option<String> = None;
+    let mut has_cpu = false;
+    for i in 0..count {
+        let dev = unsafe { ffi::ggml_backend_dev_get(i) };
+        if dev.is_null() {
+            continue;
+        }
+        // 0 = CPU, 1 = GPU, 2 = iGPU.
+        match unsafe { ffi::ggml_backend_dev_type(dev) } {
+            0 => has_cpu = true,
+            _ if accelerator.is_none() => {
+                let name = read(unsafe { ffi::ggml_backend_dev_name(dev) });
+                let desc = read(unsafe { ffi::ggml_backend_dev_description(dev) });
+                accelerator = Some(if desc.is_empty() {
+                    name
+                } else {
+                    format!("{name} — {desc}")
+                });
+            }
+            _ => {}
+        }
+    }
+    accelerator.unwrap_or_else(|| {
+        if has_cpu {
+            "CPU".to_string()
+        } else {
+            "unknown".to_string()
+        }
+    })
+}
+
 /// Llama.cpp model via FFI.
 #[cfg(not(fox_stub))]
 pub struct LlamaCppModel {
@@ -607,6 +653,10 @@ impl Model for LlamaCppModel {
         self.effective_ctx
     }
 
+    fn active_backend(&self) -> String {
+        active_backend_description()
+    }
+
     fn kv_cache_capacity(&self) -> usize {
         // The real total KV capacity llama.cpp allocated for this context — read
         // back rather than recomputed, so fox's block pool matches it exactly.
@@ -742,6 +792,7 @@ impl Model for LlamaCppModel {
 
         ModelInfo {
             arch_name,
+            backend: self.active_backend(),
             n_embd: self.config.n_embd,
             n_head: self.config.num_heads,
             n_head_kv: self.config.num_heads_kv,
