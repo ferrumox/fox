@@ -9,39 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.15.0]
+## [0.15.1]
 
-fox gets **speculative decoding**. On single-request decode steps it guesses the next
-few tokens by matching the recent output against the request's own history (n-gram /
-prompt-lookup — no draft model, no extra memory) and verifies all the guesses in one
-forward pass. The output is provably unchanged — a fixed sampler produces byte-identical
-text with speculation on or off; only speed changes. Measured on a real model:
-**1.78× faster at 98% draft acceptance on repetitive output** (code edits, JSON, RAG),
-0.92× at 9% on free-form prose — which is why `--speculative` ships off by default.
-Acceptance is observable in Prometheus, and a new `fox bench-spec` quantifies the
-trade-off on any model. See `docs/design/speculative-decoding.md`.
-
-### Added
-
-- **Speculative decoding — n-gram / prompt-lookup** (`--speculative` /
-  `FOX_SPECULATIVE`, default off; `--spec-ngram`, default 2; `--spec-draft-len`,
-  default 4) — on single-request decode steps, fox guesses the next few tokens by
-  matching the recent output against the request's own history and verifies all the
-  guesses in **one** forward pass, committing however many the model agrees with.
-  Output is provably unchanged — every committed token is a genuine model sample, so a
-  fixed sampler produces byte-identical text with speculation on or off (golden
-  `golden_speculative_matches_greedy`); only speed changes. Fastest on
-  context-echoing output (code edits, JSON, RAG, repetition). Needs no draft model and
-  no extra memory. Skipped while a request uses guided decoding; multi-request batches
-  decode normally. Flagship of the 0.15 work (`docs/design/speculative-decoding.md`).
-- **Speculation observability** — Prometheus counters
-  `ferrumox_spec_tokens_proposed_total` / `ferrumox_spec_tokens_accepted_total` and the
-  `ferrumox_spec_acceptance_ratio` gauge report how well drafting is working on a live
-  server.
-- **`fox bench-spec`** — runs the same greedy generation with speculation off and on
-  (repetitive and prose workloads), reports tok/s, acceptance and speedup, and verifies
-  the off/on outputs are byte-identical — the exactness invariant checked end-to-end
-  (`docs/cli/bench-spec.md`).
+The bug-hunt release. Exercising a **real server end-to-end on the target machine**
+(and then code-hunting the subsystem boundaries that pattern pointed at) surfaced six
+pre-existing bugs that 173 unit + 39 integration + 11 golden tests all structurally
+missed — every one living at a crossing between subsystems (prefix cache × request
+lifecycle, rolling × speculation × KV capacity, embeddings × sequence pool). All six
+are fixed, and the layer that found them is now permanent: a strict end-to-end smoke
+suite (`make e2e`) that runs in CI on every push and gates every release.
 
 ### Fixed
 
@@ -77,7 +53,10 @@ trade-off on any model. See `docs/design/speculative-decoding.md`.
   out ids 0..max_batch, so under full concurrency an embedding request would clobber
   (then erase) a live generation's KV. Embeddings now use a dedicated slot allocated
   beyond the pool (`n_seq + 1`).
-- **New `make e2e` smoke suite** (`scripts/e2e_smoke.sh`) — starts a real server with
+
+### Added
+
+- **`make e2e` smoke suite** (`scripts/e2e_smoke.sh`) — starts a real server with
   a real model and drives it over HTTP across multiple requests: the prefix-cache
   donate→hit lifecycle, guided decoding, logprobs, sampling controls, the Ollama
   surface, speculation, streaming (SSE + NDJSON), four concurrent clients, a
@@ -86,6 +65,40 @@ trade-off on any model. See `docs/design/speculative-decoding.md`.
   CI's golden job on every push; it covers the cross-request layer that
   unit/golden/stub tests structurally cannot reach (which is exactly where all six
   bugs above were hiding).
+
+## [0.15.0]
+
+fox gets **speculative decoding**. On single-request decode steps it guesses the next
+few tokens by matching the recent output against the request's own history (n-gram /
+prompt-lookup — no draft model, no extra memory) and verifies all the guesses in one
+forward pass. The output is provably unchanged — a fixed sampler produces byte-identical
+text with speculation on or off; only speed changes. Measured on a real model:
+**1.78× faster at 98% draft acceptance on repetitive output** (code edits, JSON, RAG),
+0.92× at 9% on free-form prose — which is why `--speculative` ships off by default.
+Acceptance is observable in Prometheus, and a new `fox bench-spec` quantifies the
+trade-off on any model. See `docs/design/speculative-decoding.md`.
+
+### Added
+
+- **Speculative decoding — n-gram / prompt-lookup** (`--speculative` /
+  `FOX_SPECULATIVE`, default off; `--spec-ngram`, default 2; `--spec-draft-len`,
+  default 4) — on single-request decode steps, fox guesses the next few tokens by
+  matching the recent output against the request's own history and verifies all the
+  guesses in **one** forward pass, committing however many the model agrees with.
+  Output is provably unchanged — every committed token is a genuine model sample, so a
+  fixed sampler produces byte-identical text with speculation on or off (golden
+  `golden_speculative_matches_greedy`); only speed changes. Fastest on
+  context-echoing output (code edits, JSON, RAG, repetition). Needs no draft model and
+  no extra memory. Skipped while a request uses guided decoding; multi-request batches
+  decode normally. Flagship of the 0.15 work (`docs/design/speculative-decoding.md`).
+- **Speculation observability** — Prometheus counters
+  `ferrumox_spec_tokens_proposed_total` / `ferrumox_spec_tokens_accepted_total` and the
+  `ferrumox_spec_acceptance_ratio` gauge report how well drafting is working on a live
+  server.
+- **`fox bench-spec`** — runs the same greedy generation with speculation off and on
+  (repetitive and prose workloads), reports tok/s, acceptance and speedup, and verifies
+  the off/on outputs are byte-identical — the exactness invariant checked end-to-end
+  (`docs/cli/bench-spec.md`).
 
 ## [0.14.0]
 
