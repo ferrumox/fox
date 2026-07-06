@@ -319,6 +319,10 @@ pub struct LlamaCppModel {
     /// All end-of-generation token ids (`llama_vocab_is_eog`), precomputed once so
     /// `min_tokens` can mask them without a per-token vocab scan.
     pub(super) eog_tokens: Vec<i32>,
+    /// Sequence id reserved for embeddings (the extra `n_seq - 1` slot, OUTSIDE the
+    /// scheduler's 0..max_batch pool). Embeddings write + wipe this sequence per call;
+    /// using a pool id here would clobber a live generation's KV under load.
+    pub(super) embed_seq_id: i32,
     /// Effective per-sequence context length (tokens) used when creating the llama.cpp context.
     pub(super) effective_ctx: u32,
     /// Whether this instance owns the model pointer and should free it on drop.
@@ -478,7 +482,7 @@ impl LlamaCppModel {
 
         let mut ctx_params = unsafe { ffi::llama_context_default_params() };
         // n_seq_max controls how many concurrent sequences the KV cache tracks.
-        let n_seq = (max_batch_size as u32).max(4);
+        let n_seq = (max_batch_size as u32).max(4) + 1; // +1: dedicated embeddings slot (last id)
 
         // Resolve effective per-sequence context: use the user's explicit limit, or
         // auto-detect from the model's trained context length (llama_model_n_ctx_train).
@@ -543,6 +547,7 @@ impl LlamaCppModel {
             config,
             eos_token,
             eog_tokens,
+            embed_seq_id: (n_seq - 1) as i32,
             effective_ctx: effective_max_ctx,
             owns_model: true,
             chat_env: std::sync::OnceLock::new(),
@@ -569,7 +574,7 @@ impl LlamaCppModel {
         let model = self._model;
 
         let mut ctx_params = unsafe { ffi::llama_context_default_params() };
-        let n_seq = (max_batch_size as u32).max(4);
+        let n_seq = (max_batch_size as u32).max(4) + 1; // +1: dedicated embeddings slot (last id)
 
         let model_train_ctx = unsafe { ffi::llama_model_n_ctx_train(model.as_ptr()) } as u32;
         let effective_max_ctx = resolve_context_len(max_context_len, model_train_ctx);
@@ -616,6 +621,7 @@ impl LlamaCppModel {
             config: self.config.clone(),
             eos_token: self.eos_token,
             eog_tokens: self.eog_tokens.clone(),
+            embed_seq_id: (n_seq - 1) as i32,
             effective_ctx: effective_max_ctx,
             owns_model: false, // weights are owned by the original LlamaCppModel
             chat_env: std::sync::OnceLock::new(),

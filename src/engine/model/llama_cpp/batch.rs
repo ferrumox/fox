@@ -545,7 +545,9 @@ impl LlamaCppModel {
                 *batch.pos.add(i) = i as i32;
                 *batch.n_seq_id.add(i) = 1;
                 let arr = *batch.seq_id.add(i);
-                *arr.add(0) = 0; // dedicated seq slot for embeddings
+                // Dedicated embeddings slot, OUTSIDE the scheduler's seq pool: writing
+                // (and wiping, below) a pool id would clobber a live generation's KV.
+                *arr.add(0) = self.embed_seq_id;
                 *batch.logits.add(i) = 1i8; // mark every token for embedding output (mean-pooled below)
             }
             batch.n_tokens += 1;
@@ -603,7 +605,7 @@ impl LlamaCppModel {
         unsafe {
             let mem = ffi::llama_get_memory(ctx as *const _);
             if !mem.is_null() {
-                ffi::llama_memory_seq_rm(mem, 0, 0, -1);
+                ffi::llama_memory_seq_rm(mem, self.embed_seq_id, 0, -1);
             }
             ffi::llama_set_embeddings(ctx, false);
             ffi::llama_batch_free(batch);

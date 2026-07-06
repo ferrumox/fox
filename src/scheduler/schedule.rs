@@ -385,6 +385,15 @@ impl Scheduler {
                 continue;
             }
 
+            // A request that ROLLED its context must never donate: rolling removed the
+            // oldest KV cells and shifted the survivors down, so the cells now sitting
+            // at positions [0, cached_tokens) are mid-generation tokens, NOT the prompt
+            // prefix the cache key promises. A hit on such an entry would condition the
+            // next request on garbage — silently.
+            if req.rolled_tokens > 0 {
+                return None;
+            }
+
             let full_blocks = req.prompt_tokens.len() / block_size;
             if full_blocks == 0 {
                 return None; // prompt too short to cache even one block

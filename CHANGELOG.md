@@ -66,13 +66,26 @@ trade-off on any model. See `docs/design/speculative-decoding.md`.
   threshold now reserves the largest possible next step, so the window slides just
   before the boundary instead of the request dying on it. Found by the new
   context-fill e2e check on real hardware.
+- **Rolled generations no longer donate to the prefix cache** (silent-corruption
+  class, found by code-hunting subsystem boundaries). Rolling removes the oldest KV
+  cells and shifts the survivors down, so a rolled request's cells at positions
+  `[0, cached)` are mid-generation tokens — NOT the prompt prefix the cache key
+  promises. Donating them would make the next cache hit condition its generation on
+  garbage, with no visible error. Requests with `rolled_tokens > 0` now skip donation.
+- **Embeddings no longer share a KV sequence with generation.** `do_get_embeddings`
+  hardcoded sequence 0 and wiped it after every call — but the scheduler's pool hands
+  out ids 0..max_batch, so under full concurrency an embedding request would clobber
+  (then erase) a live generation's KV. Embeddings now use a dedicated slot allocated
+  beyond the pool (`n_seq + 1`).
 - **New `make e2e` smoke suite** (`scripts/e2e_smoke.sh`) — starts a real server with
   a real model and drives it over HTTP across multiple requests: the prefix-cache
   donate→hit lifecycle, guided decoding, logprobs, sampling controls, the Ollama
-  surface, speculation, streaming (SSE + NDJSON), four concurrent clients, and a
-  context-window fill that forces rolling mid-generation. Runs in CI's golden job on
-  every push; it covers the cross-request layer that unit/golden/stub tests
-  structurally cannot reach (which is exactly where all four bugs above were hiding).
+  surface, speculation, streaming (SSE + NDJSON), four concurrent clients, a
+  context-window fill that forces rolling mid-generation, a re-request after a rolled
+  generation, a mid-stream client disconnect, and embeddings alongside chat. Runs in
+  CI's golden job on every push; it covers the cross-request layer that
+  unit/golden/stub tests structurally cannot reach (which is exactly where all six
+  bugs above were hiding).
 
 ## [0.14.0]
 

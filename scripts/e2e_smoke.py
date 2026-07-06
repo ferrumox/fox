@@ -355,5 +355,94 @@ check(
     f"prompt={p} completions={n} total={p + n}",
 )
 
+# ── 11) re-request after a rolled generation (donate-after-roll guard) ───────
+# Check 10's request ROLLED its context. If it (wrongly) donated its prefix to the
+# cache, this identical prompt would hit an entry whose cells no longer hold the
+# prompt prefix — conditioning on garbage. Must still decode fully and healthily.
+print("11) same prompt again after the rolled generation")
+st, r = post(
+    "/v1/chat/completions",
+    {
+        "model": MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": filler + "\nNow keep listing words in that style forever.",
+            }
+        ],
+        "max_tokens": 16,
+        "min_tokens": 16,
+        "temperature": 0,
+    },
+)
+n = r.get("usage", {}).get("completion_tokens", 0) if st == 200 else 0
+check("decodes fully after prior roll", st == 200 and n >= 16, f"tokens={n}")
+
+# ── 12) client disconnect mid-stream, then a healthy request ─────────────────
+# Dropping the connection mid-generation triggers the engine's preempt path (clear
+# sequence, free grammar, recycle seq id). The NEXT request must be unaffected.
+print("12) disconnect mid-stream → next request healthy")
+try:
+    req = urllib.request.Request(
+        BASE + "/v1/chat/completions",
+        data=json.dumps(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Count to one hundred in words."}],
+                "max_tokens": 200,
+                "stream": True,
+            }
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    resp = urllib.request.urlopen(req, timeout=TIMEOUT)
+    for _ in range(3):  # read a few chunks, then hang up mid-generation
+        resp.readline()
+    resp.close()
+except Exception:  # noqa: BLE001 — the abort itself may raise; that's fine
+    pass
+st, r = post(
+    "/v1/chat/completions",
+    {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Count from one to fifty in words."}],
+        "max_tokens": 12,
+    },
+)
+n = r.get("usage", {}).get("completion_tokens", 0) if st == 200 else 0
+fin = r["choices"][0]["finish_reason"] if st == 200 else "?"
+check(
+    "request after disconnect decodes fully",
+    st == 200 and n >= 12 and fin == "length",
+    f"tokens={n} finish={fin}",
+)
+
+# ── 13) embeddings alongside generation ───────────────────────────────────────
+# Embeddings use a dedicated KV sequence outside the scheduler pool; they must not
+# perturb generation. Run an embed, then a strict chat request.
+print("13) embeddings then chat")
+st, r = post("/v1/embeddings", {"model": MODEL, "input": "The quick brown fox."})
+try:
+    vec = r["data"][0]["embedding"]
+    check("embedding vector non-degenerate", st == 200 and len(vec) > 64
+          and any(abs(x) > 1e-6 for x in vec), f"dim={len(vec)}")
+except Exception as e:  # noqa: BLE001
+    check("embedding vector non-degenerate", False, f"{e} resp={str(r)[:120]}")
+st, r = post(
+    "/v1/chat/completions",
+    {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Count from one to fifty in words."}],
+        "max_tokens": 12,
+    },
+)
+n = r.get("usage", {}).get("completion_tokens", 0) if st == 200 else 0
+fin = r["choices"][0]["finish_reason"] if st == 200 else "?"
+check(
+    "chat after embed decodes fully",
+    st == 200 and n >= 12 and fin == "length",
+    f"tokens={n} finish={fin}",
+)
+
 print(f"\n{'=' * 50}\nRESULT: {ok_count} passed, {fail_count} failed")
 sys.exit(1 if fail_count else 0)
