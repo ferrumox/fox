@@ -89,10 +89,8 @@ impl InferenceEngine {
                             e,
                             prefill_ids.len()
                         );
-                        // Clear each request's KV BEFORE its seq_id returns to the pool:
-                        // a failed llama_decode can leave partial cells behind, and the
-                        // next occupant of the seq would collide with them and fail too
-                        // (poisoned sequence).
+                        // Clear KV before the seq_id returns to the pool — a failed
+                        // llama_decode leaves partial cells that poison the next occupant.
                         for req in engine.scheduler.get_running(&prefill_ids) {
                             if req.kv_seq_id >= 0 {
                                 engine.model.clear_sequence(req.kv_seq_id);
@@ -159,12 +157,9 @@ impl InferenceEngine {
         if n_ctx == 0 {
             return;
         }
-        // Roll with enough headroom for the largest step the engine can submit next: a
-        // speculative verify batch writes up to draft_len + 1 cells before its rejects
-        // are pruned. Triggering exactly AT n_ctx is too late — the step that would
-        // cross the boundary fails (llama_decode "no KV slot") before the roll ever
-        // fires, killing the request at the boundary. Rolling a few tokens early just
-        // slides the window slightly sooner.
+        // Roll with headroom for the largest possible next step (a speculative verify
+        // batch writes up to draft_len + 1 cells): triggering exactly AT n_ctx is too
+        // late — the boundary-crossing step fails before the roll can fire.
         let reserve = self.speculative.map(|(_, d)| d + 1).unwrap_or(1);
         let threshold = n_ctx.saturating_sub(reserve);
         for req in self.scheduler.get_running(decode_ids) {

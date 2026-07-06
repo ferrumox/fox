@@ -207,12 +207,9 @@ impl InferenceEngine {
                         ) {
                         match self.scheduler.try_insert_prefix(*req_id) {
                             Some(cached_tokens) => {
-                                // Donated: trim the sequence's KV to exactly the cached
-                                // prefix. The boundary token (cached_tokens-1) is
-                                // re-submitted on a hit, so keep [0, cached_tokens-1).
-                                // Without this, the stale tail (rest of prompt +
-                                // generated tokens) collides with the next occupant's
-                                // prefill positions and llama_decode fails.
+                                // Keep exactly [0, cached-1): the boundary token is
+                                // re-submitted on a hit, and any stale tail would
+                                // collide with the next occupant's positions.
                                 self.model
                                     .trim_sequence(req.kv_seq_id, cached_tokens.saturating_sub(1));
                                 false

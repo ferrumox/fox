@@ -26,6 +26,10 @@ pub struct ModelRegistry {
     pub(crate) last_used: DashMap<String, Instant>,
     config: RegistryConfig,
     aliases: HashMap<String, String>,
+    /// Serializes model loading so two concurrent requests for the same cold model
+    /// don't both load it (double VRAM, and the second insert would drop the first
+    /// entry, aborting its in-flight generations).
+    load_lock: tokio::sync::Mutex<()>,
 }
 
 impl ModelRegistry {
@@ -38,6 +42,7 @@ impl ModelRegistry {
             last_used: DashMap::new(),
             config,
             aliases,
+            load_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -71,6 +76,14 @@ impl ModelRegistry {
             if let Ok(mut lru) = self.lru.lock() {
                 lru.get(&stem); // promotes
             }
+            self.last_used.insert(stem, Instant::now());
+            return Ok(entry.clone());
+        }
+
+        // Single-flight: serialize loads, then re-check — another request may have
+        // loaded this model while we waited for the lock.
+        let _load_guard = self.load_lock.lock().await;
+        if let Some(entry) = self.engines.get(&stem) {
             self.last_used.insert(stem, Instant::now());
             return Ok(entry.clone());
         }
@@ -110,20 +123,34 @@ impl ModelRegistry {
     }
 
     pub(crate) fn evict_lru_if_needed(&self) {
-        while self.engines.len() >= self.config.max_models {
+        // Never evict a model with requests in flight or queued — dropping its entry
+        // aborts the engine loop and kills those generations. A busy candidate is
+        // re-inserted as MRU; if everyone is busy we temporarily exceed max_models.
+        let mut attempts = self.engines.len();
+        while self.engines.len() >= self.config.max_models && attempts > 0 {
+            attempts -= 1;
             let lru_key = {
                 let mut lru = self.lru.lock().unwrap_or_else(|e| e.into_inner());
                 lru.pop_lru().map(|(k, _)| k)
             };
-            match lru_key {
-                Some(name) => {
-                    self.engines.remove(&name);
-                    self.last_used.remove(&name);
-                    tracing::info!("evicted model '{}' from registry (LRU)", name);
-                }
-                None => break,
+            let Some(name) = lru_key else { break };
+            if self.is_busy(&name) {
+                let mut lru = self.lru.lock().unwrap_or_else(|e| e.into_inner());
+                lru.put(name, ());
+                continue;
             }
+            self.engines.remove(&name);
+            self.last_used.remove(&name);
+            tracing::info!("evicted model '{}' from registry (LRU)", name);
         }
+    }
+
+    /// Whether a model currently has requests in flight or waiting.
+    fn is_busy(&self, name: &str) -> bool {
+        self.engines
+            .get(name)
+            .map(|e| e.engine.active_requests() > 0 || e.engine.queue_depth() > 0)
+            .unwrap_or(false)
     }
 
     pub(crate) fn evict_expired(&self) {
@@ -139,6 +166,11 @@ impl ModelRegistry {
             .map(|e| e.key().clone())
             .collect();
         for name in expired {
+            // last_used marks request START, so a long generation looks idle — never
+            // evict a busy model (it would be killed mid-generation).
+            if self.is_busy(&name) {
+                continue;
+            }
             self.unload(&name);
             tracing::info!("evicted model '{}' (keep-alive expired)", name);
         }
@@ -418,5 +450,48 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = ModelRegistry::new(minimal_cfg(dir.path(), 4, 0), HashMap::new());
         assert!(registry.resolve_model_name("doesnt-exist").is_err());
+    }
+    #[tokio::test]
+    async fn eviction_skips_models_with_requests_in_flight() {
+        use crate::scheduler::{InferenceRequest, SamplingParams};
+
+        let dir = tempfile::tempdir().unwrap();
+        // keep_alive = 1s so entries expire immediately for the test.
+        let registry = ModelRegistry::new(minimal_cfg(dir.path(), 4, 1), HashMap::new());
+
+        let entry = EngineEntry::for_test("busy");
+        // Abort the engine loop FIRST so a submitted request stays queued forever —
+        // a deterministic "busy" state (no race with the stub finishing it).
+        entry.loop_handle.abort();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        entry.engine.submit_request(InferenceRequest::new(
+            1,
+            vec![1, 2, 3],
+            4,
+            SamplingParams::default(),
+            tx,
+        ));
+        assert!(entry.engine.queue_depth() > 0, "request must be queued");
+
+        registry.preload_for_test("busy", entry.clone());
+        registry
+            .last_used
+            .insert("busy".into(), Instant::now() - Duration::from_secs(3600));
+
+        // Keep-alive sweep must SKIP the busy model instead of killing its work.
+        registry.evict_expired();
+        assert!(
+            registry.engines.contains_key("busy"),
+            "a model with queued requests must never be keep-alive evicted"
+        );
+
+        // Same for the LRU path: at capacity 1, loading pressure must not evict it.
+        let registry2 = ModelRegistry::new(minimal_cfg(dir.path(), 1, 0), HashMap::new());
+        registry2.preload_for_test("busy", entry);
+        registry2.evict_lru_if_needed();
+        assert!(
+            registry2.engines.contains_key("busy"),
+            "a busy model must never be LRU evicted"
+        );
     }
 }

@@ -181,11 +181,9 @@ pub struct InferenceRequest {
     pub prefix_seq_id: Option<i32>,
     /// Timestamp when the request was submitted (for latency metrics).
     pub submitted_at: std::time::Instant,
-    /// Total prompt tokens present in the sequence's KV once prefill completes —
-    /// donated prefix cells plus everything submitted (i.e. `prompt_tokens.len()`).
-    /// The decode position is derived from this, so it must equal the KV's true
-    /// length: recording only the *submitted* count made prefix-cache-hit requests
-    /// decode into occupied cells (llama_decode -1).
+    /// Total prompt tokens in the sequence's KV once prefill completes (donated
+    /// prefix + submitted = `prompt_tokens.len()`). The decode position derives from
+    /// this, so it must equal the KV's true length — never the submitted count.
     pub prefilled_tokens: usize,
     /// Absolute prompt position already placed in the KV cache while this request is
     /// still `Prefilling`. Prefill submits up to `max_prefill_chunk` tokens per step

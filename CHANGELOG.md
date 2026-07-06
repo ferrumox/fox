@@ -65,6 +65,23 @@ suite (`make e2e`) that runs in CI on every push and gates every release.
   unnecessary to begin with: a request that doesn't fit now simply waits (FIFO), and
   a request larger than the entire pool is rejected instead of blocking the queue
   head forever.
+- **Concurrent requests for a cold model no longer load it twice.** Two simultaneous
+  requests for an unloaded model both passed the "already loaded?" check and each
+  loaded the full GGUF (transient double VRAM — an OOM risk on iGPUs), and the second
+  registry insert dropped the first entry, aborting its in-flight generations. Loads
+  are now single-flight (serialized with a re-check).
+- **Eviction no longer kills models with requests in flight.** `last_used` marks
+  request *start*, so a long generation looked idle and the keep-alive sweep (default
+  300s) would evict — and thereby abort — it mid-generation; LRU eviction at capacity
+  had the same flaw. Both eviction paths now skip busy models (active or queued
+  requests).
+
+### Changed
+
+- **`InferenceEngine::new` takes an `EngineOptions` struct** (prefill chunking,
+  context shift, speculation) instead of a growing tail of positional
+  `Option` arguments; oversized war-story comments trimmed to their load-bearing
+  constraint; shared sampler-parameter construction deduplicated.
 
 ### Added
 

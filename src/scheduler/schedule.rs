@@ -94,10 +94,8 @@ impl Scheduler {
                 break;
             }
 
-            // A request that could NEVER fit (even into an empty pool) must not sit at
-            // the head of the queue forever, starving everyone behind it. Drop it: the
-            // response channel closes and the handler returns. Proper request-size
-            // validation at the API layer is backpressure work (0.16).
+            // Could never fit, even into an empty pool: drop it (channel closes)
+            // instead of blocking the queue head forever. API-side limits are 0.16.
             if self.blocks_needed(&req) > self.kv_cache.total_blocks() {
                 tracing::error!(
                     request_id = req.id,
@@ -378,11 +376,8 @@ impl Scheduler {
                 continue;
             }
 
-            // A request that ROLLED its context must never donate: rolling removed the
-            // oldest KV cells and shifted the survivors down, so the cells now sitting
-            // at positions [0, cached_tokens) are mid-generation tokens, NOT the prompt
-            // prefix the cache key promises. A hit on such an entry would condition the
-            // next request on garbage — silently.
+            // A rolled request's low KV positions no longer hold the prompt prefix
+            // the cache key promises — donating them would silently corrupt hits.
             if req.rolled_tokens > 0 {
                 return None;
             }

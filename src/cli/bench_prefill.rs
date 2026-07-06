@@ -22,7 +22,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::cli::{get_gpu_memory_bytes, get_total_gpu_memory_bytes, resolve_model_path, theme};
 use crate::engine::model::{LlamaCppModel, Model};
-use crate::engine::InferenceEngine;
+use crate::engine::{EngineOptions, InferenceEngine};
 use crate::kv_cache::KVCacheManager;
 use crate::model_registry::kv_type;
 use crate::scheduler::{InferenceRequest, SamplingParams};
@@ -160,9 +160,10 @@ async fn run_scenario(
         kv_cache,
         model_name.to_string(),
         None,
-        chunk, // the knob under test
-        None,  // no context rolling (benchmark)
-        None,  // no speculative decoding (benchmark)
+        EngineOptions {
+            max_prefill_chunk: chunk, // the knob under test
+            ..Default::default()
+        },
     ));
 
     let long_tokens = synth_long_prompt(&engine, args.long_prompt_tokens);

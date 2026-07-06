@@ -167,12 +167,9 @@ impl LlamaCppModel {
                 continue;
             }
 
-            // Final chunk: the sequence's KV now holds the WHOLE prompt — the donated
-            // prefix cells [0, effective_skip) plus everything submitted across chunks
-            // at [effective_skip, prompt_len). tokens_in_kv must be the total (not the
-            // submitted count): the scheduler derives the next decode POSITION from it,
-            // and reporting only the submitted count made hit requests decode
-            // `effective_skip` positions short — inside occupied cells → llama_decode -1.
+            // Final chunk: the KV now holds the WHOLE prompt (donated prefix +
+            // submitted chunks). The scheduler derives the next decode position from
+            // this, so it must be the total — never the submitted count.
             let tokens_in_kv = req.map(|r| r.prompt_tokens.len()).unwrap_or(0);
 
             let logits_ptr = unsafe { ffi::llama_get_logits_ith(ctx, batch_idx) };
@@ -281,20 +278,7 @@ impl LlamaCppModel {
     /// `logit_bias`, temperature, top-k/p, penalties). Without a grammar or an active
     /// EOG suppression it is exactly `sample_token`.
     pub(super) fn sample_constrained(&self, req: &InferenceRequestForModel, logits: &[f32]) -> i32 {
-        let params = SamplerParams {
-            temperature: req.temperature,
-            top_p: req.top_p,
-            top_k: req.top_k,
-            min_p: req.min_p,
-            repetition_penalty: req.repetition_penalty,
-            frequency_penalty: req.frequency_penalty,
-            presence_penalty: req.presence_penalty,
-            logit_bias: req.logit_bias.as_deref(),
-            generated_ids: &req.generated_token_ids,
-            seed: req.seed,
-            token_count: req.generated_tokens,
-        };
-
+        let params = Self::sampler_params(req, &req.generated_token_ids, req.generated_tokens);
         let grammar = req.grammar.as_deref();
         let suppress_eog = req.min_tokens > req.generated_tokens && !self.eog_tokens.is_empty();
 
@@ -303,21 +287,16 @@ impl LlamaCppModel {
             return sample_token(logits, params);
         }
 
-        // Otherwise build a working buffer: the grammar-masked logits if a grammar is
-        // set (falling back to a copy if it failed to parse), else a plain copy.
+        // Working buffer: grammar-masked logits when a grammar is set (plain copy if it
+        // failed to parse), else a plain copy.
         let mut buf = match grammar {
             Some(g) => self
                 .grammar_mask(req.id, g, logits)
                 .unwrap_or_else(|| logits.to_vec()),
             None => logits.to_vec(),
         };
-        // min_tokens: forbid end-of-generation until enough tokens have been produced.
         if suppress_eog {
-            for &id in &self.eog_tokens {
-                if (id as usize) < buf.len() {
-                    buf[id as usize] = f32::NEG_INFINITY;
-                }
-            }
+            self.mask_eog(&mut buf);
         }
 
         let tok = sample_token(&buf, params);
@@ -325,6 +304,37 @@ impl LlamaCppModel {
             self.grammar_accept(req.id, tok);
         }
         tok
+    }
+
+    /// Build `SamplerParams` from a request, with an explicit penalty context and
+    /// token count (they advance per position during speculative verification).
+    fn sampler_params<'a>(
+        req: &'a InferenceRequestForModel,
+        generated: &'a [i32],
+        token_count: usize,
+    ) -> SamplerParams<'a> {
+        SamplerParams {
+            temperature: req.temperature,
+            top_p: req.top_p,
+            top_k: req.top_k,
+            min_p: req.min_p,
+            repetition_penalty: req.repetition_penalty,
+            frequency_penalty: req.frequency_penalty,
+            presence_penalty: req.presence_penalty,
+            logit_bias: req.logit_bias.as_deref(),
+            generated_ids: generated,
+            seed: req.seed,
+            token_count,
+        }
+    }
+
+    /// Mask every end-of-generation token to `-inf` (min_tokens suppression).
+    fn mask_eog(&self, buf: &mut [f32]) {
+        for &id in &self.eog_tokens {
+            if (id as usize) < buf.len() {
+                buf[id as usize] = f32::NEG_INFINITY;
+            }
+        }
     }
 
     /// Mask every token the request's grammar forbids to `-inf`, creating the grammar
@@ -505,26 +515,10 @@ impl LlamaCppModel {
         generated: &[i32],
         gen_count: usize,
     ) -> i32 {
-        let params = SamplerParams {
-            temperature: req.temperature,
-            top_p: req.top_p,
-            top_k: req.top_k,
-            min_p: req.min_p,
-            repetition_penalty: req.repetition_penalty,
-            frequency_penalty: req.frequency_penalty,
-            presence_penalty: req.presence_penalty,
-            logit_bias: req.logit_bias.as_deref(),
-            generated_ids: generated,
-            seed: req.seed,
-            token_count: gen_count,
-        };
+        let params = Self::sampler_params(req, generated, gen_count);
         if req.min_tokens > gen_count && !self.eog_tokens.is_empty() {
             let mut buf = logits.to_vec();
-            for &id in &self.eog_tokens {
-                if (id as usize) < buf.len() {
-                    buf[id as usize] = f32::NEG_INFINITY;
-                }
-            }
+            self.mask_eog(&mut buf);
             sample_token(&buf, params)
         } else {
             sample_token(logits, params)
