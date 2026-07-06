@@ -141,7 +141,7 @@ KV cache (src/kv_cache/)
 1. Create `src/cli/<command>.rs` with a `<Command>Args` struct (clap `Parser`) and a `run_<command>()` async function
 2. Add the variant to the `Command` enum in `src/cli/mod.rs` and wire its match arm in `run()`
 3. Add documentation to `docs/cli/<command>.md`
-4. Add the new page to `mkdocs.yml` under `nav:`
+4. Place the page under `docs/` (readable directly on GitHub)
 
 ## Integration tests
 
