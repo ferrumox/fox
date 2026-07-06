@@ -53,6 +53,18 @@ suite (`make e2e`) that runs in CI on every push and gates every release.
   out ids 0..max_batch, so under full concurrency an embedding request would clobber
   (then erase) a live generation's KV. Embeddings now use a dedicated slot allocated
   beyond the pool (`n_seq + 1`).
+- **Admission no longer preempts running requests** (two bugs, one root). LIFO
+  preemption on admission could (a) resume a preempted request from the bare prompt
+  while its position counter still included the tokens already streamed to the client
+  — a positional gap in the KV producing a silently corrupted continuation — and
+  (b) **livelock**: when a newcomer and a running request couldn't fit together, the
+  newcomer evicted the runner *within the same scheduling step it was re-admitted*,
+  so neither ever reached the engine again (total starvation, reproduced by unit
+  test). Since fox fully reserves a request's blocks at admission (prompt +
+  max_new_tokens), running requests never grow and admission preemption was
+  unnecessary to begin with: a request that doesn't fit now simply waits (FIFO), and
+  a request larger than the entire pool is rejected instead of blocking the queue
+  head forever.
 
 ### Added
 

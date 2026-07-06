@@ -1,6 +1,7 @@
-// Continuous batching scheduler with LIFO preemption and prefix caching.
+// Continuous batching scheduler with prefix caching.
 // Flow: Waiting -> Prefilling -> Decoding -> Finished
-// When no KV blocks available, preempt LIFO (last admitted).
+// Blocks are fully reserved at admission, so admission never preempts: a request
+// that doesn't fit waits in the queue (FIFO) until running requests finish.
 
 mod batch;
 mod prefix_cache;
@@ -550,5 +551,123 @@ mod tests {
         // A second roll accumulates with the first.
         sched.record_context_roll(7, 20);
         assert_eq!(ctx_len(&sched), 51, "rolls accumulate");
+    }
+    #[test]
+    fn admission_never_preempts_running_requests() {
+        // Blocks are fully reserved at admission, so a newcomer that doesn't fit must
+        // WAIT — evicting the older running request would discard a generation whose
+        // text the client already received (and the pair can evict each other forever:
+        // the livelock this test originally exposed).
+        let config = ModelConfig {
+            num_layers: 2,
+            num_heads: 2,
+            num_heads_kv: 2,
+            head_dim: 64,
+            n_embd: 128,
+            vocab_size: 1000,
+        };
+        // A deliberately tiny pool: both requests cannot fit at once.
+        let kv = Arc::new(KVCacheManager::new(&config, 200_000, 0.5, 16, 1, 1));
+        let total = kv.total_blocks();
+        assert!(total >= 4, "pool too small to stage the scenario: {total}");
+        let sched = Scheduler::new(kv, 4);
+
+        // Request 1 reserves most of the pool and starts generating.
+        let prompt1: Vec<i32> = (0..16).collect();
+        let max_new1 = (total - 2) * 16 - prompt1.len();
+        let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel();
+        sched.submit(InferenceRequest::new(
+            1,
+            prompt1.clone(),
+            max_new1,
+            SamplingParams::default(),
+            tx1,
+        ));
+        let b = sched.schedule_step();
+        assert_eq!(b.prefill, vec![1], "request 1 admitted");
+        sched.set_prefilled_tokens(1, prompt1.len());
+        for tok in [101, 102, 103] {
+            sched.update_after_token(1, tok, tok == 101); // first token completes prefill
+        }
+
+        // Request 2 needs more blocks than remain. It must WAIT, not evict request 1.
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        sched.submit(InferenceRequest::new(
+            2,
+            (0..16).collect(),
+            32,
+            SamplingParams::default(),
+            tx2,
+        ));
+        let b = sched.schedule_step();
+        assert!(
+            b.preempted_seq_ids.is_empty(),
+            "admission must never preempt a running request"
+        );
+        assert_eq!(
+            b.decode,
+            vec![1],
+            "request 1 keeps running while request 2 waits"
+        );
+        assert_eq!(sched.queue_depth(), 1, "request 2 queued");
+        {
+            let running = sched.running_batch.lock().unwrap();
+            let r1 = running.iter().find(|r| r.id == 1).expect("req 1 running");
+            assert_eq!(r1.generated_tokens, 3, "generation state untouched");
+        }
+
+        // Once request 1 finishes, request 2 gets its turn.
+        sched.mark_finished(1, StopReason::Eos);
+        let b = sched.schedule_step();
+        assert_eq!(
+            b.prefill,
+            vec![2],
+            "request 2 admitted after request 1 finishes"
+        );
+    }
+
+    #[test]
+    fn oversized_request_is_rejected_not_queued_forever() {
+        // A request that could never fit even into an EMPTY pool must not block the
+        // queue head forever — it is dropped (channel closes) and the queue advances.
+        let config = ModelConfig {
+            num_layers: 2,
+            num_heads: 2,
+            num_heads_kv: 2,
+            head_dim: 64,
+            n_embd: 128,
+            vocab_size: 1000,
+        };
+        let kv = Arc::new(KVCacheManager::new(&config, 200_000, 0.5, 16, 1, 1));
+        let total = kv.total_blocks();
+        let sched = Scheduler::new(kv, 4);
+
+        // Oversized: needs more blocks than the entire pool.
+        let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel();
+        sched.submit(InferenceRequest::new(
+            1,
+            (0..16).collect(),
+            (total + 2) * 16,
+            SamplingParams::default(),
+            tx1,
+        ));
+        // A normal request queued behind it.
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        sched.submit(InferenceRequest::new(
+            2,
+            (0..16).collect(),
+            16,
+            SamplingParams::default(),
+            tx2,
+        ));
+
+        let b = sched.schedule_step();
+        assert_eq!(
+            b.prefill,
+            vec![2],
+            "the oversized request is dropped and the next one admitted"
+        );
+        assert_eq!(sched.queue_depth(), 0, "nothing left waiting");
+        assert_eq!(sched.active_requests(), 1, "only the normal request runs");
     }
 }
