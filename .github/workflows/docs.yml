@@ -43,6 +43,15 @@ jobs:
       - name: Build docs
         run: mkdocs build --strict
 
+      # Required for deploy-pages: registers/enables the Pages site with the
+      # "GitHub Actions" source. Without it, deployment fails on repos where
+      # Pages was never enabled manually (HttpError: Not Found).
+      - name: Setup Pages
+        if: github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - uses: actions/upload-pages-artifact@v3
         if: github.ref == 'refs/heads/main'
         with:

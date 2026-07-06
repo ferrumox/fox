@@ -98,4 +98,4 @@ llama-3.2-1B on CPU (single-threaded Docker):
 
 - [fox serve](./serve.md) — `--speculative`, `--spec-ngram`, `--spec-draft-len`
 - [fox bench](./bench.md) — single-request throughput and load time
-- [Speculative decoding design](../design/speculative-decoding.md) — how and why it's exact
+- [Speculative decoding design](https://github.com/ferrumox/fox/blob/main/docs/design/speculative-decoding.md) — how and why it's exact

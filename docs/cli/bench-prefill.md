@@ -111,4 +111,4 @@ single-shot prefill stalls everyone else, while chunked stays flat at ≈ one ch
 
 - [fox bench](./bench.md) — single-request throughput and load time
 - [fox bench-kv](./bench-kv.md) — compare KV cache quantization types
-- [Serving robustness design](../design/serving-robustness.md) — why chunked prefill exists
+- [Serving robustness design](https://github.com/ferrumox/fox/blob/main/docs/design/serving-robustness.md) — why chunked prefill exists
