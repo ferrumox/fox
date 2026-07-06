@@ -59,12 +59,20 @@ trade-off on any model. See `docs/design/speculative-decoding.md`.
   clear their sequence before the id returns to the pool, and the decode position is
   derived from the KV's total length. Guarded by a new golden
   (`golden_prefix_reuse_after_trim`) and the new end-to-end smoke suite.
+- **Context rolling now fires with headroom** — the roll triggered exactly *at*
+  `n_ctx`, but the step that would cross the boundary (up to `draft_len + 1` cells
+  for a speculative verify batch) failed with "no KV slot" *before* the roll ever got
+  its chance, killing long generations right at the context boundary. The roll
+  threshold now reserves the largest possible next step, so the window slides just
+  before the boundary instead of the request dying on it. Found by the new
+  context-fill e2e check on real hardware.
 - **New `make e2e` smoke suite** (`scripts/e2e_smoke.sh`) — starts a real server with
   a real model and drives it over HTTP across multiple requests: the prefix-cache
   donate→hit lifecycle, guided decoding, logprobs, sampling controls, the Ollama
-  surface, and speculation. Runs in CI's golden job on every push; it covers the
-  cross-request layer that unit/golden/stub tests structurally cannot reach (which is
-  exactly where the three bugs above were hiding).
+  surface, speculation, streaming (SSE + NDJSON), four concurrent clients, and a
+  context-window fill that forces rolling mid-generation. Runs in CI's golden job on
+  every push; it covers the cross-request layer that unit/golden/stub tests
+  structurally cannot reach (which is exactly where all four bugs above were hiding).
 
 ## [0.14.0]
 

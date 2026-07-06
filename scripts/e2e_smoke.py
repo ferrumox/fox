@@ -3,8 +3,10 @@
 
 Exercises the cross-request lifecycle and every user-facing 0.13–0.15 feature over
 real HTTP with a real model — the layer no unit/golden/stub test covers. This suite
-exists because that exact blind spot hid two prefix-cache lifecycle bugs (see
-CHANGELOG [0.15.0] Fixed).
+exists because that exact blind spot hid three prefix-cache lifecycle bugs (see
+CHANGELOG [0.15.0] Fixed). Beyond per-feature checks it covers streaming (SSE +
+NDJSON), concurrent clients (continuous batching on real KV), and a context-window
+fill that forces context rolling mid-generation.
 
 Usage:  e2e_smoke.py [BASE_URL]          (default http://127.0.0.1:8199)
 
@@ -226,6 +228,131 @@ check(
     "drafts proposed > 0",
     proposed > 0,
     f"proposed={proposed:.0f} accepted={accepted:.0f}",
+)
+
+# ── 8) streaming: SSE (OpenAI) and NDJSON (Ollama) ───────────────────────────
+print("8) streaming")
+
+
+def post_stream(path, body):
+    req = urllib.request.Request(
+        BASE + path,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        return [ln.decode().strip() for ln in r if ln.strip()]
+
+try:
+    lines = post_stream(
+        "/v1/chat/completions",
+        {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Count from one to ten in words."}],
+            "max_tokens": 10,
+            "stream": True,
+        },
+    )
+    datas = [ln[6:] for ln in lines if ln.startswith("data: ")]
+    chunks = [json.loads(d) for d in datas if d != "[DONE]"]
+    finished = any(
+        c["choices"][0].get("finish_reason") for c in chunks if c.get("choices")
+    )
+    check(
+        "SSE chunks + finish + [DONE]",
+        len(chunks) >= 3 and finished and datas[-1] == "[DONE]",
+        f"chunks={len(chunks)}",
+    )
+except Exception as e:  # noqa: BLE001
+    check("SSE chunks + finish + [DONE]", False, str(e))
+
+try:
+    lines = post_stream(
+        "/api/chat",
+        {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Count from one to ten in words."}],
+            "stream": True,
+            "options": {"num_predict": 10},
+        },
+    )
+    objs = [json.loads(ln) for ln in lines]
+    check(
+        "NDJSON chunks + done:true",
+        len(objs) >= 3 and objs[-1].get("done") is True,
+        f"chunks={len(objs)}",
+    )
+except Exception as e:  # noqa: BLE001
+    check("NDJSON chunks + done:true", False, str(e))
+
+# ── 9) concurrent clients: continuous batching on real KV ────────────────────
+# Four simultaneous requests — decode batches carry several sequences at once, the
+# path the sequential checks never exercise. STRICT: every request must decode fully.
+print("9) concurrent clients ×4")
+import threading  # noqa: E402
+
+results = [None] * 4
+
+
+def one_client(i):
+    st, r = post(
+        "/v1/chat/completions",
+        {
+            "model": MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"Count from {i + 1} to fifty in words, slowly.",
+                }
+            ],
+            "max_tokens": 12,
+        },
+    )
+    n = r.get("usage", {}).get("completion_tokens", 0) if st == 200 else 0
+    fin = r["choices"][0]["finish_reason"] if st == 200 else "?"
+    results[i] = (st, n, fin)
+
+
+threads = [threading.Thread(target=one_client, args=(i,)) for i in range(4)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+for i, (st, n, fin) in enumerate(results):
+    check(
+        f"client {i + 1} decodes fully",
+        st == 200 and n >= 12 and fin == "length",
+        f"tokens={n} finish={fin}",
+    )
+
+# ── 10) context fill → rolling keeps generating ──────────────────────────────
+# A medium prompt plus 1100 FORCED tokens (min_tokens suppresses EOS) always crosses
+# the server's 2048-token context regardless of tokenizer packing. Without context
+# rolling the decode fails at the boundary and the request dies early. This also
+# exercises rolling + speculation together on a live server.
+print("10) context fill → rolling (crosses n_ctx=2048)")
+filler = " ".join(["alpha bravo charlie delta echo foxtrot golf hotel"] * 130)
+st, r = post(
+    "/v1/chat/completions",
+    {
+        "model": MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": filler + "\nNow keep listing words in that style forever.",
+            }
+        ],
+        "max_tokens": 1100,
+        "min_tokens": 1100,
+        "temperature": 0,
+    },
+)
+n = r.get("usage", {}).get("completion_tokens", 0) if st == 200 else 0
+p = r.get("usage", {}).get("prompt_tokens", 0) if st == 200 else 0
+check(
+    "generation continues past n_ctx",
+    st == 200 and n >= 1100 and p + n > 2048,
+    f"prompt={p} completions={n} total={p + n}",
 )
 
 print(f"\n{'=' * 50}\nRESULT: {ok_count} passed, {fail_count} failed")

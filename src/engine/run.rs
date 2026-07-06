@@ -159,9 +159,17 @@ impl InferenceEngine {
         if n_ctx == 0 {
             return;
         }
+        // Roll with enough headroom for the largest step the engine can submit next: a
+        // speculative verify batch writes up to draft_len + 1 cells before its rejects
+        // are pruned. Triggering exactly AT n_ctx is too late — the step that would
+        // cross the boundary fails (llama_decode "no KV slot") before the roll ever
+        // fires, killing the request at the boundary. Rolling a few tokens early just
+        // slides the window slightly sooner.
+        let reserve = self.speculative.map(|(_, d)| d + 1).unwrap_or(1);
+        let threshold = n_ctx.saturating_sub(reserve);
         for req in self.scheduler.get_running(decode_ids) {
             let ctx_len = req.context_len();
-            if ctx_len < n_ctx || req.kv_seq_id < 0 {
+            if ctx_len < threshold || req.kv_seq_id < 0 {
                 continue;
             }
             // Preserve the head; discard half of what remains (at least one token). Keep
