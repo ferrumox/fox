@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // Default values for ServeArgs — centralised so grep/docs find them in one place.
 const DEFAULT_GPU_MEMORY_FRACTION: &str = "0.85";
 const DEFAULT_MAX_BATCH_SIZE: &str = "32";
+const DEFAULT_MAX_PREFILL_CHUNK: &str = "512";
 const DEFAULT_BLOCK_SIZE: &str = "16";
 const DEFAULT_HOST: &str = "0.0.0.0";
 const DEFAULT_PORT: &str = "8080";
@@ -43,6 +44,22 @@ pub struct ServeArgs {
     /// Maximum batch size for inference
     #[arg(long, default_value = DEFAULT_MAX_BATCH_SIZE, env = "FOX_MAX_BATCH_SIZE")]
     pub max_batch_size: usize,
+
+    /// Max prompt tokens prefilled per request per scheduler step (0 = single-shot).
+    /// Chunking a long prompt lets it interleave with other requests' token generation
+    /// instead of blocking the engine loop for the whole prefill.
+    #[arg(long, default_value = DEFAULT_MAX_PREFILL_CHUNK, env = "FOX_MAX_PREFILL_CHUNK")]
+    pub max_prefill_chunk: usize,
+
+    /// Roll the context window when a sequence fills n_ctx: discard the oldest KV window
+    /// and keep generating, instead of stopping the request with `length`. Automatically
+    /// skipped for recurrent/hybrid models whose KV cache cannot shift.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, env = "FOX_CONTEXT_SHIFT")]
+    pub context_shift: bool,
+
+    /// Tokens preserved at the front (BOS + system prompt) when the context is rolled.
+    #[arg(long, default_value = "0", env = "FOX_CONTEXT_KEEP")]
+    pub context_keep: usize,
 
     /// Tokens per KV block
     #[arg(long, default_value = DEFAULT_BLOCK_SIZE, env = "FOX_BLOCK_SIZE")]
@@ -242,6 +259,9 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         models_dir: models_dir.clone(),
         max_models: args.max_models.max(1),
         max_batch_size: args.max_batch_size,
+        max_prefill_chunk: args.max_prefill_chunk,
+        context_shift: args.context_shift,
+        context_keep: args.context_keep,
         max_context_len: args.max_context_len,
         block_size: args.block_size,
         gpu_memory_bytes,

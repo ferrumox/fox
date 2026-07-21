@@ -19,6 +19,9 @@ pub(super) async fn load_model(
     let path = path.to_path_buf();
     let name = name.to_string();
     let max_batch_size = cfg.max_batch_size;
+    let max_prefill_chunk = cfg.max_prefill_chunk;
+    // None disables context rolling; Some(n_keep) enables it, preserving n_keep head tokens.
+    let context_shift = cfg.context_shift.then_some(cfg.context_keep);
     let max_context_len = cfg.max_context_len;
     let gpu_memory_bytes = cfg.gpu_memory_bytes;
     let gpu_memory_fraction = cfg.gpu_memory_fraction;
@@ -79,7 +82,13 @@ pub(super) async fn load_model(
 
     let scheduler = Arc::new(Scheduler::new(kv_cache.clone(), max_batch_size));
     let engine = Arc::new(InferenceEngine::new(
-        model, scheduler, kv_cache, name, metrics,
+        model,
+        scheduler,
+        kv_cache,
+        name,
+        metrics,
+        max_prefill_chunk,
+        context_shift,
     ));
 
     let loop_handle = {

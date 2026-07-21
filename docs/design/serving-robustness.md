@@ -1,0 +1,111 @@
+# Serving robustness under load (0.13)
+
+fox is correct (0.11) and GPU-capable (0.12). 0.13 makes it hold up as an actual
+*server* under concurrent, long-prompt, long-conversation load on the target machine
+(AMD Ryzen + Radeon 890M, a few concurrent requests of small models).
+
+Three gaps from the [engine-capabilities checklist](engine-capabilities-checklist.md),
+in priority order:
+
+| Gap | Symptom today | Marked |
+|-----|---------------|--------|
+| **Chunked prefill** | a long prompt is one giant `llama_decode` that head-of-line-blocks every other request's decode until it finishes | 🎯❌ |
+| **Context rolling** | when a sequence fills `n_ctx`, `llama_decode` fails and the request is stopped with `Length` instead of continuing | ⚠️ |
+| **Template compile cache** | the model's Jinja chat template is re-parsed on every request (`vocab.rs` `TODO(perf)`) | perf |
+
+---
+
+## 1. Chunked prefill (flagship)
+
+### Problem
+
+`do_prefill` (`engine/model/llama_cpp/batch.rs`) submits **all** of a request's prompt
+tokens in a single `llama_batch` / `llama_decode`. `build.rs`/`mod.rs` even set
+`n_batch ≥ n_ctx` so the whole prompt fits in one pass. The engine loop
+(`engine/run.rs`) runs that decode synchronously before it can service anyone else, so
+a 4k-token prompt stalls every concurrent request's token generation for the full
+prefill. Under load this is the dominant tail-latency source.
+
+### Design
+
+Prefill each request's prompt in **chunks of at most `max_prefill_chunk` tokens per
+scheduler step**, interleaved with other requests' decode steps. A request stays in
+`Prefilling` across multiple steps until its prompt is fully in the KV cache; only the
+step that submits the *final* chunk requests logits and transitions it to `Decoding`.
+
+- New per-request cursor `prefill_pos: usize` — prompt tokens already placed in KV
+  (starts at `effective_skip` after a prefix-cache hit). Distinct from the existing
+  one-shot `prefilled_tokens` (which records the final total).
+- `schedule_step` keeps a `Prefilling` request in `running` and re-emits it in
+  `batch.prefill` each step until `prefill_pos == prompt_tokens.len()`. Decodes of
+  already-active requests are emitted in the same batch, so generation never stalls
+  for more than one chunk.
+- `do_prefill` submits only `prompt_tokens[prefill_pos .. prefill_pos + chunk]` with
+  absolute positions; `logits = 1` only on the very last prompt token (i.e. only when
+  the chunk reaches the end). Non-final chunks return no logits and advance the cursor.
+- Config: `--max-prefill-chunk` / `FOX_MAX_PREFILL_CHUNK` / config key, default `512`
+  (a good balance for the 890M — small enough to interleave, large enough to keep the
+  GPU busy). `0` disables chunking (single-shot, current behavior).
+
+### Invariants (guarded by tests)
+
+- A request's `prefill_pos` advances monotonically and equals `prompt_tokens.len()`
+  exactly when it leaves `Prefilling`.
+- KV/seq-id conservation continues to hold (reuse the
+  `stress_prefix_cache_no_leak` harness pattern; extend with chunked admissions).
+- No logits are consumed before the final chunk (no premature sampling).
+
+### Staging
+
+- **S1 — scheduler state machine + config** ✅ (stub-testable): `prefill_pos`, the
+  `Prefilling`-across-steps loop in `schedule_step`, the `--max-prefill-chunk` flag
+  (default 512). Unit test `chunked_prefill_stays_prefilling_until_complete` drives a
+  multi-step prefill and asserts re-emission + no premature completion.
+- **S2 — FFI batch** ✅ (real build, Docker/golden-verified): `do_prefill` submits one
+  chunk (`prompt_tokens[prefill_pos..prefill_pos+chunk]`, seq_cp only on the first
+  chunk, logits only on the last) and reports progress via `PrefillStep`; `run.rs` only
+  samples on completion. Golden `golden_chunked_prefill_matches_single_shot` proves a
+  chunked prefill picks the same next token as single-shot on a real model.
+- **S3 — validation** ✅: `fox bench-prefill` submits a long prompt and a concurrent
+  short request and reports the short request's *worst stall* (largest gap between its
+  tokens, including time-to-first-token) for each `--max-prefill-chunk` value. With
+  chunking on, that stall is bounded by one chunk's prefill; with chunking off
+  (single-shot) it balloons to the full long-prompt prefill, so a single run shows the
+  win as a ratio.
+
+## 2. Context rolling on full ✅
+
+When a decoding sequence's `context_len` reaches `n_ctx`, the engine discards the
+oldest KV window and shifts the survivors down so decode continues instead of stopping
+with `Length`.
+
+- **Trigger** (`engine/run.rs` `roll_full_contexts`, called before each decode batch):
+  a `Decoding` request whose `context_len() >= n_ctx` (the model's per-sequence
+  `context_len()`), on a shiftable cache.
+- **Roll** (`LlamaCppModel::roll_context`): keep the first `n_keep` tokens, discard the
+  next `n_discard = (context_len - n_keep) / 2`, shift the rest down —
+  `llama_memory_seq_rm(seq, n_keep, n_keep+n_discard)` then
+  `llama_memory_seq_add(seq, n_keep+n_discard, -1, -n_discard)`.
+- **Bookkeeping**: the request accumulates `rolled_tokens`; `context_len()` subtracts
+  it so the next decode position lines up with the shifted KV. `rolled_tokens` resets
+  on preemption (the KV, and any rolls, are gone).
+- **Recurrent/hybrid caches** (not shiftable — `supports_seq_copy()` is false) are
+  skipped and keep the "stop with `Length`" behavior.
+- **Config**: `--context-shift` / `FOX_CONTEXT_SHIFT` (default on) and `--context-keep`
+  / `FOX_CONTEXT_KEEP` (default 0, the preserved head). Off in single-shot benches; on
+  for `fox serve` and `fox run`.
+- **Tests**: `context_roll_reduces_logical_context_len` (scheduler math, stub) and
+  golden `golden_context_shift_continues_past_n_ctx` (real model: decode far past a
+  tiny `n_ctx`, asserting every post-roll `llama_decode` still yields finite logits).
+
+## 3. Template compile cache
+
+Build the `minijinja::Environment` (pycompat callback + the model's chat template added
+once) at model load and reuse it, instead of re-parsing per request in
+`render_chat_jinja`. Store as an owned `Environment<'static>` on the model. Pure perf;
+behavior-identical, so the existing golden template assertions cover it.
+
+---
+
+Each item ships independently and is gated by the regression net from 0.12 (golden in
+CI + the scheduler conservation stress test).

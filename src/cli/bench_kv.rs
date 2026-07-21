@@ -131,6 +131,8 @@ async fn run_one_type(
         kv_cache,
         model_name.to_string(),
         None,
+        0,    // single-shot prefill (benchmark)
+        None, // no context rolling (benchmark)
     ));
 
     let messages = vec![

@@ -73,6 +73,9 @@ impl InferenceEngine {
             }
 
             if !decode_ids.is_empty() {
+                // Before decoding, roll any sequence whose KV window is full so it can
+                // continue past n_ctx instead of failing (context shift).
+                engine.roll_full_contexts(&decode_ids).await;
                 match engine.run_decode(&decode_ids).await {
                     Ok(decode_results) => {
                         engine.handle_logits(&decode_results, false).await?;
@@ -89,6 +92,65 @@ impl InferenceEngine {
                             engine.scheduler.mark_finished(*req_id, StopReason::Length);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// Roll the KV window of any decoding request that has filled the context.
+    ///
+    /// When context shift is enabled (`context_shift = Some(n_keep)`) and the model's
+    /// KV cache is shiftable, a request whose `context_len` has reached `n_ctx` has its
+    /// oldest half (after the preserved `n_keep`-token head) discarded and the survivors
+    /// shifted down, then its logical length is reduced by the same amount so subsequent
+    /// decode positions line up with the shifted KV. Recurrent/hybrid caches (not
+    /// shiftable) are skipped — those requests hit the decode error path and stop with
+    /// `Length`, the pre-context-shift behavior.
+    async fn roll_full_contexts(&self, decode_ids: &[u64]) {
+        let Some(n_keep_cfg) = self.context_shift else {
+            return;
+        };
+        // Recurrent/hybrid caches can't shift positions — leave today's behavior.
+        if !self.supports_prefix_cache {
+            return;
+        }
+        let n_ctx = self.model.context_len() as usize;
+        if n_ctx == 0 {
+            return;
+        }
+        for req in self.scheduler.get_running(decode_ids) {
+            let ctx_len = req.context_len();
+            if ctx_len < n_ctx || req.kv_seq_id < 0 {
+                continue;
+            }
+            // Preserve the head; discard half of what remains (at least one token). Keep
+            // at least one token beyond the head so the shifted tail is non-empty.
+            let n_keep = n_keep_cfg.min(n_ctx.saturating_sub(1));
+            let n_discard = (ctx_len.saturating_sub(n_keep) / 2).max(1);
+            let seq_id = req.kv_seq_id;
+            let model = self.model.clone();
+            let res =
+                tokio::task::spawn_blocking(move || model.roll_context(seq_id, n_keep, n_discard))
+                    .await;
+            match res {
+                Ok(Ok(())) => {
+                    self.scheduler.record_context_roll(req.id, n_discard);
+                    tracing::info!(
+                        request_id = req.id,
+                        seq_id,
+                        n_keep,
+                        n_discard,
+                        ctx_len,
+                        n_ctx,
+                        "rolled full context window to keep generating"
+                    );
+                }
+                Ok(Err(e)) => tracing::warn!(
+                    request_id = req.id,
+                    "context roll failed: {e} — request will stop with Length"
+                ),
+                Err(e) => {
+                    tracing::warn!(request_id = req.id, "context roll join error: {e}")
                 }
             }
         }
@@ -116,6 +178,7 @@ impl InferenceEngine {
                 generated_token_ids: r.generated_token_ids.clone(),
                 skip_prefix_tokens: r.skip_prefix_tokens,
                 prefix_seq_id: r.prefix_seq_id,
+                prefill_pos: r.prefill_pos,
             })
             .collect();
 
@@ -126,27 +189,35 @@ impl InferenceEngine {
 
         let model = self.model.clone();
         let req_ids_vec = req_ids.to_vec();
-        let raw =
-            tokio::task::spawn_blocking(move || model.prefill_sync(&req_ids_vec, &model_requests))
-                .await
-                .map_err(|e| anyhow::anyhow!("prefill spawn_blocking: {}", e))??;
+        let max_chunk = self.max_prefill_chunk;
+        let raw = tokio::task::spawn_blocking(move || {
+            model.prefill_sync(&req_ids_vec, &model_requests, max_chunk)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("prefill spawn_blocking: {}", e))??;
 
         for prefix_seq_id in prefix_cleanup {
             self.model.clear_sequence(prefix_seq_id);
             self.scheduler.return_prefix_seq_id(prefix_seq_id);
         }
 
-        // Register how many tokens were actually placed in the KV for each request so
-        // decode positions are consecutive (no gaps for recurrent/hybrid models).
-        let result = raw
-            .into_iter()
-            .map(|(id, logits, tokens_in_kv)| {
-                if tokens_in_kv > 0 {
-                    self.scheduler.set_prefilled_tokens(id, tokens_in_kv);
-                }
-                (id, logits)
-            })
-            .collect();
+        // Advance each request's prefill cursor. A request only carries `logits` (and a
+        // non-zero `tokens_in_kv`) on its FINAL chunk; intermediate chunks just move the
+        // cursor forward and stay `Prefilling`, so they are re-emitted next step. Only
+        // completed requests reach `handle_logits` (which samples the first token and
+        // transitions them to `Decoding`).
+        let mut result = Vec::with_capacity(raw.len());
+        for step in raw {
+            self.scheduler
+                .advance_prefill(step.req_id, step.prefill_pos);
+            if step.tokens_in_kv > 0 {
+                self.scheduler
+                    .set_prefilled_tokens(step.req_id, step.tokens_in_kv);
+            }
+            if let Some(logits) = step.logits {
+                result.push((step.req_id, logits));
+            }
+        }
 
         Ok(result)
     }
@@ -202,6 +273,7 @@ impl InferenceEngine {
                 generated_token_ids: r.generated_token_ids.clone(),
                 skip_prefix_tokens: 0,
                 prefix_seq_id: None,
+                prefill_pos: r.prefill_pos,
             })
             .collect();
         let model = self.model.clone();

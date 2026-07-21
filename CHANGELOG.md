@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-21
+
+fox becomes a real server under concurrent, long-prompt, long-conversation load. The
+three serving-robustness gaps from the 0.12 capabilities checklist are closed
+(`docs/design/serving-robustness.md`): **chunked prefill** breaks a long prompt into
+per-step chunks so it interleaves with other requests' generation instead of
+head-of-line-blocking the engine loop; **context rolling** discards the oldest KV
+window when a conversation fills `n_ctx` so generation continues instead of stopping
+with `length`; and the **Jinja chat template is compiled once and cached** instead of
+re-parsed on every request. A new `fox bench-prefill` quantifies the chunked-prefill
+win, and every change rides the 0.12 regression net (golden tests in CI + the scheduler
+conservation stress test).
+
+### Added
+
+- **Chunked prefill** (`--max-prefill-chunk` / `FOX_MAX_PREFILL_CHUNK`, default 512) —
+  a long prompt is now prefilled in chunks of at most N tokens per scheduler step
+  instead of one giant `llama_decode`, so it interleaves with other requests' token
+  generation instead of head-of-line-blocking the whole engine loop. A request stays
+  `Prefilling` across steps until its prompt is fully in the KV cache, then samples and
+  moves to `Decoding`. `0` disables chunking (single-shot). Verified byte-for-byte
+  equivalent to single-shot on a real model (`golden_chunked_prefill_matches_single_shot`)
+  plus a scheduler state-machine unit test. First flagship item of the 0.13
+  serving-robustness work (`docs/design/serving-robustness.md`).
+- **`fox bench-prefill`** — a validation benchmark for chunked prefill. It submits a
+  long prompt and a concurrent short request, then reports the short request's *worst
+  stall* (largest gap between its tokens, including time-to-first-token) for each
+  `--max-prefill-chunk` value. Chunking bounds that stall to one chunk's prefill;
+  single-shot (`--chunks 0`) balloons it to the full long-prompt prefill, so one run
+  quantifies the win (`docs/cli/bench-prefill.md`).
+- **Context rolling on full** (`--context-shift` / `FOX_CONTEXT_SHIFT`, default on;
+  `--context-keep` / `FOX_CONTEXT_KEEP`, default 0) — when a conversation fills the
+  context window, fox now discards the oldest KV window (preserving the first
+  `--context-keep` head tokens) and shifts the rest down via `llama_memory_seq_rm` +
+  `llama_memory_seq_add`, so generation continues instead of stopping the request with
+  `length`. Recurrent/hybrid models whose KV cache can't shift keep the old
+  stop-with-`length` behavior. Verified on a real model
+  (`golden_context_shift_continues_past_n_ctx`) plus a scheduler unit test. Second
+  serving-robustness item of 0.13 (`docs/design/serving-robustness.md`).
+
+### Changed
+
+- **Chat template compiled once, not per request** — the model's Jinja chat template
+  was re-parsed on every chat request. The `minijinja` environment (with the template
+  parsed and the pycompat callback installed) is now built lazily and cached on the
+  model, so only the render runs per request. Behaviour-identical; covered by a new
+  golden test (`golden_chat_template_renders`) that asserts a non-empty, deterministic
+  render across calls. First item of the 0.13 serving-robustness work
+  (`docs/design/serving-robustness.md`).
+
 ## [0.12.0] - 2026-07-06
 
 GPU inference becomes a first-class, reproducible path, and the model-architecture

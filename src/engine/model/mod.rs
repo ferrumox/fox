@@ -62,6 +62,23 @@ impl Logits {
     }
 }
 
+/// Result of one prefill step for a request. When the prompt is chunked
+/// (`max_prefill_chunk`), prefill spans several steps, so a step reports how far it
+/// advanced and carries `logits` only on the **final** chunk (once the last prompt
+/// token has been submitted and sampled).
+#[derive(Debug, Clone)]
+pub struct PrefillStep {
+    pub req_id: u64,
+    /// Absolute prompt position now in the KV cache — the next chunk starts here.
+    pub prefill_pos: usize,
+    /// Sampled logits. `Some` only on the final chunk (prompt fully prefilled);
+    /// `None` for intermediate chunks (no token is sampled yet).
+    pub logits: Option<Logits>,
+    /// Total prompt tokens submitted to llama.cpp for this request. Non-zero only on
+    /// the final chunk; the engine records it as the request's `prefilled_tokens`.
+    pub tokens_in_kv: usize,
+}
+
 /// Inference request (minimal view for model).
 #[derive(Debug, Clone)]
 pub struct InferenceRequestForModel {
@@ -98,6 +115,11 @@ pub struct InferenceRequestForModel {
     /// `llama_memory_seq_cp` to transfer positions 0..skip_prefix_tokens before adding
     /// the remaining tokens to the batch.
     pub prefix_seq_id: Option<i32>,
+    /// Absolute prompt position where this prefill call should start submitting tokens.
+    /// Advances by up to `max_prefill_chunk` each call until it reaches
+    /// `prompt_tokens.len()`. Starts at the effective skip (0, or the prefix-hit
+    /// boundary). Lets a long prompt be prefilled in chunks across scheduler steps.
+    pub prefill_pos: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -107,14 +129,19 @@ pub struct InferenceRequestForModel {
 /// Backend model trait.
 pub trait Model: Send + Sync {
     /// Sync prefill (called by engine from spawn_blocking).
-    /// Returns `(req_id, logits, tokens_submitted)` — `tokens_submitted` is how many tokens
-    /// were actually placed in the KV cache for each request (may differ from
-    /// `prompt_tokens.len()` when effective_skip > 0).
+    ///
+    /// Submits at most `max_prefill_chunk` prompt tokens per request per call (0 =
+    /// unbounded, single-shot), starting at each request's `prefill_pos`. Returns one
+    /// [`PrefillStep`] per request reporting the new `prefill_pos` and, once the prompt
+    /// is fully prefilled, the sampled `logits` and total `tokens_in_kv`. Chunking lets
+    /// a long prompt interleave with other requests' decode steps instead of blocking
+    /// the engine loop for the whole prefill.
     fn prefill_sync(
         &self,
         req_ids: &[u64],
         requests: &[InferenceRequestForModel],
-    ) -> Result<Vec<(u64, Logits, usize)>>;
+        max_prefill_chunk: usize,
+    ) -> Result<Vec<PrefillStep>>;
 
     /// Sync decode step (called by engine from spawn_blocking).
     fn decode_sync(
@@ -209,6 +236,17 @@ pub trait Model: Send + Sync {
     /// prompt matches a completed one, we copy the KV data so only the non-cached suffix
     /// needs to be computed.
     fn copy_sequence_range(&self, src_seq_id: i32, dst_seq_id: i32, token_count: i32);
+
+    /// Roll a sequence's KV window when it fills the context: discard the `n_discard`
+    /// oldest tokens *after* the preserved head of `n_keep` tokens (e.g. BOS + system
+    /// prompt) and shift the survivors down by `n_discard`, so decode can continue past
+    /// `n_ctx` instead of `llama_decode` failing. Requires a shiftable KV cache
+    /// (`supports_seq_copy()` / `llama_memory_can_shift`); the caller only invokes this
+    /// for models where that holds. Default: no-op success (stub models never reach the
+    /// context limit in tests).
+    fn roll_context(&self, _seq_id: i32, _n_keep: usize, _n_discard: usize) -> Result<()> {
+        Ok(())
+    }
 
     /// Returns true if the loaded model's memory backend supports sequence copying
     /// (`llama_memory_seq_cp`).  Standard transformer (attention-only) models return true;

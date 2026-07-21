@@ -58,20 +58,20 @@ sliding window, MLA, state-space). This is why a single source of truth (`ModelI
 
 ## 4. Inference features
 
-**Sampling:** ✅ temp, top_p, top_k, seed, repetition_penalty · ⚠️ frequency/presence_penalty
-(accepted but **ignored**) · ❌ min_p, typical_p, mirostat, logit_bias, min_tokens.
+**Sampling:** ✅ temp, top_p, top_k, seed, repetition_penalty, frequency/presence_penalty
+(additive, OpenAI semantics) · ❌ min_p, typical_p, mirostat, logit_bias, min_tokens.
 
 **Decoding / scheduling:**
 
 | | Feature | fox |
 |---|---------|-----|
 | ✅ | Continuous batching; paged KV + ref-count + CoW; automatic prefix caching; text stop sequences | |
-| 🎯❌ | Chunked prefill | without it, a long prompt head-of-line-blocks others — key for stability under load |
+| 🎯✅ | Chunked prefill | `--max-prefill-chunk` (default 512): a long prompt is prefilled in chunks across scheduler steps, interleaved with other requests' decode |
 | ❌ | Speculative decoding (draft / n-gram / EAGLE) | |
 | ❌ | Guided/structured decoding (grammar / JSON-schema / regex) | prompt-only today |
 | ⚠️ | Tool/function calling | generic prompt-based, no per-model parsers |
 | ❌ | `n>1` / best_of / beam search; logprobs / echo | |
-| ⚠️ | Context management: RoPE scaling partial; **no context-shift/rolling** when context fills | |
+| ⚠️ | Context management: RoPE scaling partial; **context-shift/rolling** on full (`--context-shift`, shiftable caches) ✅; RoPE scaling still not exposed | |
 | ❌ | LoRA / adapters (incl. multi-LoRA) | |
 | ⚠️ | Thinking/reasoning (`<think>` separation) | fragile heuristic |
 
