@@ -16,7 +16,7 @@
 // coverage to another architecture class (MoE / MLA / recurrent / embeddings),
 // cache another tiny GGUF in that job and pass it through, per the support matrix.
 
-use crate::engine::model::{LlamaCppModel, Model};
+use crate::engine::model::{InferenceRequestForModel, LlamaCppModel, Logits, Model};
 use crate::model_registry::kv_type;
 
 /// Load the model named by FOX_GOLDEN_MODEL, or `None` (→ the test skips).
@@ -111,6 +111,182 @@ fn golden_embeddings_nondegenerate() {
         norm.is_finite() && norm > 0.0,
         "embedding L2 norm must be finite and > 0 (got {norm})"
     );
+}
+
+/// The chat template must render to a non-empty prompt, and — because the compiled
+/// `minijinja::Environment` is cached after the first call — rendering the same
+/// messages twice must be byte-for-byte identical. Guards the template-cache change.
+#[test]
+fn golden_chat_template_renders() {
+    let m = golden!();
+    let messages = vec![
+        (
+            "system".to_string(),
+            "You are a helpful assistant.".to_string(),
+        ),
+        ("user".to_string(), "Say hi in one word.".to_string()),
+    ];
+
+    let first = m
+        .build_prompt_tokens(&messages, false)
+        .expect("build_prompt_tokens should succeed");
+    assert!(
+        !first.is_empty(),
+        "rendered chat prompt tokenized to nothing"
+    );
+
+    // Second call hits the cached environment — output must be identical.
+    let second = m
+        .build_prompt_tokens(&messages, false)
+        .expect("second build_prompt_tokens should succeed");
+    assert_eq!(
+        first, second,
+        "cached template render must be deterministic across calls"
+    );
+}
+
+/// Chunked prefill (0.13, S2) must produce the SAME result as single-shot prefill.
+/// Prefilling a prompt in small chunks across steps places the exact same tokens at
+/// the exact same positions in the KV cache, so the final-position logits must pick
+/// the same next token. Run on two separate sequences so they don't interfere.
+#[test]
+fn golden_chunked_prefill_matches_single_shot() {
+    let m = golden!();
+    let prompt = m
+        .tokenize("The quick brown fox jumps over the lazy dog and keeps on running through the forest at dawn.")
+        .unwrap();
+    assert!(
+        prompt.len() > 8,
+        "need a multi-chunk prompt to be meaningful"
+    );
+
+    let mk_req = |seq_id: i32, prefill_pos: usize| InferenceRequestForModel {
+        id: 1,
+        prompt_tokens: prompt.clone(),
+        last_token: None,
+        generated_tokens: 0,
+        max_new_tokens: 1,
+        context_len: 0,
+        kv_seq_id: seq_id,
+        temperature: 0.0,
+        top_p: 1.0,
+        top_k: 0,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        seed: None,
+        generated_token_ids: vec![],
+        skip_prefix_tokens: 0,
+        prefix_seq_id: None,
+        prefill_pos,
+    };
+
+    // argmax of the final-position logits — robust to tiny fp reduction-order diffs.
+    let argmax = |l: &Logits| -> usize {
+        l.values
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i)
+            .expect("non-empty logits")
+    };
+
+    // Single-shot prefill on sequence 0.
+    let single = m.do_prefill(&[1], &[mk_req(0, 0)], 0).unwrap();
+    let single_logits = single[0].logits.clone().expect("single-shot completes");
+
+    // Chunked prefill (4 tokens/step) on sequence 1, looping until the cursor reaches
+    // the prompt end. Only the final step carries logits.
+    let mut pos = 0usize;
+    let mut chunked_logits = None;
+    let mut steps = 0;
+    while pos < prompt.len() {
+        let out = m.do_prefill(&[1], &[mk_req(1, pos)], 4).unwrap();
+        pos = out[0].prefill_pos;
+        if let Some(l) = &out[0].logits {
+            chunked_logits = Some(l.clone());
+        }
+        steps += 1;
+        assert!(steps <= prompt.len(), "chunk loop failed to advance");
+    }
+    let chunked_logits = chunked_logits.expect("chunked prefill eventually completes");
+
+    assert!(steps > 1, "chunk size 4 should take several steps");
+    assert_eq!(
+        argmax(&single_logits),
+        argmax(&chunked_logits),
+        "chunked prefill must pick the same next token as single-shot"
+    );
+}
+
+/// Context rolling (0.13) must let a sequence keep decoding past its `n_ctx`.
+/// We prefill a short prompt, then decode token-by-token; when the KV window fills,
+/// we roll it (discard the oldest half after a small head, shift the rest down) and
+/// keep going. Every `llama_decode` after the roll must still succeed and produce
+/// finite logits — proving the shifted KV is a valid, continuable state.
+#[test]
+fn golden_context_shift_continues_past_n_ctx() {
+    let m = golden!();
+
+    // A tiny working window so we hit the limit after a handful of decodes.
+    let n_ctx: usize = 48;
+    let n_keep: usize = 4;
+
+    let prompt = m.tokenize("The lazy dog").unwrap();
+    assert!(prompt.len() < n_ctx, "prompt must fit the tiny window");
+
+    let mk_req = |last: Option<i32>, ctx_len: usize| InferenceRequestForModel {
+        id: 1,
+        prompt_tokens: prompt.clone(),
+        last_token: last,
+        generated_tokens: 0,
+        max_new_tokens: 1,
+        context_len: ctx_len,
+        kv_seq_id: 0,
+        temperature: 0.0,
+        top_p: 1.0,
+        top_k: 0,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        seed: None,
+        generated_token_ids: vec![],
+        skip_prefix_tokens: 0,
+        prefix_seq_id: None,
+        prefill_pos: 0,
+    };
+
+    // Prefill the prompt on seq 0.
+    let pre = m.do_prefill(&[1], &[mk_req(None, 0)], 0).unwrap();
+    let mut next = pre[0].logits.clone().unwrap().sampled_token;
+    // Live length of the sequence in the KV cache (== next write position).
+    let mut live = prompt.len();
+    // Absolute count of tokens generated (drives context_len before subtracting rolls).
+    let mut rolled = 0usize;
+
+    // Decode well past n_ctx — without rolling this would fail once live == n_ctx.
+    for step in 0..(n_ctx * 3) {
+        if live >= n_ctx {
+            let n_discard = ((live - n_keep) / 2).max(1);
+            m.roll_context(0, n_keep, n_discard)
+                .expect("shiftable KV must roll");
+            live -= n_discard;
+            rolled += n_discard;
+        }
+
+        // context_len passed to the model = live length (raw count minus rolled).
+        let ctx_len = live + 1; // this token will be written at position `live`
+        let out = m.do_decode(&[1], &[mk_req(Some(next), ctx_len)]).unwrap();
+        let logits = &out[0].1;
+        assert!(
+            logits.values.iter().all(|v| v.is_finite()),
+            "logits after roll must be finite (step {step}, rolled {rolled})"
+        );
+        next = logits.sampled_token;
+        live += 1;
+    }
+
+    assert!(rolled > 0, "the loop must have triggered at least one roll");
 }
 
 /// tokenize → detokenize must reconstruct tricky text. Uses the raw-byte piece

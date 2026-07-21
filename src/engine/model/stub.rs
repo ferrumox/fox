@@ -3,7 +3,7 @@
 use anyhow::Result;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{InferenceRequestForModel, Logits, Model, ModelConfig};
+use super::{InferenceRequestForModel, Logits, Model, ModelConfig, PrefillStep};
 
 pub struct StubModel;
 
@@ -12,13 +12,18 @@ impl Model for StubModel {
         &self,
         req_ids: &[u64],
         requests: &[InferenceRequestForModel],
-    ) -> Result<Vec<(u64, Logits, usize)>> {
+        _max_prefill_chunk: usize,
+    ) -> Result<Vec<PrefillStep>> {
+        // The stub prefills the whole prompt in one step; every request completes.
         Ok(req_ids
             .iter()
             .zip(requests.iter())
-            .map(|(&id, r)| {
+            .map(|(&id, r)| PrefillStep {
+                req_id: id,
+                prefill_pos: r.prompt_tokens.len(),
                 // Return a non-EOS token so the engine emits one text token.
-                (id, Logits::new(vec![], 65), r.prompt_tokens.len())
+                logits: Some(Logits::new(vec![], 65)),
+                tokens_in_kv: r.prompt_tokens.len(),
             })
             .collect())
     }
@@ -127,11 +132,19 @@ impl Model for ThinkingStubModel {
         &self,
         req_ids: &[u64],
         requests: &[InferenceRequestForModel],
-    ) -> Result<Vec<(u64, Logits, usize)>> {
+        _max_prefill_chunk: usize,
+    ) -> Result<Vec<PrefillStep>> {
+        // The stub prefills the whole prompt in one step (chunking is a real-model
+        // concern), so every request completes immediately.
         Ok(req_ids
             .iter()
             .zip(requests.iter())
-            .map(|(&id, r)| (id, Logits::new(vec![], 300), r.prompt_tokens.len()))
+            .map(|(&id, r)| PrefillStep {
+                req_id: id,
+                prefill_pos: r.prompt_tokens.len(),
+                logits: Some(Logits::new(vec![], 300)),
+                tokens_in_kv: r.prompt_tokens.len(),
+            })
             .collect())
     }
 

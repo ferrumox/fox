@@ -1,12 +1,14 @@
 <div align="center">
 
+<img src="assets/fox-round.svg" alt="fox logo" width="120" height="120">
+
 # fox
 
 **The fastest local LLM server. Drop-in replacement for Ollama.**
 
 [![CI](https://github.com/ferrumox/fox/actions/workflows/ci.yml/badge.svg)](https://github.com/ferrumox/fox/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
-[![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.13.0-green.svg)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://rustup.rs/)
 [![GitHub Stars](https://img.shields.io/github/stars/ferrumox/fox?style=social)](https://github.com/ferrumox/fox/stargazers)
 

@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="620" height="140" viewBox="0 0 620 140">
+  <g shape-rendering="crispEdges">
+    <!-- left ear (rounded, no pointed tip, rust-to-cream shading) -->
+    <rect x="28" y="14" width="14" height="14" fill="#e8792a"/>
+    <rect x="42" y="14" width="14" height="14" fill="#f0954f"/>
+    <rect x="28" y="28" width="14" height="14" fill="#c96a24"/>
+    <rect x="42" y="28" width="14" height="14" fill="#fff4e0"/>
+    <rect x="28" y="42" width="14" height="14" fill="#c96a24"/>
+    <rect x="42" y="42" width="14" height="14" fill="#fff4e0"/>
+    <rect x="28" y="56" width="14" height="14" fill="#e8792a"/>
+    <rect x="42" y="56" width="14" height="14" fill="#c96a24"/>
+    <!-- right ear (mirrored) -->
+    <rect x="98" y="14" width="14" height="14" fill="#f0954f"/>
+    <rect x="112" y="14" width="14" height="14" fill="#e8792a"/>
+    <rect x="98" y="28" width="14" height="14" fill="#fff4e0"/>
+    <rect x="112" y="28" width="14" height="14" fill="#c96a24"/>
+    <rect x="98" y="42" width="14" height="14" fill="#fff4e0"/>
+    <rect x="112" y="42" width="14" height="14" fill="#c96a24"/>
+    <rect x="98" y="56" width="14" height="14" fill="#c96a24"/>
+    <rect x="112" y="56" width="14" height="14" fill="#e8792a"/>
+    <!-- forehead (narrow) -->
+    <rect x="28" y="70" width="14" height="14" fill="#e8792a"/>
+    <rect x="42" y="70" width="14" height="14" fill="#e8792a"/>
+    <rect x="56" y="70" width="14" height="14" fill="#e8792a"/>
+    <rect x="70" y="70" width="14" height="14" fill="#e8792a"/>
+    <rect x="84" y="70" width="14" height="14" fill="#e8792a"/>
+    <rect x="98" y="70" width="14" height="14" fill="#e8792a"/>
+    <rect x="112" y="70" width="14" height="14" fill="#e8792a"/>
+    <!-- eyes / cheeks (widest row, gives the round bulge) -->
+    <rect x="0" y="84" width="14" height="14" fill="#e8792a"/>
+    <rect x="14" y="84" width="14" height="14" fill="#e8792a"/>
+    <rect x="28" y="84" width="14" height="14" fill="#e8792a"/>
+    <rect x="42" y="84" width="14" height="14" fill="#241a12"/>
+    <rect x="56" y="84" width="14" height="14" fill="#e8792a"/>
+    <rect x="70" y="84" width="14" height="14" fill="#e8792a"/>
+    <rect x="84" y="84" width="14" height="14" fill="#e8792a"/>
+    <rect x="98" y="84" width="14" height="14" fill="#241a12"/>
+    <rect x="112" y="84" width="14" height="14" fill="#e8792a"/>
+    <rect x="126" y="84" width="14" height="14" fill="#e8792a"/>
+    <rect x="140" y="84" width="14" height="14" fill="#e8792a"/>
+    <!-- muzzle + nose (tapering in) -->
+    <rect x="14" y="98" width="14" height="14" fill="#e8792a"/>
+    <rect x="28" y="98" width="14" height="14" fill="#e8792a"/>
+    <rect x="42" y="98" width="14" height="14" fill="#fff4e0"/>
+    <rect x="56" y="98" width="14" height="14" fill="#fff4e0"/>
+    <rect x="70" y="98" width="14" height="14" fill="#2b2b2b"/>
+    <rect x="84" y="98" width="14" height="14" fill="#fff4e0"/>
+    <rect x="98" y="98" width="14" height="14" fill="#fff4e0"/>
+    <rect x="112" y="98" width="14" height="14" fill="#e8792a"/>
+    <rect x="126" y="98" width="14" height="14" fill="#e8792a"/>
+    <!-- chin (narrowest, rounds off the jaw) -->
+    <rect x="42" y="112" width="14" height="14" fill="#e8792a"/>
+    <rect x="56" y="112" width="14" height="14" fill="#fff4e0"/>
+    <rect x="70" y="112" width="14" height="14" fill="#fff4e0"/>
+    <rect x="84" y="112" width="14" height="14" fill="#fff4e0"/>
+    <rect x="98" y="112" width="14" height="14" fill="#e8792a"/>
+  </g>
+  <text x="252" y="62" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="52" font-weight="bold" fill="#c96a24">fox</text>
+  <text x="252" y="94" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="19" fill="#808080" font-style="italic">quiet steps, sharp instincts</text>
+  <text x="252" y="122" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="15" fill="#9a9a9a">edit me</text>
+</svg>

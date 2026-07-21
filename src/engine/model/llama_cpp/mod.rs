@@ -35,7 +35,9 @@ use anyhow::anyhow;
 #[cfg(not(fox_stub))]
 use crate::engine::ffi;
 #[cfg(not(fox_stub))]
-use crate::engine::model::{InferenceRequestForModel, Logits, Model, ModelConfig, ModelInfo};
+use crate::engine::model::{
+    InferenceRequestForModel, Logits, Model, ModelConfig, ModelInfo, PrefillStep,
+};
 
 /// SentencePiece uses U+2581 (▁) for word boundaries.
 #[cfg(not(fox_stub))]
@@ -294,6 +296,11 @@ pub struct LlamaCppModel {
     /// Whether this instance owns the model pointer and should free it on drop.
     /// `false` when sharing weights with another `LlamaCppModel` (e.g. bench-kv).
     owns_model: bool,
+    /// Lazily-built, cached minijinja environment holding the model's compiled chat
+    /// template (pycompat callback + the GGUF template added once). The inner `None`
+    /// means the model has no usable embedded template. Cached so the template is
+    /// parsed once, not on every request (see `render_chat_jinja`).
+    pub(super) chat_env: std::sync::OnceLock<Option<minijinja::Environment<'static>>>,
 }
 
 #[cfg(not(fox_stub))]
@@ -502,6 +509,7 @@ impl LlamaCppModel {
             eos_token,
             effective_ctx: effective_max_ctx,
             owns_model: true,
+            chat_env: std::sync::OnceLock::new(),
         })
     }
 
@@ -572,6 +580,7 @@ impl LlamaCppModel {
             eos_token: self.eos_token,
             effective_ctx: effective_max_ctx,
             owns_model: false, // weights are owned by the original LlamaCppModel
+            chat_env: std::sync::OnceLock::new(),
         })
     }
 }
@@ -587,8 +596,9 @@ impl Model for LlamaCppModel {
         &self,
         req_ids: &[u64],
         requests: &[InferenceRequestForModel],
-    ) -> Result<Vec<(u64, Logits, usize)>> {
-        self.do_prefill(req_ids, requests)
+        max_prefill_chunk: usize,
+    ) -> Result<Vec<PrefillStep>> {
+        self.do_prefill(req_ids, requests, max_prefill_chunk)
     }
 
     fn decode_sync(
@@ -738,6 +748,37 @@ impl Model for LlamaCppModel {
             // (which also support seq_cp).  Recurrent/hybrid models return false.
             ffi::llama_memory_can_shift(mem)
         }
+    }
+
+    fn roll_context(&self, seq_id: i32, n_keep: usize, n_discard: usize) -> Result<()> {
+        if n_discard == 0 {
+            return Ok(());
+        }
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+        unsafe {
+            let mem = ffi::llama_get_memory(ctx_guard.as_ptr() as *const _);
+            if mem.is_null() {
+                return Err(anyhow!("no memory backend for context roll"));
+            }
+            if !ffi::llama_memory_can_shift(mem) {
+                return Err(anyhow!(
+                    "KV cache is not shiftable (recurrent/hybrid model)"
+                ));
+            }
+            let keep = n_keep as i32;
+            let discard = n_discard as i32;
+            // Drop [n_keep, n_keep + n_discard) …
+            if !ffi::llama_memory_seq_rm(mem, seq_id, keep, keep + discard) {
+                return Err(anyhow!("llama_memory_seq_rm failed during context roll"));
+            }
+            // … then shift every surviving token after the hole down by n_discard so
+            // positions stay contiguous (p1 = -1 → [keep + discard, ∞)).
+            ffi::llama_memory_seq_add(mem, seq_id, keep + discard, -1, -discard);
+        }
+        Ok(())
     }
 
     fn embedding_dim(&self) -> usize {

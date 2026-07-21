@@ -3,6 +3,7 @@
 pub mod alias;
 pub mod bench;
 pub mod bench_kv;
+pub mod bench_prefill;
 pub mod list;
 pub mod models;
 pub mod probe;
@@ -43,6 +44,8 @@ pub enum Command {
     Bench(bench::BenchArgs),
     /// Compare KV cache quantization types (F16, Q8_0, Q4_0) side-by-side
     BenchKv(bench_kv::BenchKvArgs),
+    /// Validate chunked prefill: a long prompt must not stall a concurrent short request
+    BenchPrefill(bench_prefill::BenchPrefillArgs),
     /// Download a GGUF model from HuggingFace Hub
     Pull(pull::PullArgs),
     /// List downloaded models
@@ -65,8 +68,21 @@ pub enum Command {
 
 /// Known subcommand names — anything else is treated as `fox run <arg>`.
 const SUBCOMMANDS: &[&str] = &[
-    "serve", "run", "bench", "bench-kv", "pull", "list", "rm", "show", "probe", "ps", "models",
-    "search", "alias", "help",
+    "serve",
+    "run",
+    "bench",
+    "bench-kv",
+    "bench-prefill",
+    "pull",
+    "list",
+    "rm",
+    "show",
+    "probe",
+    "ps",
+    "models",
+    "search",
+    "alias",
+    "help",
 ];
 
 pub async fn run() -> anyhow::Result<()> {
@@ -92,6 +108,7 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Run(args) => run::run_run(args).await,
         Command::Bench(args) => bench::run_bench(args).await,
         Command::BenchKv(args) => bench_kv::run_bench_kv(args).await,
+        Command::BenchPrefill(args) => bench_prefill::run_bench_prefill(args).await,
         Command::Pull(args) => pull::run_pull(args).await,
         Command::List(args) => list::run_list(args).await,
         Command::Rm(args) => rm::run_rm(args).await,
