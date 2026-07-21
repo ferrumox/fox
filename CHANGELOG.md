@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.13.0]
+## [0.13.0] - 2026-07-21
 
 fox becomes a real server under concurrent, long-prompt, long-conversation load. The
 three serving-robustness gaps from the 0.12 capabilities checklist are closed
