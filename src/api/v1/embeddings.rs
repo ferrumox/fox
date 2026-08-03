@@ -10,7 +10,7 @@ pub async fn v1_embeddings(
     State(state): State<AppState>,
     Json(req): Json<EmbeddingRequest>,
 ) -> impl IntoResponse {
-    let entry = match load_model_or_respond(&state.registry, &req.model).await {
+    let (entry, _lora) = match load_model_or_respond(&state.registry, &req.model).await {
         Ok(e) => e,
         Err(r) => return r,
     };

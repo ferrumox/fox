@@ -1,0 +1,81 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ROCm/HIP build — for AMD GPUs with ROCm support.
+# Validated (bench-only) on an AMD Radeon 890M (gfx1150, RDNA 3.5), which ROCm
+# does not officially support: HSA_OVERRIDE_GFX_VERSION=11.0.0 makes the driver
+# treat it as gfx1100 (RDNA3 desktop), which is why AMDGPU_TARGETS is gfx1100
+# below — it must match what the runtime override presents.
+#
+# Pinned to ROCm 7.2 (matches ollama/ollama:rocm's bundled libamdhip64 version,
+# for apples-to-apples benchmarking) rather than rocm/dev-ubuntu-24.04:latest,
+# which tracks a much newer/less mature ROCm build. Override with
+# --build-arg ROCM_TAG=... to try others.
+#
+# Build:
+#   docker build -f Dockerfile.rocm -t fox:rocm .
+#
+# Run with the host GPU passed through (needs /dev/kfd + /dev/dri + video/render
+# groups; use the host's numeric render GID — container /etc/group often lacks
+# a "render" entry by name):
+#   docker run --rm --device /dev/kfd --device /dev/dri \
+#     --group-add video --group-add "$(getent group render | cut -d: -f3)" \
+#     -e HSA_OVERRIDE_GFX_VERSION=11.0.0 \
+#     -p 8080:8080 -v ~/.cache/ferrumox/models:/root/.cache/ferrumox/models \
+#     fox:rocm serve
+# ──────────────────────────────────────────────────────────────────────────────
+ARG ROCM_TAG=7.2
+FROM rocm/dev-ubuntu-24.04:${ROCM_TAG} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates git \
+    build-essential cmake ninja-build clang libclang-dev \
+    rocblas rocblas-dev hipblas hipblas-dev hipblas-common-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:/opt/rocm/bin:$PATH"
+
+# gfx1100 = what HSA_OVERRIDE_GFX_VERSION=11.0.0 makes the 890M (gfx1150)
+# present as at runtime — see header comment.
+ENV AMDGPU_TARGETS=gfx1100
+
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock ./
+COPY vendor/ vendor/
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    cargo fetch
+
+COPY . .
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/app/target,id=fox-rocm-target \
+    cargo build --release --bin fox --bin fox-bench && \
+    mkdir -p /bundle && \
+    cp target/release/fox target/release/fox-bench /bundle/ && \
+    find target/release -maxdepth 1 -name 'lib*.so*' -exec cp {} /bundle/ \;
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Runtime — reuse the ROCm dev image (smaller "runtime-only" ROCm images vary
+# too much across versions to depend on); it already ships hipblas/rocblas.
+# ──────────────────────────────────────────────────────────────────────────────
+ARG ROCM_TAG=7.2
+FROM rocm/dev-ubuntu-24.04:${ROCM_TAG} AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libgomp1 rocblas hipblas \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /bundle/ /usr/local/lib/fox/
+RUN printf '/usr/local/lib/fox\n/opt/rocm/lib\n' > /etc/ld.so.conf.d/fox.conf && ldconfig && \
+    ln -s /usr/local/lib/fox/fox      /usr/local/bin/fox && \
+    ln -s /usr/local/lib/fox/fox-bench /usr/local/bin/fox-bench
+
+ENV FOX_HOST=0.0.0.0
+ENV FOX_PORT=8080
+EXPOSE 8080
+
+ENTRYPOINT ["fox"]
+CMD ["serve"]

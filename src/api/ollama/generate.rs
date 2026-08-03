@@ -15,7 +15,8 @@ use crate::api::shared::inference::{
     prepare_multimodal_prompt, prepare_prompt, sampling_from_ollama, MessageForTemplate,
 };
 use crate::api::shared::streaming::{
-    collect_tokens, ndjson_response, ndjson_stream, now_rfc3339, ollama_done_reason,
+    collect_tokens_timed, ndjson_response, ndjson_stream, now_rfc3339, ollama_done_reason,
+    GenTimings,
 };
 use crate::api::types::{OllamaGenerateChunk, OllamaGenerateRequest};
 use crate::engine::model::MEDIA_MARKER;
@@ -26,10 +27,36 @@ pub async fn ollama_generate(
     LenientJson(req): LenientJson<OllamaGenerateRequest>,
 ) -> axum::response::Response {
     let start = Instant::now();
-    let entry = match load_model_or_respond(&state.registry, &req.model).await {
+    let (entry, lora) = match load_model_or_respond(&state.registry, &req.model).await {
         Ok(e) => e,
         Err(r) => return r,
     };
+    // Honour the request's `keep_alive` (previously parsed and thrown away, so a
+    // client asking to keep a model warm — or drop it promptly — could not tell that
+    // nothing happened). `Immediate` is applied after the response instead, below.
+    let keep_alive = crate::api::types::parse_keep_alive(req.keep_alive.as_ref());
+    match keep_alive {
+        Some(crate::api::types::KeepAlive::Forever) => {
+            state.registry.set_keep_alive(&req.model, None)
+        }
+        Some(crate::api::types::KeepAlive::Secs(n)) => state
+            .registry
+            .set_keep_alive(&req.model, Some(std::time::Duration::from_secs(n))),
+        // `0` = "unload once this request is done". Expressed as a zero TTL rather
+        // than an explicit unload: the eviction pass already refuses to drop a model
+        // with work in flight (`is_busy`), so this cannot kill the very request that
+        // asked for it — including a stream the handler has already returned.
+        // Divergence from Ollama, deliberate: the unload lands on the next eviction
+        // tick (within 60s) rather than the instant the response ends.
+        Some(crate::api::types::KeepAlive::Immediate) => state
+            .registry
+            .set_keep_alive(&req.model, Some(std::time::Duration::ZERO)),
+        None => {}
+    }
+
+    // Real `load_duration`: ~0 when the model was already resident, which is the
+    // honest answer, and the actual load cost when this request triggered it.
+    let load_ns = start.elapsed().as_nanos() as u64;
 
     let has_images = req.images.as_ref().is_some_and(|v| !v.is_empty());
     let use_vision = has_images && entry.engine.supports_vision();
@@ -93,7 +120,22 @@ pub async fn ollama_generate(
     let supports_thinking = entry.engine.supports_thinking();
 
     // /api/generate always suppresses thinking from output (no `thinking` field in response).
-    let (mut sampling, max_tokens) = sampling_from_ollama(req.options.as_ref(), false);
+    if let Some(unsupported) = req
+        .options
+        .as_ref()
+        .map(|o| o.unsupported_options())
+        .filter(|v| !v.is_empty())
+    {
+        tracing::warn!(
+            model = %req.model,
+            options = %unsupported.join(", "),
+            "ignoring unsupported Ollama options — fox accepts them for compatibility \
+             but does not act on them"
+        );
+    }
+
+    let (mut sampling, max_tokens) =
+        sampling_from_ollama(req.options.as_ref(), false, state.repeat_last_n);
     sampling.initial_in_thinking = supports_thinking;
 
     // Guided decoding from the `format` field (`"json"` or a JSON schema object).
@@ -150,6 +192,9 @@ pub async fn ollama_generate(
     if let Some(chunks) = multimodal {
         inference_req = inference_req.with_multimodal(chunks);
     }
+    if let Some(selection) = lora {
+        inference_req = inference_req.with_lora(selection);
+    }
     if let Err(e) = entry.engine.submit_request(inference_req) {
         entry
             .engine
@@ -170,51 +215,68 @@ pub async fn ollama_generate(
     if stream_mode {
         let log_model = model_name.clone();
         let log_prompt = prompt_tokens_len;
-        let stream = ndjson_stream(rx, move |token: Token, eval_count: u32, elapsed_ns: u64| {
-            let is_done = token.stop_reason.is_some();
-            if is_done {
-                tracing::info!(
-                    model = %log_model,
-                    stream = true,
-                    prompt_tokens = log_prompt as u32,
-                    completion_tokens = eval_count,
-                    duration_ms = elapsed_ns / 1_000_000,
-                    finish_reason = %ollama_done_reason(&token.stop_reason),
-                    "done"
-                );
-            }
-            OllamaGenerateChunk {
-                model: model_name.clone(),
-                created_at: now_rfc3339(),
-                response: token.text.clone(),
-                done: is_done,
-                done_reason: if is_done {
-                    Some(ollama_done_reason(&token.stop_reason))
-                } else {
-                    None
-                },
-                total_duration: if is_done { Some(elapsed_ns) } else { None },
-                load_duration: if is_done { Some(0) } else { None },
-                prompt_eval_count: if is_done {
-                    Some(log_prompt as u32)
-                } else {
-                    None
-                },
-                prompt_eval_duration: if is_done { Some(0) } else { None },
-                eval_count: if is_done { Some(eval_count) } else { None },
-                eval_duration: if is_done { Some(elapsed_ns) } else { None },
-            }
-        });
+        let stream = ndjson_stream(
+            rx,
+            load_ns,
+            move |token: Token, eval_count: u32, t: GenTimings| {
+                let is_done = token.stop_reason.is_some();
+                if is_done {
+                    tracing::info!(
+                        model = %log_model,
+                        stream = true,
+                        prompt_tokens = log_prompt as u32,
+                        completion_tokens = eval_count,
+                        duration_ms = t.total_ns / 1_000_000,
+                        prefill_ms = t.prompt_eval_ns / 1_000_000,
+                        decode_ms = t.eval_ns / 1_000_000,
+                        finish_reason = %ollama_done_reason(&token.stop_reason),
+                        "done"
+                    );
+                }
+                OllamaGenerateChunk {
+                    model: model_name.clone(),
+                    created_at: now_rfc3339(),
+                    response: token.text.clone(),
+                    done: is_done,
+                    done_reason: if is_done {
+                        Some(ollama_done_reason(&token.stop_reason))
+                    } else {
+                        None
+                    },
+                    total_duration: if is_done { Some(t.total_ns) } else { None },
+                    load_duration: if is_done { Some(t.load_ns) } else { None },
+                    prompt_eval_count: if is_done {
+                        Some(log_prompt as u32)
+                    } else {
+                        None
+                    },
+                    prompt_eval_duration: if is_done {
+                        Some(t.prompt_eval_ns)
+                    } else {
+                        None
+                    },
+                    eval_count: if is_done { Some(eval_count) } else { None },
+                    eval_duration: if is_done { Some(t.eval_ns) } else { None },
+                }
+            },
+        );
         ndjson_response(stream)
     } else {
-        let (full_response, eval_count, stop_reason) = collect_tokens(&mut rx).await;
-        let elapsed_ns = start.elapsed().as_nanos() as u64;
+        let (full_response, eval_count, stop_reason, prompt_eval_ns) =
+            collect_tokens_timed(&mut rx).await;
+        let t = GenTimings::new(
+            load_ns,
+            prompt_eval_ns,
+            start.elapsed().as_nanos() as u64 - load_ns,
+        );
         tracing::info!(
             model = %model_name,
             stream = false,
             prompt_tokens = prompt_tokens_len as u32,
             completion_tokens = eval_count,
-            duration_ms = elapsed_ns / 1_000_000,
+            duration_ms = t.total_ns / 1_000_000,
+            prefill_ms = t.prompt_eval_ns / 1_000_000,
+            decode_ms = t.eval_ns / 1_000_000,
             finish_reason = %ollama_done_reason(&stop_reason),
             "done"
         );
@@ -224,12 +286,12 @@ pub async fn ollama_generate(
             response: full_response,
             done: true,
             done_reason: Some(ollama_done_reason(&stop_reason)),
-            total_duration: Some(elapsed_ns),
-            load_duration: Some(0),
+            total_duration: Some(t.total_ns),
+            load_duration: Some(t.load_ns),
             prompt_eval_count: Some(prompt_tokens_len as u32),
-            prompt_eval_duration: Some(0),
+            prompt_eval_duration: Some(t.prompt_eval_ns),
             eval_count: Some(eval_count),
-            eval_duration: Some(elapsed_ns),
+            eval_duration: Some(t.eval_ns),
         };
         let mut line = serde_json::to_string(&chunk).unwrap_or_default();
         line.push('\n');
@@ -244,6 +306,71 @@ pub async fn ollama_generate(
 #[cfg(test)]
 mod tests {
     use crate::api::test_helpers::*;
+
+    #[tokio::test]
+    async fn generate_reports_a_real_prefill_decode_split() {
+        // Regression: `load_duration` and `prompt_eval_duration` were hard-coded to 0,
+        // and `total_duration`/`eval_duration` were the same wall clock, so a client
+        // could not tell prefill cost from decode cost at all.
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+        let app = make_router(&state);
+        let body = serde_json::json!({
+            "model": "stub", "prompt": "Hello", "stream": false,
+            "options": {"num_predict": 4}
+        });
+        let resp = post_json(app, "/api/generate", body).await;
+        assert_eq!(resp.status(), 200);
+        let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+
+        let total = v["total_duration"].as_u64().expect("total_duration");
+        let prompt_eval = v["prompt_eval_duration"]
+            .as_u64()
+            .expect("prompt_eval_duration");
+        let eval = v["eval_duration"].as_u64().expect("eval_duration");
+        assert!(
+            v["load_duration"].is_number(),
+            "load_duration must be present"
+        );
+
+        assert!(
+            prompt_eval > 0,
+            "prefill must be measured, not reported as 0"
+        );
+        assert!(
+            total >= prompt_eval + eval,
+            "total ({total}) must cover prefill ({prompt_eval}) + decode ({eval})"
+        );
+        assert_ne!(
+            total, eval,
+            "total and eval must no longer be the same clock"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_stream_reports_a_real_split_on_the_done_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _entry) = make_test_state("stub", dir.path());
+        let app = make_router(&state);
+        let body = serde_json::json!({
+            "model": "stub", "prompt": "Hello", "stream": true,
+            "options": {"num_predict": 4}
+        });
+        let resp = post_json(app, "/api/generate", body).await;
+        assert_eq!(resp.status(), 200);
+        let text = String::from_utf8(body_bytes(resp).await.to_vec()).unwrap();
+        let done: serde_json::Value = text
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .find(|c| c["done"] == true)
+            .expect("a done chunk");
+        assert!(
+            done["prompt_eval_duration"].as_u64().unwrap() > 0,
+            "streamed prefill must be measured: {done}"
+        );
+        assert_ne!(done["total_duration"], done["eval_duration"]);
+    }
 
     #[tokio::test]
     async fn test_ollama_generate_non_streaming() {
@@ -282,17 +409,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ollama_generate_keep_alive_accepted() {
+    async fn keep_alive_is_applied_not_just_accepted() {
+        // Regression: `keep_alive` was parsed and thrown away, and the test only
+        // asserted a 200 — which it returned either way, so the field being inert
+        // was invisible.
         let dir = tempfile::tempdir().unwrap();
         let (state, _entry) = make_test_state("stub", dir.path());
-        let app = make_router(&state);
-        let body = serde_json::json!({
-            "model": "stub",
-            "prompt": "Hi",
-            "stream": false,
-            "keep_alive": "5m"
-        });
-        let resp = post_json(app, "/api/generate", body).await;
+        let body = |ka: serde_json::Value| serde_json::json!({"model": "stub", "prompt": "Hi", "stream": false, "keep_alive": ka});
+
+        let resp = post_json(
+            make_router(&state),
+            "/api/generate",
+            body(serde_json::json!("5m")),
+        )
+        .await;
         assert_eq!(resp.status(), 200);
+        assert_eq!(
+            state
+                .registry
+                .keep_alive_override
+                .get("stub")
+                .map(|e| *e.value()),
+            Some(Some(std::time::Duration::from_secs(300))),
+            "\"5m\" must reach the registry"
+        );
+
+        // A negative value pins the model against timed eviction.
+        let resp = post_json(
+            make_router(&state),
+            "/api/generate",
+            body(serde_json::json!(-1)),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            state
+                .registry
+                .keep_alive_override
+                .get("stub")
+                .map(|e| *e.value()),
+            Some(None),
+            "a negative keep_alive must mean never evict"
+        );
+
+        // Zero becomes a zero TTL, so the next eviction pass drops it.
+        let resp = post_json(
+            make_router(&state),
+            "/api/generate",
+            body(serde_json::json!(0)),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            state
+                .registry
+                .keep_alive_override
+                .get("stub")
+                .map(|e| *e.value()),
+            Some(Some(std::time::Duration::ZERO))
+        );
     }
 }

@@ -1,0 +1,98 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Vanilla `llama-server` (upstream llama.cpp's own server) built from the exact
+# commit fox vendors, with the exact ggml/HIP flags fox's `build.rs` uses.
+#
+# This exists to make "how much of the gap is fox's serving layer?" a measurable
+# question rather than an argued one. Because the model weights, the llama.cpp
+# commit and every ggml build flag are identical, a fox-vs-llama-server
+# comparison run with this image differs *only* in the serving layer — fox's
+# scheduler, HTTP/SSE stack and sampling versus llama-server's.
+#
+# Keeping the flags in sync with build.rs is the whole point; if build.rs's HIP
+# block changes, change it here too or the comparison quietly stops being
+# apples-to-apples. Mirrored today: BUILD_SHARED_LIBS=ON, GGML_BACKEND_DL=ON,
+# GGML_NATIVE=OFF (required — it is incompatible with GGML_BACKEND_DL),
+# GGML_HIP=ON, AMDGPU_TARGETS=gfx1100.
+#
+# Build:
+#   docker build -f Dockerfile.llama-server-rocm -t llamacpp:rocm .
+#
+# Run (same GPU passthrough as Dockerfile.rocm — see its header for why the
+# render group must be passed by numeric GID):
+#   docker run --rm --device /dev/kfd --device /dev/dri \
+#     --group-add video --group-add "$(getent group render | cut -d: -f3)" \
+#     -e HSA_OVERRIDE_GFX_VERSION=11.0.0 \
+#     -p 8096:8080 -v ~/.cache/ferrumox/models:/models \
+#     llamacpp:rocm -m /models/llama-3.2-1b-instruct-q8_0.gguf \
+#     --host 0.0.0.0 --port 8080 -c 16384 --parallel 4 -ngl 999
+#
+# VERIFY IT IS ACTUALLY ON THE GPU before trusting any number from it. With
+# GGML_BACKEND_DL, a libggml-hip.so that fails to dlopen falls back to CPU
+# silently, with no error — and a CPU-vs-GPU comparison looks like a serving-layer
+# difference. Add `-lv 5` and confirm the log names the device:
+#   docker logs <container> | grep -iE "ROCm|gfx|assigned to device"
+#
+# Benchmark against fox with scripts/repeat_bench.sh, and run only ONE server at
+# a time: ggml's thread pool spin-waits, so an idle second server distorts the
+# result badly (measured: 79 vs 151 t/s with both up, 121 vs 153 measured alone).
+# ──────────────────────────────────────────────────────────────────────────────
+ARG ROCM_TAG=7.2
+FROM rocm/dev-ubuntu-24.04:${ROCM_TAG} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates git \
+    build-essential cmake ninja-build clang libclang-dev \
+    rocblas rocblas-dev hipblas hipblas-dev hipblas-common-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/opt/rocm/bin:$PATH"
+# gfx1100 = what HSA_OVERRIDE_GFX_VERSION=11.0.0 makes the 890M (gfx1150)
+# present as at runtime — same reasoning as Dockerfile.rocm.
+ENV AMDGPU_TARGETS=gfx1100
+
+WORKDIR /src
+COPY vendor/llama.cpp/ ./
+
+# LLAMA_BUILD_UI/APP/WEBUI are OFF because the UI target downloads a prebuilt
+# asset bundle over the network at build time, which fails in a sandboxed build
+# (and is irrelevant to benchmarking). build.rs disables the same set.
+RUN cmake -S . -B /build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=ON \
+      -DGGML_BACKEND_DL=ON \
+      -DGGML_NATIVE=OFF \
+      -DGGML_HIP=ON \
+      -DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang \
+      -DAMDGPU_TARGETS=gfx1100 \
+      -DLLAMA_CURL=OFF \
+      -DLLAMA_BUILD_TESTS=OFF \
+      -DLLAMA_BUILD_EXAMPLES=OFF \
+      -DLLAMA_BUILD_TOOLS=ON \
+      -DLLAMA_BUILD_SERVER=ON \
+      -DLLAMA_BUILD_APP=OFF \
+      -DLLAMA_BUILD_UI=OFF \
+      -DLLAMA_USE_PREBUILT_UI=OFF \
+      -DLLAMA_BUILD_WEBUI=OFF \
+ && cmake --build /build --target llama-server -j"$(nproc)" \
+ && mkdir -p /bundle \
+ && cp /build/bin/llama-server /bundle/ \
+ && find /build -name 'lib*.so*' -exec cp -a {} /bundle/ \;
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Runtime — reuse the ROCm dev image, same as Dockerfile.rocm does.
+# ──────────────────────────────────────────────────────────────────────────────
+ARG ROCM_TAG=7.2
+FROM rocm/dev-ubuntu-24.04:${ROCM_TAG} AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libgomp1 rocblas hipblas \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /bundle/ /usr/local/lib/llamacpp/
+RUN printf '/usr/local/lib/llamacpp\n/opt/rocm/lib\n' > /etc/ld.so.conf.d/llamacpp.conf && ldconfig && \
+    ln -s /usr/local/lib/llamacpp/llama-server /usr/local/bin/llama-server
+
+EXPOSE 8080
+ENTRYPOINT ["llama-server"]

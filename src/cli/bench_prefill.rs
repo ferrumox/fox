@@ -96,6 +96,7 @@ fn sampling() -> SamplingParams {
         top_p: 1.0,
         top_k: 0,
         repetition_penalty: 1.0,
+        repeat_last_n: -1,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
         seed: Some(42),
@@ -107,6 +108,8 @@ fn sampling() -> SamplingParams {
         logprobs: None,
         min_p: 0.0,
         min_tokens: 0,
+        top_n_sigma: 0.0,
+        min_keep: 0,
         logit_bias: None,
     }
 }
@@ -351,7 +354,9 @@ pub async fn run_bench_prefill(args: BenchPrefillArgs) -> Result<()> {
         split_mode,
         &tensor_split,
         args.moe_cpu,
-        None, // mmproj_path
+        None,  // mmproj_path
+        &[],   // lora_modules
+        false, // reranking — benches generate, never score
     )?;
 
     spinner.finish_and_clear();

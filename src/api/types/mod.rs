@@ -8,7 +8,8 @@ mod v1;
 pub use embeddings::*;
 pub use ollama::*;
 pub use pull::*;
-pub use shared::{HealthResponse, Usage, VersionResponse, DEFAULT_MAX_TOKENS};
+pub(crate) use shared::deserialize_stop;
+pub use shared::{HealthResponse, PromptTokensDetails, Usage, VersionResponse, DEFAULT_MAX_TOKENS};
 pub use tools::*;
 pub use v1::*;
 

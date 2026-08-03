@@ -24,6 +24,26 @@ pub struct ModelRegistry {
     engines: DashMap<String, Arc<EngineEntry>>,
     lru: Mutex<lru::LruCache<String, ()>>,
     pub(crate) last_used: DashMap<String, Instant>,
+    /// Per-model keep-alive override set by a request's `keep_alive` field. Absent
+    /// means "use the server-wide `--keep-alive-secs`". `None` inside the map means
+    /// "never evict on a timer" (Ollama's negative values).
+    pub(crate) keep_alive_override: DashMap<String, Option<Duration>>,
+    /// Runtime scale overrides for `--lora-modules` adapters, set via
+    /// `POST /lora-adapters`. Absent means "use the scale it was configured with".
+    ///
+    /// Lives here rather than on the model because the model's adapter map is
+    /// immutable after load, and because only the *default* needs to change: the
+    /// per-request `LoraSelection` already carries its own scale down to
+    /// `llama_set_adapters_lora`, so overriding what gets copied into it is the whole
+    /// mechanism.
+    pub(crate) lora_scale_override: DashMap<String, f32>,
+    /// Where each model fox has loaded actually came from, keyed by stem.
+    ///
+    /// `resolve_model_name` otherwise only knows about files inside `models_dir`, so a
+    /// model pre-loaded with `--model-path` pointing anywhere else resolved to a 404
+    /// on the request path even while it was resident and serving — its own `/health`
+    /// reported it by a name nothing would accept.
+    pub(crate) known_paths: DashMap<String, PathBuf>,
     config: RegistryConfig,
     aliases: HashMap<String, String>,
     /// Serializes model loading so two concurrent requests for the same cold model
@@ -40,6 +60,9 @@ impl ModelRegistry {
             engines: DashMap::new(),
             lru: Mutex::new(lru::LruCache::new(cap)),
             last_used: DashMap::new(),
+            keep_alive_override: DashMap::new(),
+            lora_scale_override: DashMap::new(),
+            known_paths: DashMap::new(),
             config,
             aliases,
             load_lock: tokio::sync::Mutex::new(()),
@@ -49,9 +72,10 @@ impl ModelRegistry {
     /// Spawn a background task that evicts models idle longer than `keep_alive_secs`.
     /// Uses a weak reference so the task stops automatically when the registry is dropped.
     pub fn start_eviction_task(self: Arc<Self>) {
-        if self.config.keep_alive_secs == 0 {
-            return;
-        }
+        // Runs even when `keep_alive_secs == 0` (server default: never evict on a
+        // timer), because a request's own `keep_alive` can now set a TTL for one
+        // model. `evict_expired` decides per model; bailing out here would make the
+        // per-request field silently inert again, which is the bug being fixed.
         let weak = Arc::downgrade(&self);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -113,9 +137,25 @@ impl ModelRegistry {
             None => None,
         };
 
+        // Resolve each configured LoRA adapter's path the same way (direct file
+        // path or a `models_dir` match) — the operator-chosen adapter `name` and
+        // `scale` pass through unchanged.
+        let mut lora_modules = Vec::with_capacity(self.config.lora_modules.len());
+        for (name, path_or_name, scale) in &self.config.lora_modules {
+            let resolved_path = self.resolve_model_name(&path_or_name.to_string_lossy())?.1;
+            lora_modules.push((name.clone(), resolved_path, *scale));
+        }
+
         // Load the model (FFI is blocking, so we use spawn_blocking inside).
-        let entry = Arc::new(load_model(&stem, &path, &self.config, draft, mmproj).await?);
+        let entry =
+            Arc::new(load_model(&stem, &path, &self.config, draft, mmproj, lora_modules).await?);
         self.engines.insert(stem.clone(), entry.clone());
+        // Remember where it came from, so it stays reachable by name even when its
+        // file lives outside `models_dir`. Deliberately NOT removed on unload: the
+        // path is still the right answer for that stem, and forgetting it would make
+        // an evicted `--model-path` model unreachable again — the exact bug this
+        // fixes, resurfacing after the first keep-alive expiry.
+        self.known_paths.insert(stem.clone(), path.clone());
         self.last_used.insert(stem.clone(), Instant::now());
         if let Ok(mut lru) = self.lru.lock() {
             lru.put(stem, ());
@@ -124,7 +164,85 @@ impl ModelRegistry {
         Ok(entry)
     }
 
+    /// Whether `name` matches a configured LoRA adapter's name (`--lora-modules`),
+    /// as opposed to a real model/alias. Used by `load_model_or_respond` to give a
+    /// clean 404 only when `name` is neither.
+    pub(crate) fn is_lora_alias(&self, name: &str) -> bool {
+        self.config.lora_modules.iter().any(|(n, _, _)| n == name)
+    }
+
+    /// Resolve a client-supplied `model` name for a request. If `name` matches a
+    /// configured LoRA adapter's name (`--lora-modules`), loads/reuses the
+    /// *primary* model's engine (same cache as `get_or_load`, same single-flight
+    /// and LRU behavior — this is a resolution-layer concern, not a new caching
+    /// concept: `EngineEntry` itself carries no name/alias metadata, several
+    /// names can share one already-loaded engine) and returns the adapter
+    /// selection alongside it. Otherwise behaves exactly like `get_or_load` with
+    /// no selection. See `docs/design/lora-support.md`.
+    pub async fn resolve_for_request(
+        &self,
+        name: &str,
+    ) -> Result<(Arc<EngineEntry>, Option<crate::scheduler::LoraSelection>)> {
+        if let Some((_, _, configured)) =
+            self.config.lora_modules.iter().find(|(n, _, _)| n == name)
+        {
+            let scale = &self
+                .lora_scale_override
+                .get(name)
+                .map(|v| *v.value())
+                .unwrap_or(*configured);
+            let primary = self.config.primary_model.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "'{name}' matches a configured LoRA adapter, but no primary model is \
+                     configured to apply it to (pass --model-path, or put a model in models_dir)"
+                )
+            })?;
+            let entry = self.get_or_load(primary).await?;
+            return Ok((
+                entry,
+                Some(crate::scheduler::LoraSelection {
+                    name: name.to_string(),
+                    scale: *scale,
+                }),
+            ));
+        }
+        Ok((self.get_or_load(name).await?, None))
+    }
+
     /// Returns all currently-loaded (name, entry) pairs.
+    /// Adapters loaded via `--lora-modules`, with their **current** scales — the
+    /// runtime override if one was set, else the configured default.
+    pub fn lora_adapters(&self) -> Vec<(String, std::path::PathBuf, f32)> {
+        self.config
+            .lora_modules
+            .iter()
+            .map(|(name, path, configured)| {
+                let scale = self
+                    .lora_scale_override
+                    .get(name)
+                    .map(|v| *v.value())
+                    .unwrap_or(*configured);
+                (name.clone(), path.clone(), scale)
+            })
+            .collect()
+    }
+
+    /// Set an adapter's scale for subsequent requests. `Err` naming the adapter when
+    /// it was never loaded — silently accepting an unknown name would let a caller
+    /// believe a scale change took effect when nothing exists to apply it to.
+    pub fn set_lora_scale(&self, name: &str, scale: f32) -> Result<()> {
+        if !self.config.lora_modules.iter().any(|(n, _, _)| n == name) {
+            anyhow::bail!("LoRA adapter '{name}' is not loaded (see --lora-modules)");
+        }
+        self.lora_scale_override.insert(name.to_string(), scale);
+        Ok(())
+    }
+
+    /// Read-only view of the server's registry configuration, for `/props`.
+    pub fn config(&self) -> &RegistryConfig {
+        &self.config
+    }
+
     pub fn loaded(&self) -> Vec<(String, Arc<EngineEntry>)> {
         self.engines
             .iter()
@@ -134,14 +252,22 @@ impl ModelRegistry {
 
     /// Explicitly unload a model by stem name. Returns `true` if it was loaded.
     pub fn unload(&self, name: &str) -> bool {
-        let removed = self.engines.remove(name).is_some();
-        if removed {
+        let evicted = self.engines.remove(name);
+        if let Some((_, entry)) = &evicted {
             self.last_used.remove(name);
+            // Drop the per-request TTL too, or a reloaded model would silently
+            // inherit the keep_alive of whatever request last touched the old one.
+            self.keep_alive_override.remove(name);
+            // The host-RAM prompt cache holds blobs that encode THIS model's cell
+            // layout; restoring one into a different model would corrupt it. The
+            // cache dies with the scheduler anyway, but anything still holding an
+            // `Arc` to the engine would otherwise keep stale blobs alive.
+            entry.engine.clear_prompt_cache();
             if let Ok(mut lru) = self.lru.lock() {
                 lru.pop(name);
             }
         }
-        removed
+        evicted.is_some()
     }
 
     pub(crate) fn evict_lru_if_needed(&self) {
@@ -175,16 +301,35 @@ impl ModelRegistry {
             .unwrap_or(false)
     }
 
-    pub(crate) fn evict_expired(&self) {
-        if self.config.keep_alive_secs == 0 {
-            return;
+    /// Record a per-request `keep_alive` for `model`, overriding the server default
+    /// until another request changes it. `None` pins the model against timed eviction.
+    ///
+    /// This is the whole point of honouring the field: the value was previously parsed
+    /// and thrown away, so a client asking to keep a model warm — or to drop it
+    /// promptly — had no way to tell that nothing happened.
+    pub(crate) fn set_keep_alive(&self, model: &str, ttl: Option<Duration>) {
+        self.keep_alive_override.insert(model.to_string(), ttl);
+    }
+
+    /// Effective idle TTL for `model`: its override if one was set, else the
+    /// server-wide default. `None` = never evict on a timer.
+    fn effective_keep_alive(&self, model: &str) -> Option<Duration> {
+        match self.keep_alive_override.get(model) {
+            Some(o) => *o.value(),
+            None => (self.config.keep_alive_secs > 0)
+                .then(|| Duration::from_secs(self.config.keep_alive_secs)),
         }
+    }
+
+    pub(crate) fn evict_expired(&self) {
         let now = Instant::now();
-        let keep_alive = Duration::from_secs(self.config.keep_alive_secs);
         let expired: Vec<String> = self
             .last_used
             .iter()
-            .filter(|e| now.duration_since(*e.value()) >= keep_alive)
+            .filter(|e| {
+                self.effective_keep_alive(e.key())
+                    .is_some_and(|ttl| now.duration_since(*e.value()) >= ttl)
+            })
             .map(|e| e.key().clone())
             .collect();
         for name in expired {
@@ -219,6 +364,18 @@ impl ModelRegistry {
         }
 
         let resolved = self.aliases.get(name).map(String::as_str).unwrap_or(name);
+
+        // Step 1.5: a model fox has already loaded is servable under its stem no
+        // matter where its file lives. Checked before the directory scan, which only
+        // ever sees `models_dir` — that gap is what made a `--model-path` model
+        // outside it unreachable by name.
+        if let Some(entry) = self
+            .known_paths
+            .iter()
+            .find(|e| e.key().eq_ignore_ascii_case(resolved))
+        {
+            return Ok((entry.key().clone(), entry.value().clone()));
+        }
 
         let entries = list_models(&self.config.models_dir)?;
         let lower = resolved.to_lowercase();
@@ -260,6 +417,13 @@ impl ModelRegistry {
 
 #[cfg(any(test, feature = "test-helpers"))]
 impl ModelRegistry {
+    /// Register where a model came from, so `resolve_model_name` can find it by stem
+    /// even though it lives outside `models_dir`. Used by the startup pre-load path
+    /// and by tests.
+    pub fn remember_path(&self, stem: impl Into<String>, path: PathBuf) {
+        self.known_paths.insert(stem.into(), path);
+    }
+
     /// Inject a pre-built engine entry without touching the filesystem (for tests).
     pub fn preload_for_test(&self, name: impl Into<String>, entry: Arc<EngineEntry>) {
         let name = name.into();
@@ -274,8 +438,36 @@ impl ModelRegistry {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use std::collections::HashMap;
+
+    /// A model outside `models_dir` must still resolve by its stem once fox knows it.
+    ///
+    /// Regression: `--model-path` pointing anywhere else produced a server whose own
+    /// `/health` advertised a name that every request path then 404'd on.
+    #[test]
+    fn a_model_outside_models_dir_resolves_by_stem() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let model = elsewhere.path().join("Far-Away-Model.gguf");
+        std::fs::write(&model, b"").unwrap();
+
+        let reg = ModelRegistry::new(minimal_cfg(dir.path(), 1, 0), HashMap::new());
+
+        // Before fox knows about it, only the literal path works.
+        assert!(reg.resolve_model_name("Far-Away-Model").is_err());
+        assert!(reg.resolve_model_name(model.to_str().unwrap()).is_ok());
+
+        reg.remember_path("Far-Away-Model", model.clone());
+        let (stem, path) = reg
+            .resolve_model_name("Far-Away-Model")
+            .expect("a loaded model must be reachable by name");
+        assert_eq!(stem, "Far-Away-Model");
+        assert_eq!(path, model);
+        // Case-insensitive, like the models_dir lookup it sits beside.
+        assert!(reg.resolve_model_name("far-away-model").is_ok());
+    }
 
     fn minimal_cfg(
         dir: &std::path::Path,
@@ -290,6 +482,10 @@ mod tests {
             max_prefill_chunk: 0,
             context_shift: false,
             context_keep: 0,
+            reranking: false,
+            cache_ram_bytes: 0,
+            kv_reuse: true,
+            slot_prompt_similarity: crate::scheduler::DEFAULT_SLOT_PROMPT_SIMILARITY,
             speculative: false,
             spec_ngram: 2,
             spec_draft_len: 4,
@@ -307,6 +503,8 @@ mod tests {
             tensor_split: vec![],
             moe_offload_cpu: false,
             mmproj: None,
+            lora_modules: Vec::new(),
+            primary_model: None,
         }
     }
 
@@ -518,5 +716,63 @@ mod tests {
             registry2.engines.contains_key("busy"),
             "a busy model must never be LRU evicted"
         );
+    }
+
+    #[test]
+    fn test_is_lora_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = minimal_cfg(dir.path(), 4, 0);
+        cfg.lora_modules = vec![("finetune".to_string(), PathBuf::from("adapter.gguf"), 1.0)];
+        let registry = ModelRegistry::new(cfg, HashMap::new());
+        assert!(registry.is_lora_alias("finetune"));
+        assert!(!registry.is_lora_alias("finetune-typo"));
+        assert!(!registry.is_lora_alias("base"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_for_request_lora_alias_resolves_to_primary_model() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("base.gguf"), b"").unwrap();
+        let mut cfg = minimal_cfg(dir.path(), 4, 0);
+        cfg.primary_model = Some("base".to_string());
+        cfg.lora_modules = vec![("finetune".to_string(), PathBuf::from("adapter.gguf"), 0.7)];
+        let registry = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
+        registry.preload_for_test("base", EngineEntry::for_test("base"));
+
+        let (_entry, lora) = registry.resolve_for_request("finetune").await.unwrap();
+        let selection = lora.expect("expected a LoRA selection for an adapter alias");
+        assert_eq!(selection.name, "finetune");
+        assert_eq!(selection.scale, 0.7);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_for_request_plain_model_name_has_no_lora_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("base.gguf"), b"").unwrap();
+        let mut cfg = minimal_cfg(dir.path(), 4, 0);
+        cfg.lora_modules = vec![("finetune".to_string(), PathBuf::from("adapter.gguf"), 0.7)];
+        let registry = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
+        registry.preload_for_test("base", EngineEntry::for_test("base"));
+
+        let (_entry, lora) = registry.resolve_for_request("base").await.unwrap();
+        assert!(
+            lora.is_none(),
+            "a plain model name must not pick up a LoRA selection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_for_request_lora_alias_without_primary_model_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = minimal_cfg(dir.path(), 4, 0);
+        // primary_model left None on purpose.
+        cfg.lora_modules = vec![("finetune".to_string(), PathBuf::from("adapter.gguf"), 1.0)];
+        let registry = ModelRegistry::new(cfg, HashMap::new());
+
+        let result = registry.resolve_for_request("finetune").await;
+        let Err(err) = result else {
+            panic!("a LoRA alias with no primary model configured must error, not panic");
+        };
+        assert!(err.to_string().contains("no primary model"));
     }
 }

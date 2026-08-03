@@ -61,26 +61,68 @@ pub fn ndjson_response(
         .unwrap()
 }
 
+/// Wall-clock breakdown of one generation, in nanoseconds — the Ollama API's
+/// `total_duration` / `load_duration` / `prompt_eval_duration` / `eval_duration`.
+///
+/// fox previously reported `load_duration` and `prompt_eval_duration` as a literal
+/// `0`, and `total_duration` and `eval_duration` as the same wall clock, so a client
+/// could not tell prefill cost from decode cost at all. These are measured:
+///
+/// * `load_ns` — time spent getting the model resident for this request. Naturally
+///   ~0 when it was already loaded, which is the honest answer.
+/// * `prompt_eval_ns` — submission to first token. This includes scheduler queueing,
+///   not just the prefill compute; on a busy server that queue wait is real latency
+///   the client paid, and fox has no cheaper place to separate the two.
+/// * `eval_ns` — first token to last, i.e. pure decode.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GenTimings {
+    pub total_ns: u64,
+    pub load_ns: u64,
+    pub prompt_eval_ns: u64,
+    pub eval_ns: u64,
+}
+
+impl GenTimings {
+    /// Build from the pieces the handlers can actually observe.
+    pub fn new(load_ns: u64, prompt_eval_ns: u64, total_since_submit_ns: u64) -> Self {
+        Self {
+            total_ns: load_ns + total_since_submit_ns,
+            load_ns,
+            prompt_eval_ns,
+            eval_ns: total_since_submit_ns.saturating_sub(prompt_eval_ns),
+        }
+    }
+}
+
 /// Build an NDJSON bytes stream from a token receiver.
 ///
-/// `make_chunk` receives `(token, eval_count, elapsed_ns)` and returns a
-/// serialisable chunk. The stream yields one newline-terminated JSON line per
-/// token and terminates when a done token is received.
+/// `make_chunk` receives `(token, eval_count, timings)` and returns a serialisable
+/// chunk. The stream yields one newline-terminated JSON line per token and
+/// terminates when a done token is received. `load_ns` is threaded in by the caller
+/// since model loading happens before the stream exists.
 pub fn ndjson_stream<F, T>(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Token>,
+    load_ns: u64,
     make_chunk: F,
 ) -> impl futures::Stream<Item = Result<Bytes, Infallible>> + Send + 'static
 where
-    F: Fn(Token, u32, u64) -> T + Send + 'static,
+    F: Fn(Token, u32, GenTimings) -> T + Send + 'static,
     T: Serialize + Send,
 {
     let start = Instant::now();
     async_stream::stream! {
         let mut eval_count: u32 = 0;
+        let mut prompt_eval_ns: u64 = 0;
         while let Some(token) = rx.recv().await {
             let is_done = token.stop_reason.is_some();
             let elapsed_ns = start.elapsed().as_nanos() as u64;
-            let chunk = make_chunk(token, eval_count, elapsed_ns);
+            // The first token to arrive is what prefill produced; everything after
+            // it is decode.
+            if eval_count == 0 {
+                prompt_eval_ns = elapsed_ns;
+            }
+            let timings = GenTimings::new(load_ns, prompt_eval_ns, elapsed_ns);
+            let chunk = make_chunk(token, eval_count, timings);
             eval_count += 1;
             let mut line = serde_json::to_string(&chunk).unwrap_or_default();
             line.push('\n');
@@ -96,10 +138,24 @@ where
 pub async fn collect_tokens(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Token>,
 ) -> (String, u32, Option<StopReason>) {
+    let (text, count, stop_reason, _) = collect_tokens_timed(rx).await;
+    (text, count, stop_reason)
+}
+
+/// Like [`collect_tokens`], but also reports how long the first token took to
+/// arrive (nanoseconds from this call) — the prefill half of the split.
+pub async fn collect_tokens_timed(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Token>,
+) -> (String, u32, Option<StopReason>, u64) {
+    let start = Instant::now();
     let mut text = String::new();
     let mut count = 0u32;
     let mut stop_reason = None;
+    let mut prompt_eval_ns = 0u64;
     while let Some(token) = rx.recv().await {
+        if count == 0 {
+            prompt_eval_ns = start.elapsed().as_nanos() as u64;
+        }
         text.push_str(&token.text);
         count += 1;
         if token.stop_reason.is_some() {
@@ -107,7 +163,7 @@ pub async fn collect_tokens(
             break;
         }
     }
-    (text, count, stop_reason)
+    (text, count, stop_reason, prompt_eval_ns)
 }
 
 // ---------------------------------------------------------------------------

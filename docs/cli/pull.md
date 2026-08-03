@@ -14,15 +14,25 @@ fox pull <MODEL_ID> [OPTIONS]
 
 ### Model ID formats
 
-fox accepts several formats for the model identifier:
+fox accepts several formats for the model identifier. A friendly name is
+checked against the curated registry first (the same names `fox models`
+lists — exact name, alias, or `<name>-<quant>`); only when nothing matches
+does fox fall back to a live HuggingFace search:
 
 | Format | Example | Behaviour |
 |--------|---------|-----------|
-| Friendly name | `llama3.2` | Searches HuggingFace for a matching GGUF repo, picks the one with the most downloads |
-| Name with size hint | `llama3.2:8b` | Searches for "llama3.2 8b" |
-| Name with size and quant | `llama3.2:8b-q4` | Searches for "llama3.2 8b", then filters for a Q4 variant |
+| Registry name or alias | `llama3.2`, `moondream` | Resolves to the exact repo + recommended file `fox models` lists for it — no search involved |
+| Registry name with quant | `gemma3:12b-q4` | Resolves the base registry name (`gemma3:12b`), then filters its files for a Q4 variant |
+| Friendly name (not in the registry) | `some-other-model` | Searches HuggingFace for a matching GGUF repo, picks the one with the most downloads |
+| Name with size hint (not in the registry) | `some-model:8b` | Searches for "some-model 8b" |
+| Name with size and quant (not in the registry) | `some-model:8b-q4` | Searches for "some-model 8b", then filters for a Q4 variant |
 | Exact HF repo | `bartowski/Llama-3.2-3B-Instruct-GGUF` | Uses the exact repo without searching |
 | Exact HF repo with quant | `bartowski/Llama-3.2-3B-Instruct-GGUF:q4` | Exact repo, filtered to Q4 variant |
+
+Registry entries for vision models print a follow-up hint for their paired
+mmproj file after downloading (see `fox models`) — mmproj files are not
+auto-fetched, since not every user of a vision-capable model wants the extra
+download.
 
 ### Quantization auto-selection
 

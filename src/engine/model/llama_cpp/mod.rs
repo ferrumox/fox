@@ -106,6 +106,51 @@ fn meta_str(model: *const ffi::llama_model, key: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
 }
 
+/// Number of threads llama.cpp should use for compute.
+///
+/// llama.cpp's own default is `GGML_DEFAULT_N_THREADS` = 4 (marked
+/// `// TODO: better default` in `ggml.h`) and applies regardless of machine —
+/// leaving it alone means fox uses 4 threads on a 24-core box, roughly halving
+/// CPU-backend throughput. `llama-server` doesn't inherit that default either;
+/// it resolves `n_threads` from `common_cpu_get_num_math()`.
+///
+/// Mirrors `common_cpu_get_num_physical_cores()` (`common/common.cpp`): on
+/// Linux, count distinct `thread_siblings` masks, which yields *physical*
+/// cores. Physical rather than logical is deliberate — the two SMT siblings of
+/// one core share execution units, so counting them doubles thread count without
+/// doubling math throughput and typically costs performance for this workload.
+/// Falls back to half the logical CPUs (a reasonable SMT-aware guess) and then
+/// to llama.cpp's own 4.
+#[cfg(not(fox_stub))]
+fn resolve_n_threads() -> i32 {
+    if let Some(n) = std::env::var("FOX_N_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|&n| n > 0)
+    {
+        return n;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut siblings = std::collections::HashSet::new();
+        for cpu in 0..u32::MAX {
+            let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings");
+            match std::fs::read_to_string(&path) {
+                Ok(line) => {
+                    siblings.insert(line.trim().to_string());
+                }
+                Err(_) => break, // no more CPUs
+            }
+        }
+        if !siblings.is_empty() {
+            return siblings.len() as i32;
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).max(1) as i32)
+        .unwrap_or(4)
+}
+
 /// Resolve the per-head dimension for KV cache sizing.
 ///
 /// `n_embd / n_head` is WRONG for architectures that pin an explicit head
@@ -120,7 +165,7 @@ fn resolve_head_dim(model: *const ffi::llama_model, n_embd: usize, n_head: usize
         .and_then(|arch| meta_str(model, &format!("{arch}.attention.key_length")))
         .and_then(|s| s.trim().parse::<usize>().ok())
         .filter(|&d| d > 0);
-    from_meta.unwrap_or(if n_head > 0 { n_embd / n_head } else { 128 })
+    from_meta.unwrap_or(n_embd.checked_div(n_head).unwrap_or(128))
 }
 
 /// Diagnose why `llama_model_load_from_file` returned null and return a
@@ -237,6 +282,22 @@ pub(crate) fn resolve_context_len(user_limit: Option<u32>, model_train_ctx: u32)
     user_limit.unwrap_or(model_train_ctx)
 }
 
+/// Halve `current` toward `floor` for a context-creation OOM retry. `None`
+/// once no further shrinking is possible (already at or below `floor`) — the
+/// caller should treat that as a genuine, unrecoverable failure rather than
+/// retry again. Mirrors `batch.rs`'s `bisection_split` shape: fox doesn't
+/// predict whether `n_ctx` tokens fit in memory (no formula is correct across
+/// architectures — see `docs/design/mla-recurrent-kv-sizing.md`), it asks
+/// llama.cpp by trying, and shrinks only on a real, observed failure.
+#[cfg(not(fox_stub))]
+pub(crate) fn shrink_n_ctx(current: u32, floor: u32) -> Option<u32> {
+    if current <= floor {
+        None
+    } else {
+        Some((current / 2).max(floor))
+    }
+}
+
 /// Human description of the active compute backend, read from the ggml devices
 /// registered by `ggml_backend_load_all`. Prefers a GPU/iGPU device (that is where
 /// inference runs when one is present); otherwise reports CPU. Shown at startup so
@@ -290,7 +351,7 @@ pub(crate) fn active_backend_description() -> String {
 /// sampling), so concurrent use is already serialized. `Drop` frees the sampler, so
 /// removing the entry from the `grammars` map — or dropping the model — releases it.
 #[cfg(not(fox_stub))]
-struct GrammarSampler {
+pub(super) struct GrammarSampler {
     ptr: *mut ffi::llama_sampler,
 }
 
@@ -346,6 +407,12 @@ pub struct LlamaCppModel {
     /// with a paired mmproj GGUF. `None` for the overwhelming majority of models —
     /// every multimodal code path is gated on this being `Some`.
     pub(super) mtmd_ctx: Option<NonNull<ffi::mtmd_context>>,
+    /// Named LoRA adapters loaded alongside this model (`--lora-modules`),
+    /// keyed by the operator-chosen name a client selects via the `model`
+    /// field. Value is the loaded adapter handle plus its configured default
+    /// scale. Empty for the overwhelming majority of models.
+    pub(super) lora_adapters:
+        std::collections::HashMap<String, (NonNull<ffi::llama_adapter_lora>, f32)>,
 }
 
 #[cfg(not(fox_stub))]
@@ -356,6 +423,11 @@ impl Drop for LlamaCppModel {
         // first regardless, before either of the resources it borrowed goes away.
         if let Some(mtmd_ctx) = self.mtmd_ctx {
             unsafe { ffi::mtmd_free(mtmd_ctx.as_ptr()) };
+        }
+        // LoRA adapters borrow the model's weights (loaded via `llama_adapter_lora_init(model, ..)`)
+        // but are otherwise independent objects — free them before the model itself.
+        for (adapter, _scale) in self.lora_adapters.values() {
+            unsafe { ffi::llama_adapter_lora_free(adapter.as_ptr()) };
         }
         // Free the context first (must happen before model is freed).
         if let Ok(ctx) = self._ctx.lock() {
@@ -384,6 +456,8 @@ impl LlamaCppModel {
         tensor_split: &[f32],
         moe_offload_cpu: bool,
         mmproj_path: Option<&std::path::Path>,
+        lora_modules: &[(String, std::path::PathBuf, f32)],
+        reranking: bool,
     ) -> Result<Self> {
         // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
         // Fox shows its own clean progress spinner instead.
@@ -393,17 +467,63 @@ impl LlamaCppModel {
             _user_data: *mut std::os::raw::c_void,
         ) {
         }
-        unsafe { ffi::llama_log_set(Some(noop_log), std::ptr::null_mut()) };
-
-        // Load GPU/CPU backends compiled as dynamic libraries (GGML_BACKEND_DL).
-        // Passing null searches the executable's directory and cwd — fox ships
-        // libggml-cuda.so and libggml-cpu.so next to the binary.
-        // On non-DL builds this is a no-op (backends are statically linked).
-        unsafe { ffi::ggml_backend_load_all_from_path(std::ptr::null()) };
-
-        unsafe {
-            ffi::llama_backend_init();
+        // `FOX_LLAMA_LOG=1` forwards llama.cpp's own log to stderr instead of
+        // dropping it. Without this escape hatch, llama.cpp's internal
+        // diagnostics are unreachable from a fox build — notably its
+        // `LLAMA_BATCH_DEBUG=1` ubatch tracing, which is the only way to observe
+        // how a submitted `llama_batch` actually gets split into ubatches (the
+        // batching behaviour investigated in
+        // docs/design/rocm-benchmarking-2026-08.md). Previously the only way to
+        // see any of it was to patch the vendored source and rebuild.
+        unsafe extern "C" fn passthrough_log(
+            _level: ffi::ggml_log_level,
+            text: *const std::os::raw::c_char,
+            _user_data: *mut std::os::raw::c_void,
+        ) {
+            if text.is_null() {
+                return;
+            }
+            let text = unsafe { std::ffi::CStr::from_ptr(text) };
+            eprint!("{}", text.to_string_lossy());
         }
+        // Process-global llama.cpp/ggml initialisation — must run exactly once,
+        // NOT once per model load.
+        //
+        // `ggml_backend_load_all_from_path` appends to a global
+        // `std::vector<ggml_backend_reg_entry>` inside libggml with no internal
+        // locking. Two threads loading two models at the same time can therefore
+        // reallocate that vector concurrently and corrupt it: observed as an
+        // intermittent SIGSEGV (~1 run in 15) in the golden suite, caught under
+        // gdb in `_M_realloc_insert<ggml_backend_reg_entry>` while other threads
+        // were inside `llama_model_load_from_file`. `llama_backend_init` is
+        // likewise a once-per-process call per llama.cpp's own API contract.
+        //
+        // `ModelRegistry::get_or_load` happens to serialise its loads behind
+        // `load_lock`, which is why this never surfaced in the server — but that
+        // is the registry's single-flight policy, not a guarantee this layer can
+        // rely on: any other caller loading two models concurrently (tests,
+        // a draft model, future callers) would hit it.
+        static LLAMA_GLOBAL_INIT: std::sync::Once = std::sync::Once::new();
+        LLAMA_GLOBAL_INIT.call_once(|| {
+            let forward_llama_log = std::env::var_os("FOX_LLAMA_LOG").is_some_and(|v| v != "0");
+            unsafe {
+                if forward_llama_log {
+                    ffi::llama_log_set(Some(passthrough_log), std::ptr::null_mut())
+                } else {
+                    ffi::llama_log_set(Some(noop_log), std::ptr::null_mut())
+                }
+            };
+
+            // Load GPU/CPU backends compiled as dynamic libraries (GGML_BACKEND_DL).
+            // Passing null searches the executable's directory and cwd — fox ships
+            // libggml-cuda.so and libggml-cpu.so next to the binary.
+            // On non-DL builds this is a no-op (backends are statically linked).
+            unsafe { ffi::ggml_backend_load_all_from_path(std::ptr::null()) };
+
+            unsafe {
+                ffi::llama_backend_init();
+            }
+        });
 
         use std::ffi::CString;
         let path_cstr = model_path
@@ -512,27 +632,54 @@ impl LlamaCppModel {
             );
         }
 
-        // Cap total KV context to fit in available GPU (or RAM) memory.
-        // Query FREE memory now (after model weights are loaded) so we don't OOM.
-        // Falls back to gpu_memory_bytes * fraction if nvidia-smi is unavailable.
+        // fox does not predict KV/state memory usage — no formula is correct across
+        // architectures (MLA's latent KV is far smaller than the positional formula
+        // below assumes; recurrent/hybrid models have no per-token KV at all, so the
+        // formula's inputs aren't even meaningful — see
+        // docs/design/mla-recurrent-kv-sizing.md). Instead: ask llama.cpp by trying.
+        //
+        // The positional formula below still computes a soft *ceiling* — it keeps
+        // `--gpu-memory-fraction`'s documented meaning (don't be needlessly greedy on
+        // constrained hardware) as a first-guess upper bound, not a precise
+        // prediction. Real correctness comes from the retry loop: attempt the full
+        // desired n_ctx, and only shrink in response to an actual `llama_init_from_model`
+        // failure (mirrors the decode-time OOM bisection retry in `batch.rs` — same
+        // "observe real failure, retry smaller" philosophy, one layer earlier).
         let free_bytes = query_gpu_free_bytes()
             .unwrap_or((gpu_memory_bytes as f64 * gpu_memory_fraction as f64) as usize);
         let budget_bytes = (free_bytes as f64 * gpu_memory_fraction as f64) as usize;
         // bytes_per_token = 2 (K+V) * n_head_kv * head_dim * 2 (fp16) * n_layer
         let bytes_per_token = 2 * n_head_kv * head_dim * 2 * n_layer;
-        let max_tokens_by_mem = if bytes_per_token > 0 && budget_bytes > 0 {
+        let ceiling_tokens = if bytes_per_token > 0 && budget_bytes > 0 {
             (budget_bytes / bytes_per_token) as u32
         } else {
             effective_max_ctx * n_seq
         };
-        // Honour the effective_max_ctx per sequence, but don't exceed memory budget.
-        let n_ctx = (effective_max_ctx * n_seq)
-            .min(max_tokens_by_mem)
+        // Honour the effective_max_ctx per sequence as a floor — never shrink below
+        // what a single sequence needs, since that would silently truncate the
+        // user's requested context length rather than fail loudly.
+        let desired_n_ctx = (effective_max_ctx * n_seq)
+            .min(ceiling_tokens)
             .max(effective_max_ctx);
-        ctx_params.n_ctx = n_ctx;
+
         // n_batch must be at least as large as n_ctx to handle full prompts in one pass
         ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
+        // Unified KV cache (one shared buffer, `n_stream = 1`) instead of one
+        // stream per sequence. This is what makes `llama_kv_cache::init_batch`
+        // select `split_simple` over `split_equal` — and `split_simple` has no
+        // "seq_ids must be consecutive and increasing" requirement, so a decode
+        // batch folds into ONE full-width ubatch regardless of which IDs the
+        // scheduler happens to hold. Without it, a prefix-cache hit inheriting a
+        // donated, non-dense seq_id silently fragments the batch (measured: 1.74
+        // of a possible 4 under sustained load) — see
+        // docs/design/rocm-benchmarking-2026-08.md's "Known limitation".
+        ctx_params.kv_unified = true;
+        // Never inherit llama.cpp's 4-thread default — see resolve_n_threads().
+        let n_threads = resolve_n_threads();
+        ctx_params.n_threads = n_threads;
+        ctx_params.n_threads_batch = n_threads;
+        tracing::debug!(n_threads, "llama.cpp compute threads");
         // AUTO (-1): let llama.cpp enable flash attention only when the active
         // backend supports it for this model/KV type. Forcing ENABLED (1) caused
         // decode failures and garbage output on Vulkan / some ROCm setups and with
@@ -541,12 +688,48 @@ impl LlamaCppModel {
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;
         ctx_params.type_v = type_v as _;
+        if reranking {
+            // Must be set explicitly. A reranker GGUF does NOT necessarily carry a
+            // `<arch>.pooling_type` key — jina-reranker-v1-tiny-en, for one, has none —
+            // so llama.cpp's UNSPECIFIED fallback resolves to NONE and there is no
+            // sequence score to read. llama-server sets it the same way, from
+            // `--reranking` (arg.cpp:3067-3070), rather than trusting metadata.
+            ctx_params.pooling_type = ffi::llama_pooling_type_LLAMA_POOLING_TYPE_RANK;
+        }
 
-        let ctx = unsafe { ffi::llama_init_from_model(model.as_ptr(), ctx_params) };
-        let ctx = NonNull::new(ctx).ok_or_else(|| {
-            unsafe { ffi::llama_model_free(model.as_ptr()) };
-            anyhow!("llama_init_from_model failed")
-        })?;
+        let mut n_ctx_candidate = desired_n_ctx;
+        let ctx = loop {
+            ctx_params.n_ctx = n_ctx_candidate;
+            let raw = unsafe { ffi::llama_init_from_model(model.as_ptr(), ctx_params) };
+            if let Some(ctx) = NonNull::new(raw) {
+                if n_ctx_candidate != desired_n_ctx {
+                    tracing::info!(
+                        requested = desired_n_ctx,
+                        allocated = n_ctx_candidate,
+                        "context created at a smaller n_ctx after retrying — the initial size didn't fit"
+                    );
+                }
+                break ctx;
+            }
+            match shrink_n_ctx(n_ctx_candidate, effective_max_ctx) {
+                Some(next) => {
+                    tracing::warn!(
+                        attempted = n_ctx_candidate,
+                        retrying_at = next,
+                        "llama_init_from_model failed (likely OOM) — retrying with a smaller n_ctx"
+                    );
+                    n_ctx_candidate = next;
+                }
+                None => {
+                    unsafe { ffi::llama_model_free(model.as_ptr()) };
+                    return Err(anyhow!(
+                        "llama_init_from_model failed even at the minimum viable context \
+                         ({effective_max_ctx} tokens) — not enough memory for this model at \
+                         this context length"
+                    ));
+                }
+            }
+        };
 
         // Vision/multimodal: load the paired mmproj GGUF via mtmd, if given. A bad
         // pairing (wrong architecture, corrupt file) fails loudly here rather than
@@ -577,6 +760,35 @@ impl LlamaCppModel {
             None => None,
         };
 
+        // Named LoRA adapters (--lora-modules): loaded once alongside the model,
+        // attached/detached per decode step by do_prefill/do_decode via
+        // llama_set_adapters_lora — see docs/design/lora-support.md. A bad
+        // adapter file fails loudly here, same posture as mmproj above.
+        let mut lora_adapters = std::collections::HashMap::new();
+        for (name, path, scale) in lora_modules {
+            let path_cstr = CString::new(
+                path.to_str()
+                    .ok_or_else(|| anyhow!("lora adapter path not valid UTF-8: {path:?}"))?,
+            )?;
+            let raw = unsafe { ffi::llama_adapter_lora_init(model.as_ptr(), path_cstr.as_ptr()) };
+            let adapter = NonNull::new(raw).ok_or_else(|| {
+                for (adapter, _) in lora_adapters.values() {
+                    let adapter: &NonNull<ffi::llama_adapter_lora> = adapter;
+                    unsafe { ffi::llama_adapter_lora_free(adapter.as_ptr()) };
+                }
+                if let Some(mtmd_ctx) = mtmd_ctx {
+                    unsafe { ffi::mtmd_free(mtmd_ctx.as_ptr()) };
+                }
+                unsafe { ffi::llama_free(ctx.as_ptr()) };
+                unsafe { ffi::llama_model_free(model.as_ptr()) };
+                anyhow!(
+                    "llama_adapter_lora_init failed for '{name}' ({path:?}) — check the \
+                     adapter matches this model's architecture"
+                )
+            })?;
+            lora_adapters.insert(name.clone(), (adapter, *scale));
+        }
+
         // SAFETY: We manually implement Send + Sync for LlamaCppModel below.
         // The Arc<Mutex<NonNull<...>>> is intentionally used here for shared ownership
         // across clone (e.g. future multi-backend); the unsafe impls guarantee thread safety.
@@ -599,6 +811,7 @@ impl LlamaCppModel {
             grammars: dashmap::DashMap::new(),
             decode_bisection_retries: std::sync::atomic::AtomicU64::new(0),
             mtmd_ctx,
+            lora_adapters,
         })
     }
 
@@ -650,6 +863,10 @@ impl LlamaCppModel {
         ctx_params.n_ctx = n_ctx;
         ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
+        ctx_params.kv_unified = true; // see load() for why
+        let n_threads = resolve_n_threads(); // see load() for why
+        ctx_params.n_threads = n_threads;
+        ctx_params.n_threads_batch = n_threads;
         ctx_params.flash_attn_type = -1; // LLAMA_FLASH_ATTN_TYPE_AUTO (see load())
         ctx_params.offload_kqv = true;
         ctx_params.type_k = type_k as _;
@@ -674,9 +891,10 @@ impl LlamaCppModel {
             chat_env: std::sync::OnceLock::new(),
             grammars: dashmap::DashMap::new(),
             decode_bisection_retries: std::sync::atomic::AtomicU64::new(0),
-            // bench-kv compares KV cache types, not vision; the original instance
-            // (if any) keeps ownership of its mtmd context.
+            // bench-kv compares KV cache types, not vision/LoRA; the original
+            // instance (if any) keeps ownership of its mtmd context and adapters.
             mtmd_ctx: None,
+            lora_adapters: std::collections::HashMap::new(),
         })
     }
 }
@@ -719,6 +937,25 @@ impl Model for LlamaCppModel {
 
     fn tokenize(&self, text: &str) -> Result<Vec<i32>> {
         self.tokenize_impl(text)
+    }
+
+    fn fim_tokens(&self) -> Option<crate::engine::model::FimTokens> {
+        // llama.cpp returns LLAMA_TOKEN_NULL (-1) for a vocabulary that has no FIM
+        // tokens. All three are required: a model with only some of them cannot be
+        // driven through the infill format, and guessing the missing one would
+        // silently produce a prompt the model was never trained on.
+        let (prefix, suffix, middle) = unsafe {
+            (
+                ffi::llama_vocab_fim_pre(self.vocab),
+                ffi::llama_vocab_fim_suf(self.vocab),
+                ffi::llama_vocab_fim_mid(self.vocab),
+            )
+        };
+        (prefix >= 0 && suffix >= 0 && middle >= 0).then_some(crate::engine::model::FimTokens {
+            prefix,
+            suffix,
+            middle,
+        })
     }
 
     fn token_to_piece(&self, token: i32) -> Result<String> {
@@ -813,6 +1050,10 @@ impl Model for LlamaCppModel {
         self.mtmd_ctx.is_some()
     }
 
+    fn lora_adapter_names(&self) -> Vec<String> {
+        self.lora_adapters.keys().cloned().collect()
+    }
+
     fn tokenize_multimodal(
         &self,
         messages: &[(String, String)],
@@ -878,24 +1119,37 @@ impl Model for LlamaCppModel {
     }
 
     fn supports_seq_copy(&self) -> bool {
-        let ctx_guard = match self._ctx.lock() {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
+        // NOT `llama_memory_can_shift` — verified against a real Mamba model
+        // (2026-08-01) that it returns `true` for recurrent memory too
+        // ("shifting the pos is trivial for recurrent models",
+        // `llama-memory-recurrent.cpp`), the opposite of what this method
+        // needs. `llama_model_is_recurrent`/`llama_model_is_hybrid` are the
+        // model-level, architecture-authoritative answer to what this method
+        // actually asks: does fox's block-level KV copy-on-write (the prefix
+        // cache's mechanism) apply to this model at all. See
+        // docs/design/mla-recurrent-kv-sizing.md.
         unsafe {
-            let mem = ffi::llama_get_memory(ctx_guard.as_ptr() as *const _);
-            if mem.is_null() {
-                return false;
-            }
-            // llama_memory_can_shift returns true for standard attention KV caches
-            // (which also support seq_cp).  Recurrent/hybrid models return false.
-            ffi::llama_memory_can_shift(mem)
+            let model = self._model.as_ptr();
+            !ffi::llama_model_is_recurrent(model) && !ffi::llama_model_is_hybrid(model)
         }
     }
 
     fn roll_context(&self, seq_id: i32, n_keep: usize, n_discard: usize) -> Result<()> {
         if n_discard == 0 {
             return Ok(());
+        }
+        // Recurrent/hybrid models have no per-token positional KV to drop/shift at
+        // all (a fixed-size state, not growing blocks) — `llama_memory_can_shift`
+        // alone is not a reliable guard here (it reports `true` for recurrent
+        // memory, since repositioning is a cheap no-op for it, not because fox's
+        // seq_rm/seq_add-based rolling is meaningful for it). Checked in addition
+        // to, not instead of, the existing can_shift check below.
+        if unsafe { ffi::llama_model_is_recurrent(self._model.as_ptr()) }
+            || unsafe { ffi::llama_model_is_hybrid(self._model.as_ptr()) }
+        {
+            return Err(anyhow!(
+                "context rolling is not supported for recurrent/hybrid models"
+            ));
         }
         let ctx_guard = self
             ._ctx
@@ -907,9 +1161,7 @@ impl Model for LlamaCppModel {
                 return Err(anyhow!("no memory backend for context roll"));
             }
             if !ffi::llama_memory_can_shift(mem) {
-                return Err(anyhow!(
-                    "KV cache is not shiftable (recurrent/hybrid model)"
-                ));
+                return Err(anyhow!("KV cache is not shiftable"));
             }
             let keep = n_keep as i32;
             let discard = n_discard as i32;
@@ -946,6 +1198,80 @@ impl Model for LlamaCppModel {
         draft_len: usize,
     ) -> Vec<i32> {
         self.do_draft_propose(seq_id, new_tokens, base_pos, draft_len)
+    }
+
+    fn rerank_score(&self, tokens: &[i32]) -> Result<f32> {
+        self.do_rerank_score(tokens)
+    }
+
+    fn state_seq_save(&self, seq_id: i32) -> Result<Vec<u8>> {
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {e}"))?;
+        let ctx = ctx_guard.as_ptr();
+        // FLAGS_NONE, never ON_DEVICE: llama.h:883-885 warns that the on-device
+        // variant keeps the data in device buffers AND invalidates every prior state
+        // for that seq_id — the opposite of what a host-RAM cache needs.
+        let size = unsafe {
+            ffi::llama_state_seq_get_size_ext(ctx, seq_id, ffi::LLAMA_STATE_SEQ_FLAGS_NONE)
+        };
+        if size == 0 {
+            return Err(anyhow!("sequence {seq_id} has no state to save"));
+        }
+        let mut buf = vec![0u8; size];
+        let written = unsafe {
+            ffi::llama_state_seq_get_data_ext(
+                ctx,
+                buf.as_mut_ptr(),
+                size,
+                seq_id,
+                ffi::LLAMA_STATE_SEQ_FLAGS_NONE,
+            )
+        };
+        if written == 0 {
+            return Err(anyhow!("llama_state_seq_get_data_ext wrote nothing"));
+        }
+        buf.truncate(written);
+        Ok(buf)
+    }
+
+    fn state_seq_load(&self, seq_id: i32, data: &[u8]) -> Result<usize> {
+        if data.is_empty() {
+            return Err(anyhow!("cannot restore an empty state blob"));
+        }
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {e}"))?;
+        let ctx = ctx_guard.as_ptr();
+        // The destination must be empty first: set_data_ext writes cells at their
+        // recorded positions and does not clear, so leftovers would survive
+        // underneath the restored state and corrupt the sequence.
+        unsafe {
+            let mem = ffi::llama_get_memory(ctx as *const _);
+            if !mem.is_null() {
+                ffi::llama_memory_seq_rm(mem, seq_id, 0, -1);
+            }
+        }
+        let read = unsafe {
+            ffi::llama_state_seq_set_data_ext(
+                ctx,
+                data.as_ptr(),
+                data.len(),
+                seq_id,
+                ffi::LLAMA_STATE_SEQ_FLAGS_NONE,
+            )
+        };
+        if read == 0 {
+            return Err(anyhow!("llama_state_seq_set_data_ext rejected the blob"));
+        }
+        Ok(read)
+    }
+
+    fn sep_token_id(&self) -> Option<i32> {
+        let sep = unsafe { ffi::llama_vocab_sep(self.vocab) };
+        (sep >= 0).then_some(sep)
     }
 
     fn vocab_fingerprint(&self) -> u64 {
@@ -1006,8 +1332,13 @@ impl Model for LlamaCppModel {
             .unwrap_or_else(|| "unknown".to_string());
         let has_chat_template =
             unsafe { !ffi::llama_model_chat_template(model, std::ptr::null()).is_null() };
+        let supports_seq_copy = self.supports_seq_copy();
 
         ModelInfo {
+            kv_memory_class: crate::engine::model::model_info::classify_kv_memory(
+                &arch_name,
+                supports_seq_copy,
+            ),
             arch_name,
             backend: self.active_backend(),
             n_embd: self.config.n_embd,
@@ -1018,10 +1349,11 @@ impl Model for LlamaCppModel {
             n_ctx_train,
             effective_ctx: self.effective_ctx,
             vocab_size: self.config.vocab_size,
+            n_params: unsafe { ffi::llama_model_n_params(self._model.as_ptr()) },
             eos_token_id: self.eos_token,
             has_chat_template,
             supports_thinking: self.supports_thinking(),
-            supports_seq_copy: self.supports_seq_copy(),
+            supports_seq_copy,
             stop_token_count: self.stop_tokens().len(),
             recommended_sampling: self.recommended_sampling(),
         }
@@ -1034,7 +1366,29 @@ impl Model for LlamaCppModel {
 
 #[cfg(all(test, not(fox_stub)))]
 mod tests {
-    use super::resolve_context_len;
+    use super::{resolve_context_len, shrink_n_ctx};
+
+    #[test]
+    fn shrink_n_ctx_halves_toward_floor() {
+        assert_eq!(shrink_n_ctx(8192, 2048), Some(4096));
+        assert_eq!(shrink_n_ctx(4096, 2048), Some(2048));
+    }
+
+    #[test]
+    fn shrink_n_ctx_clamps_at_floor_not_below() {
+        // 2048/2=1024, which is below the 2048 floor — clamp up to the floor.
+        assert_eq!(shrink_n_ctx(3000, 2048), Some(2048));
+    }
+
+    #[test]
+    fn shrink_n_ctx_none_once_at_floor() {
+        assert_eq!(shrink_n_ctx(2048, 2048), None);
+    }
+
+    #[test]
+    fn shrink_n_ctx_none_below_floor() {
+        assert_eq!(shrink_n_ctx(1000, 2048), None);
+    }
 
     #[test]
     fn auto_uses_model_trained_ctx() {

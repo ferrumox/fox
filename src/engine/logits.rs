@@ -156,6 +156,7 @@ impl InferenceEngine {
                         is_eos,
                         stop_reason: stop_reason.clone(),
                         logprob,
+                        cached_tokens: req.skip_prefix_tokens as u32,
                     })
                     .is_ok();
 
@@ -197,11 +198,20 @@ impl InferenceEngine {
                         m.request_latency_seconds.observe(elapsed);
                     }
 
-                    // Cache the KV state for potential prefix reuse on future identical prompts.
-                    // Disabled for models that don't support llama_memory_seq_cp (e.g. Mamba/hybrid).
-                    // `EngineError` is deliberately NOT in this list: a request that failed
-                    // mid-decode has a partial/unreliable KV state that must never become a
-                    // reusable prefix for a future request.
+                    // Park the sequence so its KV stays resident and a later prompt
+                    // sharing a prefix with it can skip re-prefilling that much.
+                    //
+                    // Unlike the old block-hash cache this keeps the *whole* logical
+                    // sequence, prompt and generated tokens alike, and performs no
+                    // trim: the next occupant is trimmed at its own divergence point
+                    // during admission instead (`ScheduledBatch::kv_trims`), which is
+                    // what makes token-exact reuse possible.
+                    //
+                    // Disabled for models that can't reuse KV across requests at all
+                    // (recurrent/hybrid — a fixed-size state, not positional blocks).
+                    // `EngineError` and `Preempt` are deliberately excluded: a request
+                    // that failed or was preempted mid-decode has a partial, unreliable
+                    // KV state that must never become a reusable prefix.
                     let should_clear = if self.supports_prefix_cache
                         && matches!(
                             stop_reason,
@@ -209,17 +219,7 @@ impl InferenceEngine {
                                 | Some(StopReason::Length)
                                 | Some(StopReason::StopSequence)
                         ) {
-                        match self.scheduler.try_insert_prefix(*req_id) {
-                            Some(cached_tokens) => {
-                                // Keep exactly [0, cached-1): the boundary token is
-                                // re-submitted on a hit, and any stale tail would
-                                // collide with the next occupant's positions.
-                                self.model
-                                    .trim_sequence(req.kv_seq_id, cached_tokens.saturating_sub(1));
-                                false
-                            }
-                            None => true,
-                        }
+                        !self.scheduler.park_finished(*req_id)
                     } else {
                         true
                     };

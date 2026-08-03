@@ -9,6 +9,499 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.19.0] - 2026-08-03
+
+### Fixed
+
+- **The intermittent `make e2e` failure, found and fixed — it was the test.** Checks 1
+  and 9 sent `max_tokens: 12` with no `temperature` (so fox's stochastic `0.8`
+  default) and no `min_tokens`, then asserted `finish == "length"`. Nothing stopped
+  the model emitting EOS before the twelfth token, which yields `"stop"` and fails.
+  Measured rather than waited for: 600 requests in check 9's concurrent shape
+  produced 2 early stops (0.33% each), which across the suite's 7 such requests is
+  ~1 failing run in 43 — against the 1-in-~52 actually observed. Adding
+  `min_tokens: 12` makes `finish == "length"` a fact about the engine instead of a
+  coin flip, without weakening what the checks are for (a request that dies after
+  its prefill token still reports `n < 12`). Verified under identical concurrent
+  conditions: 600/600 `length`, zero short.
+
+- **A model loaded from outside `models_dir` was unreachable by its own name.**
+  `--model-path` pointing anywhere other than `models_dir` produced a server that
+  advertised the model in `/health` and `/props` under a name every request path
+  then answered `404` for. Two things combined: `resolve_model_name` only ever
+  scans `models_dir`, and `get_or_load` resolved *before* checking what was already
+  resident — so a model that was loaded and serving could not vouch for its own
+  name.
+
+  The registry now records where each model it loads came from and consults that
+  right after alias resolution, before the directory scan. Deliberately not
+  forgotten on unload: the path is still the right answer for that stem, and
+  dropping it would make an evicted `--model-path` model unreachable again at the
+  first keep-alive expiry — the same bug, resurfacing later and harder to attribute.
+
+- **`/api/show` answered from the filename, not the model.** `parameters` and
+  `template` were empty strings and `parameter_size` was the literal `"unknown"`,
+  because every field was parsed out of the file stem. When the model is resident it
+  now answers for itself: real dimensions, effective context, and an **exact**
+  parameter count from `llama_model_n_params`. It still does not load a model to
+  answer — `GET /props` covers the resident model unconditionally, and loading here
+  would evict the serving model under `--max-models 1`.
+
+  (An intermediate version derived the parameter count from
+  `n_embd`/`n_layer`/`vocab_size` and reported **1.6B for llama-3.2-1b**, which is
+  really 1.24B: the estimate ignored grouped-query attention, which shrinks K and V,
+  and double-counted tied input/output embeddings. Replacing `"unknown"` with a
+  confident wrong number is worse than either, so the estimate was dropped for the
+  exact value.)
+
+- **Ollama `keep_alive` was parsed and never applied.** A client asking to keep a
+  model warm, or to drop it promptly, got a `200` and no effect — and the test
+  only asserted that `200`, so the field being inert was invisible. Now honoured
+  per request: a duration string (`"5m"`, `"30s"`, `"500ms"`) or a number of
+  seconds sets that model's idle TTL, a negative value pins it against timed
+  eviction, and `0` sets a zero TTL so the next eviction pass drops it. The
+  eviction task now runs even when the server-wide `--keep-alive-secs` is `0`,
+  since a request can set a TTL where the server has none — otherwise the field
+  would have stayed inert in exactly that configuration. Deliberate divergence
+  from Ollama: `keep_alive: 0` unloads on the next eviction tick (within 60s)
+  rather than the instant the response ends, which also means it can never kill
+  the request that asked for it (`is_busy` guards the pass).
+
+- **Ollama options silently dropped by serde** (`num_ctx`, `num_keep`,
+  `typical_p`, `mirostat`, `mirostat_tau`, `mirostat_eta`, `penalize_newline`)
+  are now declared and reported. fox does not implement them — `num_ctx` would
+  need a model reload, `num_keep` exists only as the server-wide
+  `--context-keep`, and the samplers are absent for the reasons in
+  `docs/design/llama-server-gap-analysis.md` §3 — so setting one logs a warning
+  naming it, instead of vanishing. They are not rejected: clients send Ollama's
+  defaults on every request, and a 400 would break them.
+
+- **JSON-Schema→GBNF dropped optional properties.** A schema like
+  `{properties: {a, b}, required: [a]}` produced a grammar that *forbade* `b`
+  entirely, so guided decoding could never emit a declared optional field. This
+  was a correctness bug, not the documented "simplification": the grammar was not
+  merely stricter than the schema, it contradicted it. Optional properties are now
+  emitted as genuinely optional members. Two limits stay, both documented at the
+  call site: optional properties may only appear in declaration order (modelling
+  every permutation is exponential; llama.cpp's own converter has the same
+  limitation), and an *absent* `required` still means "all properties required".
+  An explicitly empty `"required": []` is now honoured literally, so an
+  all-optional object is expressible — previously the two were collapsed.
+
+- **`/v1/completions` ignored almost every parameter and returned the wrong
+  shape.** The handler hard-coded `None` for `top_p`, `top_k`, `stop`, `seed`,
+  `logprobs`, `logit_bias` and both penalties, so they were accepted and silently
+  did nothing; and it returned a `chat.completion` object, while clients of the
+  legacy endpoint read `choices[].text`. (`CompletionResponse`/`CompletionChoice`
+  were declared in the types module and never constructed.) All sampling
+  parameters are now threaded through, and the response — streaming and
+  non-streaming — is rewritten to the `text_completion` shape. `echo` and
+  `suffix` are rejected with a 400 rather than silently ignored, since a caller
+  cannot otherwise detect that they had no effect.
+
+- **Ollama responses reported no prefill/decode split.** `load_duration` and
+  `prompt_eval_duration` were the literal constant `0`, and `total_duration` and
+  `eval_duration` were the same wall clock, on both `/api/generate` and
+  `/api/chat`, streaming and not. All four are now measured: model-load time,
+  submission-to-first-token, and first-token-to-last. `prompt_eval_duration`
+  includes scheduler queueing as well as prefill compute — real latency the
+  client paid, and fox has no cheaper place to separate the two. The same split
+  is now in the per-request `done` log line (`prefill_ms`, `decode_ms`).
+
+- **`stream_options.include_usage` was parsed and ignored** — usage always rode
+  the final chunk. An explicit `false` now suppresses it. Omitting
+  `stream_options` keeps the previous always-attach behaviour, so no existing
+  caller changes.
+
+### Changed
+
+- **`n>1` / `best_of` no longer prefills the same prompt N times.** Branch 0
+  prefills; the rest wait for it and copy its KV
+  (`llama_memory_seq_cp`) instead of recomputing the identical thing. Measured on
+  an 801-token prompt with `n=4`, alternating arms, one server at a time:
+  **6.60/6.63 s → 2.01/1.96 s (3.4×)**. The server log shows one full admission and
+  three branches reporting `cached_tokens: 800` of 801.
+
+  The wait is what makes it correct: a branch is held back until its parent is
+  actually decoding, since there is nothing to copy before that. Deferred branches
+  are re-queued rather than left at the queue head — they are not blocked on
+  *capacity*, so stalling everything behind them would be a self-inflicted
+  head-of-line block. If the parent never materialises (finished, failed, never
+  admitted) the branch falls back to an ordinary full prefill, so this is a speed
+  optimisation with no correctness edge of its own; slot affinity usually finds the
+  parent's parked KV anyway.
+
+  Multimodal and LoRA branches are excluded: multimodal counts positions from image
+  chunks while the resubmission boundary counts `prompt_tokens` (empty for them), so
+  the two would disagree; a LoRA branch must not inherit KV computed under a
+  different adapter. Branches allocate their own block budget rather than sharing —
+  llama.cpp shares the cells itself under `kv_unified`, so fox's accounting is
+  merely conservative, and the dormant copy-on-write path stays dormant.
+
+  Output is unaffected: `n=4` still returns four distinct completions.
+
+### Added
+
+- **`GET` / `POST /lora-adapters` — inspect and re-scale adapters at runtime.**
+  fox could load adapters with `--lora-modules` and select one by naming it in the
+  `model` field, but there was no way to see what was loaded or to change an
+  adapter's strength without restarting — the point of a scale being a number
+  rather than a rebuild. `GET` lists `{id, name, path, scale}` with the scale
+  currently in effect; `POST` takes `[{id|name, scale}]`.
+
+  Only the *default* scale is mutable, and that is sufficient: a request's
+  `LoraSelection` already carries its own scale down to `llama_set_adapters_lora`,
+  so overriding what gets copied into it is the whole mechanism and the model's
+  adapter handles stay immutable after load. A body naming one valid and one
+  unknown adapter is resolved before anything is applied, so it changes **nothing**
+  rather than leaving the server in a state the caller neither asked for nor can
+  infer from the error. Changes apply to subsequent requests; a generation already
+  in flight keeps the scale it was admitted with, since the adapter set is a
+  property of the batch being decoded.
+
+  Verified against a real adapter: listing, setting by name and by id, the
+  all-or-nothing rejection (scale unchanged at 0.9 after a partially-invalid body),
+  and the new scale reaching the server.
+
+- **`--cache-ram <MiB>` — host-RAM prompt cache.** Complements `--kv-reuse`: a slot
+  keeps a conversation warm by holding GPU blocks, this keeps one warm without
+  holding any. A reclaimed sequence is serialised to host memory
+  (`llama_state_seq_get_data_ext`) and restored later
+  (`llama_state_seq_set_data_ext`) instead of being re-prefilled.
+
+  Ordering in the engine is load-bearing: **saves → clears → restores → trims**. A
+  save must read the sequence before the clear wipes it; a restore must land after
+  the clears (its destination may itself have just been reclaimed) and before the
+  trims, which bound the *restored* state at the new request's divergence point. A
+  failed restore resets the request to prefill from token 0 rather than letting it
+  read cells that were never written — slower, never wrong.
+
+  The FFI round-trip is verified against a real model: a saved state restored into a
+  *different* sequence predicts the identical token with logits matching to <1e-3,
+  and restoring over a dirty destination is correct because the load clears first.
+
+  **Not a general speedup, and defaults to `0`.** Reclamation only triggers when the
+  block pool is exhausted *and* the claiming request needs more blocks than the slot
+  it inherits — neither holds under sequential single-client traffic, where every
+  request shares the chat-template prefix and LCP affinity routes them all onto one
+  slot whose blocks they inherit unchanged. It earns its keep under concurrent,
+  distinct conversations that exhaust the pool. See
+  `docs/design/llama-server-gap-analysis.md` §1.C.
+
+- **`GET /props` and `GET /slots`** — server and per-sequence introspection.
+  `/props` reports architecture, backend, allocated vs trained context,
+  dimensions, and capability flags (`supports_thinking`, `supports_vision`,
+  `supports_infill`, `supports_kv_reuse`) **read from the loaded model**, never
+  inferred from its filename. It never triggers a load: under the default
+  `--max-models 1` that would evict whatever is serving traffic, so `model` is
+  simply `null` when nothing is resident. `/slots` reports each sequence as
+  `free`/`processing`/`idle` with its resident token count, blocks charged and idle
+  time — which is what makes the KV reuse work observable. Slot *contents* are
+  deliberately not exposed: a parked sequence is another user's conversation, and
+  llama-server redacts the same fields.
+
+- **`POST /infill`** — fill-in-the-middle completion, what editor plugins call to
+  fill in code at the cursor. Emits the FIM token layout the model was trained on
+  (`[SUF] suffix [PRE] prefix [MID]`; suffix first, so the model reads what it must
+  join up to before it starts writing) and accepts `input_extra` for repo-level
+  context. A model whose vocabulary has no FIM tokens is **rejected with an
+  explanation** rather than answered: prompting a chat model for infill produces
+  fluent text that ignores the suffix, and the caller has no way to tell.
+  Verified against a real FIM-capable model — the completion joined the suffix
+  exactly.
+
+- **`POST /rerank` and `/v1/rerank`** — score documents against a query with a
+  reranker model, plus **`--reranking`** to load one. Accepts both the Jina/Cohere
+  (`documents`) and TEI (`texts`) spellings, plus `top_n` and `return_text`, and
+  preserves each result's original index across sorting.
+
+  `--reranking` creates the model's context with `RANK` pooling, which is what
+  makes the relevance head readable. **This cannot be auto-detected**: a reranker
+  GGUF does not reliably carry a `<arch>.pooling_type` key — `jina-reranker-v1-tiny-en`
+  has none — so llama.cpp's `UNSPECIFIED` fallback resolves to `NONE`. llama-server
+  takes a flag for exactly the same reason (`arg.cpp:3067-3070`). Without it,
+  `llama_get_embeddings_seq` returns `NULL`, and that `NULL` is the signal used to
+  reject the request rather than answer it with a number derived from a mean-pooled
+  vector, which would look like a ranking and rank nothing.
+
+  Verified end to end against a real reranker: querying "What is the capital of
+  France?" over four documents ranked Paris first, the Eiffel Tower second and
+  bananas last, with original indices preserved; `top_n` and the TEI spelling both
+  behave.
+
+- **`POST /tokenize`, `/detokenize`, `/apply-template`** — llama-server's tokenizer
+  utilities (`server-context.cpp:4899-4956, 4846-4856`). No inference involved, just
+  the loaded model's vocabulary and chat template; clients use them to count tokens
+  before sending a request and to debug template rendering. fox already had every
+  underlying piece (`InferenceEngine::tokenize`, `build_prompt_tokens`) and simply
+  never routed them. `/tokenize` supports `with_pieces`, reporting raw bytes for a
+  token that holds only part of a multi-byte codepoint rather than lossily decoding
+  it. `/apply-template` renders through the *same* path a real request takes and
+  then detokenizes, so what it returns is literally what the model would receive,
+  control tokens included.
+
+- **Raw GBNF `grammar` request field** on `/v1/chat/completions` and
+  `/v1/completions`, mirroring llama-server. The engine has had full GBNF support
+  since 0.14, but the only way to reach it was `response_format`/`format`, which can
+  only describe JSON. Setting both `grammar` and `response_format` is a 400 rather
+  than a silent precedence rule.
+
+- **`usage.prompt_tokens_details.cached_tokens`** on the OpenAI surface — how many
+  prompt tokens were served from resident KV instead of being re-prefilled. This is
+  the only way a client can observe the KV-reuse rework. The field is omitted
+  entirely when nothing was cached, so responses are unchanged when there is nothing
+  to report.
+
+- **`top_n_sigma` and `min_keep` samplers**, on both API surfaces (and
+  `/v1/completions`). `top_n_sigma` keeps only tokens within N standard
+  deviations of the top logit — unlike `top_p` the cutoff lives on the logit
+  scale, so it is invariant under `temperature` (there is a test for exactly
+  that). `min_keep` floors how few candidates any truncation step may leave.
+  Both default to off. `typical_p`, `mirostat`, XTC and DRY remain unimplemented:
+  they need distribution-wide state that conflicts with fox's adaptive candidate
+  pool, which is a design question rather than a missing line of code — see
+  `docs/design/llama-server-gap-analysis.md` §3.
+
+- **`repeat_last_n` on the Ollama surface** (`options.repeat_last_n`), which
+  upstream Ollama supports and fox previously dropped silently.
+
+### Changed
+
+- **KV reuse reworked: sequences now remember what they hold** (`--kv-reuse`,
+  `--slot-prompt-similarity`). fox's prefix cache was a `LruCache` of donated
+  whole-block prompt prefixes, and it had three structural limits: it held
+  `max_batch_size/4` entries (**8** at defaults, with no flag to raise it); reuse
+  was aligned to `block_size`, so a prompt matching 31 of 32 tokens reused 16;
+  and **only the prompt was cached — the generated reply was always discarded**,
+  which is why multi-turn chat, whose next prompt contains the previous reply,
+  could never hit past the previous prompt's end.
+
+  Replaced with llama-server's slot model (`server-context.cpp:1586-1694`,
+  `:3166-3243`): every sequence permanently records the tokens resident in its
+  KV, prompt *and* generation. A finished request parks its sequence instead of
+  freeing it, admission picks the sequence sharing the longest common prefix with
+  the incoming prompt, and reuse is token-exact. Idle sequences are reclaimed
+  LRU under block pressure — not preemption: they belong to requests that already
+  finished and whose output the client already has, and `Busy` slots are never
+  touched, so the never-preempt-on-admission invariant is unchanged.
+
+  Measured on CPU/zen4 with llama-3.2-1b-instruct-q8_0, alternating arms, one
+  server at a time. Reuse on vs off, repeated ~3.5k-token prompt: **6.1×** median
+  TTFT (4760 → 782 ms, disjoint ranges). Old build vs new on a 12-conversation
+  working set — bigger than the old 8-entry cache, smaller than the new 32-slot
+  table: median 52.1 → 37.6 ms, but the real number is the **tail**, mean
+  1247.6 → 36.3 ms (**34×**) and p90 3650.5 → 38.7 ms (**94×**), because the old
+  cache evicted a third of the working set every pass and each eviction cost a
+  full re-prefill. See `docs/design/llama-server-gap-analysis.md`.
+
+  `--kv-reuse false` restores the previous behaviour exactly, and is the baseline
+  arm for reproducing the measurement.
+
+  **Known consequence: greedy output drifts more often under concurrent load.**
+  Measured at `temperature: 0`, 4 concurrent clients, 10 rounds against a sequential
+  baseline: 2/10 rounds differed with `--kv-reuse false`, 10/10 with it on. The
+  nondeterminism is **pre-existing** — the control arm has reuse disabled and still
+  drifts, because concurrent requests are batched together by arrival timing and
+  llama.cpp does not guarantee bit-identical logits across batch compositions. Reuse
+  amplifies it by collapsing prefill, so requests spend far more of their life
+  decoding alongside each other. It is **not** incorrect KV: *sequential* reuse is
+  byte-identical across repeats (verified with `cached_tokens` up to 396), which is
+  the same code path with the same cache state. A caller needing reproducible greedy
+  output needs a serialised request stream — `seed` does not help, since the variation
+  is in the forward pass rather than the sampler. See
+  `docs/design/llama-server-gap-analysis.md` §1, which also records a single
+  unreproduced `make e2e` failure (1 in ~52 runs, zero in the 51 since) whose cause
+  remains unknown and which the drift above is the wrong magnitude to explain.
+
+- **Concurrent requests now copy a shared prefix from a *live* sequence.** Slot
+  affinity can only inherit an *idle* sequence, so N requests arriving together
+  behind one system prompt could reuse nothing from each other — each prefilled the
+  shared prompt. A busy sequence cannot be inherited without stealing a live
+  request's KV, but it *can* be copied from: under `kv_unified`, `seq_cp` shares
+  llama.cpp's cells rather than duplicating the buffer. Requests behind a donor that
+  is still prefilling are deferred and re-queued rather than left at the queue head,
+  since they are blocked on a sibling and not on capacity. Measured against
+  `llama-server` (both from the same vendored llama.cpp, Radeon 890M / Vulkan, 3
+  rounds, disjoint ranges): **4.0× faster cold TTFT at 8 concurrent clients behind a
+  1856-token system prompt, 5.75× at 16**, with the whole-burst wall clock at 3.8 s
+  against 16.2 s. Doubling the clients costs fox 24% more cold TTFT and
+  `llama-server` 79%. `llama-server` cannot do this by construction: its
+  `get_available_slot()` skips `is_processing()` slots in both its similarity pass
+  and its LRU fallback, so its concurrent arrivals report `cached_tokens` 0.
+
+- **A shared prefix is charged to the block budget once, not once per sharer.**
+  Sharing the prefill left the accounting duplicated: each sharer skipped the
+  prefill and still reserved its own blocks for the positions it had just copied.
+  Blocks are an admission budget rather than addresses, so this wasted no GPU memory
+  — llama.cpp's cells really are shared — but it made fox admit less concurrency
+  than the hardware holds. Pool occupancy on 6 concurrent clients behind a 673-token
+  prompt: **282 → 72 blocks**. The reservation is now sized before allocating, so
+  the capacity check agrees with reality instead of turning a burst away for
+  capacity it was never going to hold. Only *whole* blocks are shared: the block
+  straddling the divergence point stays private, which is what guarantees a shared
+  block never receives a write — and is why the decode path deliberately has no
+  copy-on-write pass.
+
+
+### Added
+
+- **`--repeat-last-n` / `FOX_REPEAT_LAST_N` — bounded penalty window.** The
+  repetition, frequency and presence penalties previously scanned *every* token
+  generated so far on every sampling step. Two consequences, both fixed by
+  bounding the window: `apply_frequency_presence_penalty` rebuilt a full
+  `HashMap` over the whole history per token, making the penalty pass
+  `O(generated²)` per request; and the Ollama surface's `repeat_penalty = 1.1`
+  default kept penalising tokens from thousands of positions back, degrading
+  long outputs. Semantics follow llama.cpp's `repeat_last_n`: `-1` = whole
+  history, `0` = disabled, `n` = last `n`. Overridable per request via
+  `repeat_last_n` (`/v1/*`, a fox extension) and `options.repeat_last_n`
+  (`/api/*`, which upstream Ollama supports and fox previously dropped
+  silently). **Defaults to `-1`, so output is bit-identical to before unless
+  the knob is set** — llama.cpp defaults to `64`, but adopting that would have
+  silently changed output for every existing caller. One deliberate divergence
+  from llama.cpp, documented at the call site: fox's window covers only
+  *generated* tokens, never the prompt, which is what fox has always done.
+
+## [0.18.0]
+
+### Added
+
+- **LoRA adapter support** (`--lora-modules <name>=<path>[:<scale>][,...]` /
+  `FOX_LORA_MODULES`) — loads one or more named LoRA adapters onto the primary
+  model at startup; a client selects an adapter per-request the same way it
+  selects a model, by passing the adapter's name as the `model` field
+  (mirrors vLLM's `--lora-modules name=path` convention). Since
+  `llama_set_adapters_lora` is a property of the whole `llama_context`, not of
+  a sequence, requests are grouped by adapter selection and processed as
+  separate sub-batches — the same approach llama.cpp's own reference server
+  uses. Prefix caching is skipped for any request carrying an adapter
+  selection (KV computed under one adapter is invalid for another). Verified
+  end-to-end against a real base model + a real, independently-trained
+  reasoning-style adapter: 24/24 e2e checks pass, including the adapter
+  measurably changing output and an interleaved base/adapter/base/adapter
+  request sequence never corrupting context state. v1 scope: one base model
+  per `--lora-modules` set (no cross-base-model LoRA), no per-sequence mixed-
+  adapter batching (not a fox limitation — llama.cpp has no kernel for it), no
+  hot-reload. See `docs/design/lora-support.md`.
+
+- **Multiple completions per request** (`n`, `best_of` on
+  `/v1/chat/completions` and `/v1/completions`) — `n` (1–8) returns that many
+  independent completions in `choices[]`; `best_of` (≥ `n`) samples more
+  candidates than returned and keeps the `n` with the highest total
+  log-likelihood. Each choice is a fully independent generation over the same
+  prompt (fan-out, not a shared-prefill fork), so branches naturally diverge
+  under `temperature > 0`; an explicit `seed` is perturbed per branch so it
+  doesn't collapse `n` completions into identical copies. Streaming interleaves
+  all branches into one SSE stream, tagged by `index`, merged via
+  `tokio_stream::StreamMap`. `best_of > n` is rejected with `stream: true`
+  (matches OpenAI's own restriction — ranking needs the full completion
+  before anything can be shown). Verified end-to-end against a real model:
+  `n: 3` returns 3 correctly-indexed choices with correctly summed usage, no
+  regressions across the rest of the e2e suite. v1 scope: no KV-level
+  shared-prefill forking (each branch reprocesses the prompt independently),
+  beam search itself remains unimplemented. See
+  `docs/design/n-best-of-support.md`.
+
+- **Correct KV sizing for MLA and recurrent/hybrid models** — the context's
+  `n_ctx` was still capped at load time by a hand-rolled positional formula
+  (`n_head_kv * head_dim * n_layer`), wrong for MLA (DeepSeek-V2/V3, whose
+  compressed latent KV the formula massively over-estimates) and meaningless
+  for recurrent/hybrid (Mamba, RWKV, Jamba — no per-token KV at all). Replaced
+  with an empirical create-then-shrink-on-failure retry loop: attempt the full
+  desired context, halve and retry only on a real `llama_init_from_model`
+  failure — the same "observe real failure, retry smaller" approach 0.16
+  already shipped for decode-time OOM, applied one layer earlier, uniformly
+  across every architecture. Added a lightweight `KvMemoryClass`
+  (Standard/Latent/Recurrent) to `ModelInfo`/`fox probe` for observability.
+  Verified against real DeepSeek-V2-Lite (MLA) and Mamba (recurrent) models —
+  both added to `registry.json`. See `docs/design/mla-recurrent-kv-sizing.md`.
+
+- **Reactive context-rolling on OOM** — closes the last item on the
+  vLLM-parity shortlist. When 0.16's decode-time bisection retry bottoms out
+  at a single request and it still can't decode, fox now attempts one
+  targeted context roll on that request (reusing the existing
+  `--context-shift` mechanism) and retries the whole batch once more before
+  giving up with `EngineError` — a "further degrade" step beyond just
+  shrinking the batch. A typed error carries the failing request id from the
+  model layer (which has no scheduler/config access) up to the engine layer
+  that does. In practice a narrow safety net for residual cases — verified
+  live that the existing proactive context-shift threshold already prevents
+  most contention under normal concurrent load. See
+  `docs/design/reactive-context-rolling.md`.
+
+### Fixed
+
+- **`fox pull <name>` didn't actually use the curated registry it advertises** —
+  `fox models`/`registry.json` map short names/aliases to a specific HF repo +
+  recommended file, but `fox pull` never consulted that catalog: it always ran
+  a live HuggingFace search by name and hoped the top result happened to match.
+  `fox pull` now checks the registry first (exact name, alias, or
+  `<name>-<quant>`) and resolves straight to the intended repo/file; falls back
+  to the historical live-search behavior unchanged for any name not in the
+  registry. Vision entries now print a follow-up hint for their paired mmproj
+  file after downloading (not auto-fetched, to avoid a surprise extra
+  download for text-only use).
+
+- **Recurrent/hybrid models were silently getting prefix caching enabled**
+  when it should have been disabled — found while verifying the KV-sizing fix
+  above against a real Mamba model. The existing detection
+  (`llama_memory_can_shift`) has, since an upstream llama.cpp change, returned
+  `true` for recurrent memory too ("shifting the pos is trivial" for it — a
+  cheap-operation signal, not a "safe for fox's block-copy prefix cache"
+  signal), silently defeating the v0.3.1 fix this was supposed to be. Replaced
+  with `llama_model_is_recurrent`/`llama_model_is_hybrid` — the direct,
+  architecture-level llama.cpp APIs for the question actually being asked.
+
+- **`--max-models 1` (the default) and `--swap-fraction` were silent
+  footguns** — a second model request evicting the first, or a
+  `--swap-fraction` value doing nothing at all, both happened with zero
+  feedback. `fox serve` now logs the trade-off explicitly at startup when
+  `--max-models` is left at its default, and warns if `--swap-fraction` is
+  set to a nonzero value (it remains unimplemented — real CPU↔GPU KV swap is
+  blocked on a llama.cpp API that doesn't exist yet). The `max_models=1`
+  default itself is intentionally left unchanged: fox has no cross-model VRAM
+  accounting yet (the per-load fit check compares against a static,
+  whole-GPU figure from startup, never subtracting what other loaded models
+  already claim), so raising the default without that accounting would trade
+  a churn footgun for a real OOM-crash footgun.
+
+- **A real server crash, found while verifying reactive context-rolling
+  against actual concurrent load** — several requests admitted into the same
+  prefill step each contributed their own chunk to one shared `llama_decode`
+  call, and their combined token count could exceed `n_batch`.
+  `--max-prefill-chunk` only capped one request's own chunk, not the sum
+  across several concurrently-admitted requests (also reachable with a
+  *single* request whenever `max_prefill_chunk` itself exceeds `n_batch` — a
+  small `--max-context-len` shrinks `n_batch` below the 512-token default).
+  Unlike `ret==1` ("no KV slot"), llama.cpp enforces this via a hard
+  `GGML_ASSERT` abort with no graceful return code — a full process crash,
+  not a per-request failure, reproduced live with 9 concurrent requests
+  against a deliberately small `--max-context-len`. Fixed by allocating the
+  real `n_batch` (queried via `llama_n_batch`) across requests in submission
+  order before ever building the batch; any request that doesn't fit this
+  step simply gets deferred to the next one, the same mechanism a single
+  request's own multi-step chunking already relied on. See
+  `docs/design/reactive-context-rolling.md`.
+
+### Changed
+
+- **Beam search closed as a deliberate non-goal**, not left as an open
+  backlog item — the last row on `vllm-gap-analysis.md`'s vLLM-parity
+  shortlist. Investigated rather than assumed: llama.cpp removed its
+  `llama_beam_search()` API in 2024 (an ancestor of fox's pinned commit,
+  nothing to build on); vLLM itself pulled beam search out of its
+  PagedAttention/continuous-batching fast path into a separate,
+  offline-batch-oriented API for the same composability reasons fox would
+  face; and no major LLM API (OpenAI, Gemini, Claude) exposes real
+  token-level beam search today. A real, KV-sharing-efficient
+  implementation would need live cross-sequence forking mechanics neither
+  fox nor llama.cpp currently offer cleanly; a naive independent-request
+  approximation would just be a more expensive, weaker variant of the
+  `n`/`best_of` fan-out already shipped in 0.18. No code changed — see
+  `docs/design/vllm-gap-analysis.md` §2 for the full reasoning.
+
 ## [0.17.0]
 
 fox gets **vision/multimodal input** — the top feature-gap item for the LatAm

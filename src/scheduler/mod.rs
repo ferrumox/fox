@@ -4,17 +4,17 @@
 // that doesn't fit waits in the queue (FIFO) until running requests finish.
 
 mod batch;
-mod prefix_cache;
+mod prompt_cache;
 mod schedule;
+mod slots;
 
 #[allow(unused_imports)]
 pub use batch::{
-    InferenceRequest, RequestState, SamplingParams, ScheduledBatch, StopReason, Token,
-    TokenLogprob, TopLogprob,
+    InferenceRequest, LoraSelection, RequestState, SamplingParams, ScheduledBatch, StopReason,
+    Token, TokenLogprob, TopLogprob,
 };
 
 use std::collections::VecDeque;
-use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
@@ -22,7 +22,13 @@ use tracing::info;
 
 use crate::kv_cache::KVCacheManager;
 
-use prefix_cache::PrefixCacheEntry;
+use prompt_cache::PromptCache;
+pub use slots::SlotSnapshot;
+use slots::SlotTable;
+
+/// Default LCP-similarity floor below which an idle slot's KV is not worth
+/// inheriting. Mirrors llama-server's `-sps/--slot-prompt-similarity` default.
+pub const DEFAULT_SLOT_PROMPT_SIMILARITY: f32 = 0.1;
 
 /// Scheduler managing waiting queue and running batch.
 pub struct Scheduler {
@@ -31,14 +37,33 @@ pub struct Scheduler {
     pub(super) kv_cache: Arc<KVCacheManager>,
     /// Notified when a new request is submitted, waking the engine loop.
     work_notify: tokio::sync::Notify,
-    /// Pool of available llama.cpp sequence IDs (0..max_batch_size).
-    pub(super) seq_id_pool: std::sync::Mutex<Vec<i32>>,
-    /// Prefix cache: completed-request KV data keyed by hash(prompt_tokens).
-    /// LruCache provides O(1) access and automatic LRU ordering for future eviction.
-    /// Lock ordering: always acquire `running_batch` BEFORE `prefix_cache`.
-    pub(super) prefix_cache: std::sync::Mutex<lru::LruCache<u64, PrefixCacheEntry>>,
-    /// Maximum number of entries held in the prefix cache simultaneously.
-    pub(super) prefix_cache_max: usize,
+    /// The llama.cpp sequence slots, one per concurrent request, each remembering
+    /// the tokens resident in its KV. This *is* fox's prefix cache: it replaces the
+    /// old `seq_id_pool` + block-hash `LruCache` pair (see `slots.rs` for why).
+    ///
+    /// Slot index == `seq_id`, matching `llama-server`'s `slot.id = i`. IDs are no
+    /// longer required to be handed out densely: `split_equal`'s
+    /// consecutive-ascending constraint only applies to a non-unified cache
+    /// (`n_stream > 1`), and fox sets `kv_unified = true` since `1c36faf`, so
+    /// `llama-kv-cache.cpp:725` picks `split_simple`, which has no ordering
+    /// requirement. See `docs/design/llama-server-gap-analysis.md` §0.1. (The batch
+    /// is still *emitted* in ascending seq_id order — see `do_decode_batch`.)
+    ///
+    /// Lock ordering: always acquire `running_batch` → `waiting_queue` → `slots`.
+    pub(crate) slots: std::sync::Mutex<SlotTable>,
+    /// Minimum fraction of an incoming prompt that must already be resident in an
+    /// idle slot before that slot's KV is inherited instead of starting fresh.
+    pub(super) slot_prompt_similarity: f32,
+    /// Host-RAM store of serialised sequence states (`--cache-ram`). Complements the
+    /// slot table: slots keep a conversation warm by holding GPU blocks, this keeps one
+    /// warm without holding any. Empty and inert when the budget is 0 (the default).
+    ///
+    /// Lock ordering: acquired after `slots`, never while holding the model lock.
+    pub(crate) prompt_cache: std::sync::Mutex<PromptCache>,
+    /// Master switch for KV reuse (`--kv-reuse`). When false, finished sequences are
+    /// always cleared and every prompt is prefilled from token 0 — the pre-0.19
+    /// behaviour, kept as an escape hatch and as the A/B baseline arm.
+    pub(super) kv_reuse: bool,
     /// Lifetime hit counter (for metrics / logging).
     pub prefix_hits: AtomicU64,
     /// Lifetime miss counter (for metrics / logging).
@@ -90,24 +115,36 @@ impl Scheduler {
         max_batch_size: usize,
         max_queue_depth: usize,
     ) -> Self {
-        let pool: Vec<i32> = (0..max_batch_size as i32).collect();
-        // Reserve up to 1/4 of the batch size for prefix cache entries (minimum 1).
-        let prefix_cache_max = (max_batch_size / 4).max(1);
         Self {
             waiting_queue: std::sync::Mutex::new(VecDeque::new()),
             running_batch: std::sync::Mutex::new(Vec::new()),
             kv_cache,
             work_notify: tokio::sync::Notify::new(),
-            seq_id_pool: std::sync::Mutex::new(pool),
-            prefix_cache: std::sync::Mutex::new(lru::LruCache::new(
-                NonZeroUsize::new(prefix_cache_max)
-                    .expect("prefix_cache_max is max_batch_size/4 clamped to >= 1"),
-            )),
-            prefix_cache_max,
+            slots: std::sync::Mutex::new(SlotTable::new(max_batch_size)),
+            prompt_cache: std::sync::Mutex::new(PromptCache::new(0)),
+            slot_prompt_similarity: DEFAULT_SLOT_PROMPT_SIMILARITY,
+            kv_reuse: true,
             prefix_hits: AtomicU64::new(0),
             prefix_misses: AtomicU64::new(0),
             max_queue_depth,
         }
+    }
+
+    /// Set the host-RAM prompt-cache budget in bytes (`--cache-ram`, 0 = disabled).
+    pub fn with_prompt_cache(self, limit_bytes: usize) -> Self {
+        if let Ok(mut c) = self.prompt_cache.lock() {
+            *c = PromptCache::new(limit_bytes);
+        }
+        self
+    }
+
+    /// Override the KV-reuse policy (`--kv-reuse` / `--slot-prompt-similarity`).
+    /// Chained onto a constructor so the many test and bench call sites that only
+    /// care about the defaults stay untouched.
+    pub fn with_kv_reuse(mut self, kv_reuse: bool, slot_prompt_similarity: f32) -> Self {
+        self.kv_reuse = kv_reuse;
+        self.slot_prompt_similarity = slot_prompt_similarity.clamp(0.0, 1.0);
+        self
     }
 
     /// Submit a request to the waiting queue. Rejects synchronously (before the
@@ -145,6 +182,38 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Store a serialised sequence state in the host-RAM cache. Called by the engine
+    /// after it has serialised a sequence the scheduler asked it to save.
+    pub fn store_prompt_state(&self, tokens: Vec<i32>, data: Vec<u8>) {
+        if let Ok(mut c) = self.prompt_cache.lock() {
+            c.store(tokens, data);
+        }
+    }
+
+    /// Drop every cached sequence state (model unload).
+    pub fn clear_prompt_cache(&self) {
+        if let Ok(mut c) = self.prompt_cache.lock() {
+            c.clear();
+        }
+    }
+
+    /// `(entries, bytes, hits, misses)` for metrics and `/props`.
+    pub fn prompt_cache_stats(&self) -> (usize, usize, u64, u64) {
+        self.prompt_cache
+            .lock()
+            .map(|c| {
+                let (h, m) = c.stats();
+                (c.len(), c.bytes(), h, m)
+            })
+            .unwrap_or((0, 0, 0, 0))
+    }
+
+    /// Per-slot state for `GET /slots`. Empty on a poisoned lock rather than
+    /// panicking — introspection must never take the server down.
+    pub fn slots_snapshot(&self) -> Vec<SlotSnapshot> {
+        self.slots.lock().map(|s| s.snapshot()).unwrap_or_default()
+    }
+
     /// Wait until at least one request is available to schedule.
     pub async fn wait_for_work(&self) {
         self.work_notify.notified().await;
@@ -155,8 +224,7 @@ impl Scheduler {
 mod tests {
     use super::*;
     use crate::engine::model::ModelConfig;
-    use crate::kv_cache::{KVCacheManager, PageTable};
-    use prefix_cache::hash_tokens;
+    use crate::kv_cache::KVCacheManager;
     use std::sync::atomic::Ordering;
 
     #[test]
@@ -182,10 +250,7 @@ mod tests {
         assert_eq!(sched.queue_depth(), 0);
     }
 
-    #[test]
-    fn test_prefix_cache_insert_and_hit() {
-        // block_size = 16; prompt must have ≥ 16 tokens so try_insert_prefix
-        // has at least one complete block to cache.
+    fn test_kv(block_size: usize) -> Arc<KVCacheManager> {
         let config = ModelConfig {
             num_layers: 2,
             num_heads: 2,
@@ -194,125 +259,760 @@ mod tests {
             n_embd: 128,
             vocab_size: 1000,
         };
-        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1, 1));
-        let sched = Scheduler::new(kv, 8);
-
-        // 18 tokens → 1 full block (16 tokens) + 2 leftover.
-        let tokens: Vec<i32> = (1..=18).collect();
-
-        // Simulate a finished request with 3 allocated blocks (1 prompt full + 2 gen).
-        {
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut req =
-                InferenceRequest::new(42, tokens.clone(), 10, SamplingParams::default(), tx);
-            req.kv_seq_id = 0;
-            req.page_table = PageTable::new(vec![0, 1, 2]); // blocks 0-2
-            req.state = RequestState::Finished;
-            sched.running_batch.lock().unwrap().push(req);
-        }
-
-        // try_insert_prefix computes the hash internally; only block 0 should be cached.
-        let inserted = sched.try_insert_prefix(42);
-        assert_eq!(
-            inserted,
-            Some(16),
-            "prefix should be inserted when cache has room (1 block = 16 tokens)"
-        );
-        assert_eq!(sched.prefix_cache_size(), 1);
-
-        // Submit a new request with the same 18-token prefix.
-        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
-        let req2 = InferenceRequest::new(99, tokens, 5, SamplingParams::default(), tx2);
-        sched.submit(req2).unwrap();
-
-        // Return the cached seq_id to the pool (engine normally does this after KV copy).
-        sched.return_prefix_seq_id(0);
-
-        let batch = sched.schedule_step();
-        assert!(
-            batch.prefill.contains(&99),
-            "request 99 should be admitted to prefill"
-        );
-        assert_eq!(sched.prefix_hits.load(Ordering::Relaxed), 1);
+        Arc::new(KVCacheManager::new(
+            &config,
+            500_000_000,
+            0.5,
+            block_size,
+            1,
+            1,
+        ))
     }
 
+    /// Run a request to completion and park its sequence, the way the engine does:
+    /// admit → generate `gen` tokens → finish → park.
+    fn run_and_park(sched: &Scheduler, id: u64, prompt: Vec<i32>, gen: &[i32]) {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                id,
+                prompt,
+                8,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
+        sched.schedule_step();
+        for (i, &t) in gen.iter().enumerate() {
+            sched.update_after_token(id, t, i == 0);
+        }
+        sched.mark_finished(id, StopReason::Eos);
+        assert!(sched.park_finished(id), "request {id} should have parked");
+    }
+
+    /// A parked sequence is matched token-exactly, not rounded down to a block
+    /// boundary — and the generated tail is part of what's reusable.
     #[test]
-    fn test_prefix_cache_block_level_partial_match() {
-        // Two requests share 16 tokens (1 full block) but diverge after that.
-        // The first request completes and caches its full block.
-        // The second request should get a partial prefix hit (16 tokens skipped).
-        let config = ModelConfig {
-            num_layers: 2,
-            num_heads: 2,
-            num_heads_kv: 2,
-            head_dim: 64,
-            n_embd: 128,
-            vocab_size: 1000,
-        };
-        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1, 1));
+    fn parked_sequence_is_reused_token_exactly() {
+        let kv = test_kv(16);
         let sched = Scheduler::new(kv, 8);
 
-        // Shared prefix: tokens 1-16
-        let shared_prefix: Vec<i32> = (1..=16).collect();
-        // Full prompt A: shared_prefix (= 16 tokens, 1 complete block)
-        let tokens_a = shared_prefix.clone();
-        // Full prompt B: same first 16 tokens + 4 different tokens
-        let mut tokens_b = shared_prefix.clone();
+        // 18 tokens: deliberately NOT a multiple of block_size (16). The old
+        // block-hash cache would have reused only 16 of them.
+        let tokens: Vec<i32> = (1..=18).collect();
+        run_and_park(&sched, 42, tokens.clone(), &[777]);
+        assert_eq!(sched.prefix_cache_size(), 1, "one slot holds reusable KV");
+        sched.schedule_step(); // retire the finished request
+
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                99,
+                tokens,
+                5,
+                SamplingParams::default(),
+                tx2,
+            ))
+            .unwrap();
+        let batch = sched.schedule_step();
+
+        assert!(batch.prefill.contains(&99));
+        assert_eq!(sched.prefix_hits.load(Ordering::Relaxed), 1);
+
+        let running = sched.running_batch.lock().unwrap();
+        let req = running.iter().find(|r| r.id == 99).expect("99 running");
+        // All 18 prompt tokens are resident, but [TAG_PROMPT_LOGITS] steps one back
+        // so there is always a token left to decode and produce logits from.
+        assert_eq!(req.skip_prefix_tokens, 17);
+        assert_eq!(req.prefill_pos, 17, "prefill resumes at the skip boundary");
+        assert_eq!(req.kv_seq_id, 0, "inherits the parked sequence in place");
+        assert!(
+            batch.kv_trims.contains(&(0, 17)),
+            "everything past the divergence point must be trimmed before prefill"
+        );
+    }
+
+    /// Two prompts sharing a prefix: the newcomer reuses exactly the shared span.
+    #[test]
+    fn partial_prefix_match_reuses_only_the_shared_span() {
+        let kv = test_kv(16);
+        let sched = Scheduler::new(kv, 8);
+
+        let shared: Vec<i32> = (1..=16).collect();
+        run_and_park(&sched, 1, shared.clone(), &[777]);
+        sched.schedule_step();
+
+        // Diverges right after the shared span (777 != 100).
+        let mut tokens_b = shared.clone();
         tokens_b.extend([100i32, 101, 102, 103]);
 
-        // Finish request A (1 block cached)
-        {
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut req =
-                InferenceRequest::new(1, tokens_a.clone(), 5, SamplingParams::default(), tx);
-            req.kv_seq_id = 0;
-            req.page_table = PageTable::new(vec![0, 1]); // block 0 = prompt, block 1 = gen
-            req.state = RequestState::Finished;
-            sched.running_batch.lock().unwrap().push(req);
-        }
-        let inserted = sched.try_insert_prefix(1);
-        assert_eq!(
-            inserted,
-            Some(16),
-            "request A prefix should be cached (1 block = 16 tokens)"
-        );
-        sched.return_prefix_seq_id(0); // return cached seq_id to pool
-
-        // Submit request B (diverges after the shared first block)
         let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
-        let req2 = InferenceRequest::new(2, tokens_b, 5, SamplingParams::default(), tx2);
-        sched.submit(req2).unwrap();
-
+        sched
+            .submit(InferenceRequest::new(
+                2,
+                tokens_b,
+                5,
+                SamplingParams::default(),
+                tx2,
+            ))
+            .unwrap();
         let batch = sched.schedule_step();
-        assert!(
-            batch.prefill.contains(&2),
-            "request B should be admitted to prefill via partial block hit"
-        );
-        assert_eq!(
-            sched.prefix_hits.load(Ordering::Relaxed),
-            1,
-            "exactly one prefix hit for the shared 16-token block"
-        );
 
-        // Verify skip_prefix_tokens was set to 16 (one full block)
+        assert!(batch.prefill.contains(&2));
+        assert_eq!(sched.prefix_hits.load(Ordering::Relaxed), 1);
+
         let running = sched.running_batch.lock().unwrap();
-        let req_b = running
-            .iter()
-            .find(|r| r.id == 2)
-            .expect("req B in running");
+        let req_b = running.iter().find(|r| r.id == 2).expect("req B running");
         assert_eq!(
             req_b.skip_prefix_tokens, 16,
-            "should skip exactly one full block"
+            "reuse stops exactly where the prompts diverge"
         );
     }
 
+    /// The generated reply is reusable too — this is the multi-turn chat case the
+    /// old block-hash cache could never serve, because it discarded generation.
     #[test]
-    fn test_hash_tokens_stable() {
-        let a = hash_tokens(&[1, 2, 3]);
-        let b = hash_tokens(&[1, 2, 3]);
-        let c = hash_tokens(&[1, 2, 4]);
-        assert_eq!(a, b);
-        assert_ne!(a, c);
+    fn generated_tokens_are_reusable_by_the_next_turn() {
+        let kv = test_kv(16);
+        let sched = Scheduler::new(kv, 8);
+
+        let turn1: Vec<i32> = (1..=20).collect();
+        let reply = [900, 901, 902];
+        run_and_park(&sched, 1, turn1.clone(), &reply);
+        sched.schedule_step();
+
+        // Turn 2's prompt = turn 1 + the assistant's reply + the new user message.
+        let mut turn2 = turn1.clone();
+        turn2.extend_from_slice(&reply);
+        turn2.extend([500i32, 501]);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                2,
+                turn2,
+                5,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
+        sched.schedule_step();
+
+        let running = sched.running_batch.lock().unwrap();
+        let req = running.iter().find(|r| r.id == 2).expect("turn 2 running");
+        assert_eq!(
+            req.skip_prefix_tokens,
+            turn1.len() + reply.len(),
+            "the reply must be reused, not just the previous prompt"
+        );
+    }
+
+    /// A context-rolled request's resident positions no longer line up with its token
+    /// list, so its KV must never become a reuse candidate.
+    #[test]
+    fn rolled_and_lora_requests_are_never_parked() {
+        let kv = test_kv(16);
+        let sched = Scheduler::new(kv, 8);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                1,
+                (1..=20).collect(),
+                8,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
+        sched.schedule_step();
+        sched.record_context_roll(1, 4);
+        sched.mark_finished(1, StopReason::Eos);
+        assert!(!sched.park_finished(1), "rolled request must not park");
+
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        let lora_req =
+            InferenceRequest::new(2, (1..=20).collect(), 8, SamplingParams::default(), tx2)
+                .with_lora(LoraSelection {
+                    name: "adapter".into(),
+                    scale: 1.0,
+                });
+        sched.submit(lora_req).unwrap();
+        sched.schedule_step();
+        sched.mark_finished(2, StopReason::Eos);
+        assert!(!sched.park_finished(2), "LoRA request must not park");
+    }
+
+    /// Under block pressure, a parked (idle) slot is reclaimed to admit a new request
+    /// — and a *running* one never is. Parking KV instead of freeing it is only safe
+    /// because of this: without reclaim, warm slots would pin the pool forever.
+    #[test]
+    fn idle_slot_is_reclaimed_under_block_pressure() {
+        use slots::SlotState;
+
+        // 6 blocks total; each request below needs 2 (20 prompt + 8 new = 28 tokens).
+        let kv = Arc::new(KVCacheManager::from_kv_tokens(16 * 6, 16));
+        let sched = Scheduler::new(kv.clone(), 4);
+        assert_eq!(kv.total_blocks(), 6);
+
+        let prompt = |seed: i32| -> Vec<i32> { (0..20).map(|i| seed * 1000 + i).collect() };
+
+        // Park one request, then fill the pool with two live ones.
+        run_and_park(&sched, 1, prompt(1), &[777]);
+        sched.schedule_step();
+        assert_eq!(sched.prefix_cache_size(), 1, "slot 0 parked");
+
+        for id in [2u64, 3] {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            sched
+                .submit(InferenceRequest::new(
+                    id,
+                    prompt(id as i32),
+                    8,
+                    SamplingParams::default(),
+                    tx,
+                ))
+                .unwrap();
+            sched.schedule_step();
+        }
+        assert_eq!(kv.allocated_blocks(), 6, "pool is now full");
+
+        // A fourth, unrelated request can only fit if the idle slot gives up its blocks.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                4,
+                prompt(4),
+                8,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
+        let batch = sched.schedule_step();
+
+        assert!(
+            batch.prefill.contains(&4),
+            "request 4 should have been admitted by reclaiming the idle slot"
+        );
+        assert!(
+            batch.kv_clears.contains(&0),
+            "the reclaimed sequence's KV must be wiped before reuse"
+        );
+        assert_eq!(
+            sched.prefix_cache_size(),
+            0,
+            "the parked slot was reclaimed"
+        );
+
+        // The two live requests were never touched — reclaim is not preemption.
+        let running = sched.running_batch.lock().unwrap();
+        for id in [2u64, 3] {
+            assert!(
+                running.iter().any(|r| r.id == id && !r.is_finished()),
+                "running request {id} must survive reclamation"
+            );
+        }
+        let slots = sched.slots.lock().unwrap();
+        assert_eq!(
+            slots.count(|s| matches!(s.state, SlotState::Busy(_))),
+            3,
+            "requests 2, 3 and 4 hold slots"
+        );
+    }
+
+    /// The RAM cache must capture a reclaimed sequence and offer it back, so a
+    /// conversation survives losing its GPU blocks.
+    #[test]
+    fn reclaimed_sequence_is_offered_to_the_ram_cache() {
+        // 6 blocks; each request below needs 2.
+        let kv = Arc::new(KVCacheManager::from_kv_tokens(16 * 6, 16));
+        let sched = Scheduler::new(kv.clone(), 4).with_prompt_cache(1024 * 1024);
+        let prompt = |seed: i32| -> Vec<i32> { (0..20).map(|i| seed * 1000 + i).collect() };
+
+        run_and_park(&sched, 1, prompt(1), &[777]);
+        sched.schedule_step();
+        for id in [2u64, 3] {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            sched
+                .submit(InferenceRequest::new(
+                    id,
+                    prompt(id as i32),
+                    8,
+                    SamplingParams::default(),
+                    tx,
+                ))
+                .unwrap();
+            sched.schedule_step();
+        }
+        assert_eq!(kv.allocated_blocks(), 6, "pool full");
+
+        // A fourth request forces the idle slot to be reclaimed.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                4,
+                prompt(4),
+                8,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
+        let batch = sched.schedule_step();
+
+        // The scheduler must have asked the engine to serialise it first — losing the
+        // blocks is fine, losing the conversation is the thing the cache prevents.
+        assert_eq!(
+            batch.kv_saves.len(),
+            1,
+            "reclaim must request a save: {batch:?}"
+        );
+        let (saved_seq, saved_tokens) = &batch.kv_saves[0];
+        assert_eq!(*saved_seq, 0, "slot 0 was the idle victim");
+        assert_eq!(
+            saved_tokens.len(),
+            21,
+            "the whole resident sequence — prompt + generated — must be saved"
+        );
+        assert!(
+            batch.kv_clears.contains(saved_seq),
+            "the save must be paired with the clear that follows it"
+        );
+    }
+
+    /// With the cache disabled nothing is serialised, so the default configuration
+    /// carries none of its cost.
+    #[test]
+    fn no_saves_are_requested_when_the_ram_cache_is_off() {
+        let kv = Arc::new(KVCacheManager::from_kv_tokens(16 * 6, 16));
+        let sched = Scheduler::new(kv.clone(), 4); // cache defaults to 0 bytes
+        let prompt = |seed: i32| -> Vec<i32> { (0..20).map(|i| seed * 1000 + i).collect() };
+
+        run_and_park(&sched, 1, prompt(1), &[777]);
+        sched.schedule_step();
+        for id in [2u64, 3] {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            sched
+                .submit(InferenceRequest::new(
+                    id,
+                    prompt(id as i32),
+                    8,
+                    SamplingParams::default(),
+                    tx,
+                ))
+                .unwrap();
+            sched.schedule_step();
+        }
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                4,
+                prompt(4),
+                8,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
+        let batch = sched.schedule_step();
+        assert!(batch.kv_saves.is_empty(), "cache off must cost nothing");
+    }
+
+    /// A stored state is handed back to a later prompt that extends it, and only when
+    /// it beats what the live slots already cover.
+    #[test]
+    fn stored_state_is_restored_for_an_extending_prompt() {
+        let kv = Arc::new(KVCacheManager::from_kv_tokens(16 * 64, 16));
+        let sched = Scheduler::new(kv, 4).with_prompt_cache(1024 * 1024);
+        let base: Vec<i32> = (0..20).collect();
+
+        // Pretend the engine serialised this conversation earlier.
+        sched.store_prompt_state(base.clone(), vec![1u8; 128]);
+
+        // A prompt that extends it must get the state back.
+        let mut longer = base.clone();
+        longer.extend([900, 901]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                9,
+                longer,
+                8,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
+        let batch = sched.schedule_step();
+
+        assert_eq!(batch.kv_restores.len(), 1, "cached state must be restored");
+        assert_eq!(batch.kv_restores[0].1, vec![1u8; 128]);
+
+        let running = sched.running_batch.lock().unwrap();
+        let req = running.iter().find(|r| r.id == 9).unwrap();
+        assert_eq!(
+            req.skip_prefix_tokens, 20,
+            "the restored prefix must be skipped, not re-prefilled"
+        );
+    }
+
+    /// A forked branch waits for its parent's prefill, then copies it instead of
+    /// re-prefilling the same prompt.
+    #[test]
+    fn forked_branch_waits_then_copies_the_parents_prefill() {
+        let kv = test_kv(16);
+        let sched = Scheduler::new(kv, 8);
+        let prompt: Vec<i32> = (1..=40).collect();
+
+        let (tx0, _rx0) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                1,
+                prompt.clone(),
+                8,
+                SamplingParams::default(),
+                tx0,
+            ))
+            .unwrap();
+        let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(
+                InferenceRequest::new(2, prompt.clone(), 8, SamplingParams::default(), tx1)
+                    .with_fork_parent(1),
+            )
+            .unwrap();
+
+        // Step 1: the parent is admitted; the branch is held back because there is
+        // nothing to copy yet, and — crucially — does not block the queue.
+        let batch = sched.schedule_step();
+        assert_eq!(batch.prefill, vec![1], "only the parent starts: {batch:?}");
+        assert_eq!(
+            sched.queue_depth(),
+            1,
+            "the branch is re-queued, not dropped"
+        );
+
+        // Parent finishes prefilling.
+        sched.update_after_token(1, 99, true);
+
+        // Step 2: the branch is admitted and adopts the parent's prompt.
+        sched.schedule_step();
+        let running = sched.running_batch.lock().unwrap();
+        let branch = running.iter().find(|r| r.id == 2).expect("branch admitted");
+        let parent_seq = running.iter().find(|r| r.id == 1).unwrap().kv_seq_id;
+        assert_eq!(
+            branch.prefix_seq_id,
+            Some(parent_seq),
+            "the branch must copy from its parent's sequence"
+        );
+        assert_eq!(
+            branch.skip_prefix_tokens,
+            prompt.len() - 1,
+            "the whole prompt is copied bar one token, so logits still get produced"
+        );
+        assert_ne!(
+            branch.kv_seq_id, parent_seq,
+            "branches need their own sequence"
+        );
+    }
+
+    /// The burst case from `scripts/ab_shared_prefix.sh`: every client arrives before
+    /// the scheduler has run even once. Measured on a real server this produced
+    /// `cached_tokens = 0` for all eight, i.e. eight full prefills of the same prompt.
+    /// This reproduces the arrival pattern to find out where the donor path is lost.
+    #[test]
+    fn simultaneous_burst_behind_one_prompt_reuses_it() {
+        let kv = test_kv(64);
+        let sched = Scheduler::new(kv, 8);
+        let shared: Vec<i32> = (1..=60).collect();
+
+        // All eight submitted before any schedule_step — no sequence exists yet.
+        let mut _keep = Vec::new();
+        for i in 0..8u64 {
+            let mut prompt = shared.clone();
+            prompt.extend([i as i32 + 500, i as i32 + 900]);
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            _keep.push(rx);
+            sched
+                .submit(InferenceRequest::new(
+                    i + 1,
+                    prompt,
+                    8,
+                    SamplingParams::default(),
+                    tx,
+                ))
+                .unwrap();
+        }
+
+        let first = sched.schedule_step();
+        assert_eq!(
+            first.prefill.len(),
+            1,
+            "only the first can prefill; the rest have a donor that is not ready yet: {first:?}"
+        );
+
+        // Let the first reach Decoding, then drain the deferred arrivals.
+        sched.update_after_token(first.prefill[0], 99, true);
+        sched.schedule_step();
+
+        let running = sched.running_batch.lock().unwrap();
+        let donor = running.iter().find(|r| r.id == 1).unwrap().kv_seq_id;
+        let copied = running
+            .iter()
+            .filter(|r| r.id != 1 && r.prefix_seq_id == Some(donor))
+            .count();
+        let admitted = running.len();
+        assert!(
+            copied + 1 == admitted && admitted > 1,
+            "every later arrival must copy the live prefix: {copied} of {admitted} did"
+        );
+    }
+
+    /// A pool too small to admit the burst naively, but ample once the shared prefix
+    /// is charged once. Sizing the reservation after the fact left the steady state
+    /// correct and the admission decision wrong: capacity the request was never going
+    /// to hold could still turn it away.
+    #[test]
+    fn admission_reserves_only_the_blocks_past_the_shared_prefix() {
+        // 34 blocks: naively 9 per request (128 prompt + 2 + 8 generated, 16/block),
+        // so only 3 of 6 fit. Sharing the 8 whole prefix blocks drops each later
+        // arrival to 1 of its own, and all 6 fit with room to spare.
+        let kv = Arc::new(KVCacheManager::from_kv_tokens(34 * 16, 16));
+        let sched = Scheduler::new(kv.clone(), 8);
+        let shared: Vec<i32> = (1..=128).collect();
+        assert!(
+            kv.total_blocks() < 6 * 9,
+            "the pool must be too small for the naive reservation, else this proves nothing"
+        );
+
+        let mut _keep = Vec::new();
+        for i in 0..6u64 {
+            let mut prompt = shared.clone();
+            prompt.extend([i as i32 + 500, i as i32 + 900]);
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            _keep.push(rx);
+            sched
+                .submit(InferenceRequest::new(
+                    i + 1,
+                    prompt,
+                    8,
+                    SamplingParams::default(),
+                    tx,
+                ))
+                .unwrap();
+        }
+
+        for _ in 0..8 {
+            let batch = sched.schedule_step();
+            for id in &batch.prefill {
+                sched.update_after_token(*id, 99, true);
+            }
+        }
+
+        let admitted = sched.running_batch.lock().unwrap().len();
+        assert_eq!(
+            admitted,
+            6,
+            "all six must be admitted; the pool only looks full if each is charged for \
+             a prefix it shares ({} blocks of {})",
+            kv.allocated_blocks(),
+            kv.total_blocks()
+        );
+    }
+
+    /// The budget must reflect the sharing, not just the compute. Before this, eight
+    /// clients behind one system prompt held 264 blocks where ~54 were in use: each
+    /// skipped the prefill but still reserved its own blocks for the shared positions.
+    #[test]
+    fn shared_prefix_is_charged_once_and_fully_returned() {
+        let kv = test_kv(16);
+        let block_size = kv.block_size();
+        let sched = Scheduler::new(kv.clone(), 8);
+        let shared: Vec<i32> = (1..=128).collect();
+
+        let mut _keep = Vec::new();
+        for i in 0..8u64 {
+            let mut prompt = shared.clone();
+            prompt.extend([i as i32 + 500, i as i32 + 900]);
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            _keep.push(rx);
+            sched
+                .submit(InferenceRequest::new(
+                    i + 1,
+                    prompt,
+                    8,
+                    SamplingParams::default(),
+                    tx,
+                ))
+                .unwrap();
+        }
+
+        // Each arrival is deferred until its donor is decoding, so drain step by step:
+        // prefill whoever was admitted, then let the next wave copy from them.
+        for _ in 0..8 {
+            let batch = sched.schedule_step();
+            for id in &batch.prefill {
+                sched.update_after_token(*id, 99, true);
+            }
+        }
+
+        let per_request = (128usize + 2 + 8).div_ceil(block_size);
+        let allocated = kv.allocated_blocks();
+        let n = sched.running_batch.lock().unwrap().len();
+        assert!(n > 1, "the burst must actually be admitted, got {n}");
+
+        // Each sharer still needs private blocks for the positions past the shared
+        // prefix; what it must NOT need is its own copy of the prefix itself.
+        let naive = per_request * n;
+        assert!(
+            allocated < naive,
+            "shared prefix charged {n} times: {allocated} blocks vs {naive} naive"
+        );
+        let shared_blocks = 128 / block_size;
+        assert!(
+            allocated <= naive - shared_blocks * (n - 1),
+            "every sharer past the first must avoid re-charging {shared_blocks} prefix blocks: \
+             {allocated} blocks, naive {naive}"
+        );
+
+        // Ref-counting is only correct if it also unwinds: a block referenced by four
+        // sequences must return to the pool exactly once, not stay pinned forever.
+        for i in 0..8u64 {
+            sched.mark_finished(i + 1, StopReason::EngineError);
+        }
+        sched.schedule_step();
+        assert_eq!(
+            kv.allocated_blocks(),
+            0,
+            "shared blocks must be fully returned once every referent is gone"
+        );
+    }
+
+    /// Concurrent requests behind one system prompt must share its KV, not each hold
+    /// a copy. This is the case `select` cannot serve: when they arrive together no
+    /// slot is idle, so nothing is inheritable — but a *live* sequence can be copied.
+    #[test]
+    fn concurrent_shared_prefix_copies_from_a_live_sequence() {
+        let kv = test_kv(16);
+        let sched = Scheduler::new(kv, 8);
+        let shared: Vec<i32> = (1..=60).collect();
+        let with_tail = |t: i32| {
+            let mut v = shared.clone();
+            v.extend([t, t + 1000]);
+            v
+        };
+
+        // First arrival prefills the shared prompt.
+        let (tx0, _rx0) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                1,
+                with_tail(1),
+                8,
+                SamplingParams::default(),
+                tx0,
+            ))
+            .unwrap();
+        sched.schedule_step();
+
+        // A second, *concurrent* request: the first is still Prefilling, so there is
+        // nothing to copy yet and it must be deferred rather than block the queue.
+        let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                2,
+                with_tail(2),
+                8,
+                SamplingParams::default(),
+                tx1,
+            ))
+            .unwrap();
+        let batch = sched.schedule_step();
+        assert!(
+            !batch.prefill.contains(&2),
+            "nothing to copy yet: {batch:?}"
+        );
+        assert_eq!(sched.queue_depth(), 1, "deferred, not dropped");
+
+        // Once the first is decoding, its prompt is resident and copyable.
+        sched.update_after_token(1, 99, true);
+        sched.schedule_step();
+
+        let running = sched.running_batch.lock().unwrap();
+        let donor_seq = running.iter().find(|r| r.id == 1).unwrap().kv_seq_id;
+        let second = running.iter().find(|r| r.id == 2).expect("admitted");
+        assert_eq!(
+            second.prefix_seq_id,
+            Some(donor_seq),
+            "must copy the shared prefix from the LIVE sequence"
+        );
+        assert_eq!(
+            second.skip_prefix_tokens, 60,
+            "the whole shared prefix is skipped, not re-prefilled"
+        );
+        assert_ne!(
+            second.kv_seq_id, donor_seq,
+            "each request keeps its own sequence"
+        );
+    }
+
+    /// A branch whose parent never materialises must still run — slower, not stuck.
+    #[test]
+    fn forked_branch_falls_back_when_the_parent_is_gone() {
+        let kv = test_kv(16);
+        let sched = Scheduler::new(kv, 8);
+        let prompt: Vec<i32> = (1..=40).collect();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(
+                InferenceRequest::new(7, prompt.clone(), 8, SamplingParams::default(), tx)
+                    .with_fork_parent(999), // never submitted
+            )
+            .unwrap();
+
+        let batch = sched.schedule_step();
+        assert_eq!(batch.prefill, vec![7], "must be admitted, not stranded");
+        let running = sched.running_batch.lock().unwrap();
+        let req = running.iter().find(|r| r.id == 7).unwrap();
+        assert_eq!(req.prefix_seq_id, None, "nothing to copy from");
+        assert_eq!(req.skip_prefix_tokens, 0, "so it prefills in full");
+    }
+
+    /// `--kv-reuse false` restores the pre-0.19 behaviour end to end.
+    #[test]
+    fn kv_reuse_disabled_never_parks_or_hits() {
+        let kv = test_kv(16);
+        let sched = Scheduler::new(kv, 8).with_kv_reuse(false, DEFAULT_SLOT_PROMPT_SIMILARITY);
+
+        let tokens: Vec<i32> = (1..=18).collect();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                1,
+                tokens.clone(),
+                8,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
+        sched.schedule_step();
+        sched.mark_finished(1, StopReason::Eos);
+        assert!(!sched.park_finished(1));
+        sched.schedule_step();
+
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                2,
+                tokens,
+                5,
+                SamplingParams::default(),
+                tx2,
+            ))
+            .unwrap();
+        sched.schedule_step();
+
+        assert_eq!(sched.prefix_hits.load(Ordering::Relaxed), 0);
+        let running = sched.running_batch.lock().unwrap();
+        let req = running.iter().find(|r| r.id == 2).unwrap();
+        assert_eq!(req.skip_prefix_tokens, 0, "must prefill from token 0");
     }
 
     /// Prefix-cache eviction stress test — settles design-doc §7's open question
@@ -330,26 +1030,15 @@ mod tests {
     /// (`seen.len() != TOTAL_SEQ`) or an allocated KV block that nothing references
     /// (`allocated_blocks() != reachable`), or a non-zero allocation after draining.
     #[test]
-    fn stress_prefix_cache_no_leak() {
+    fn stress_slot_reuse_no_leak() {
+        use slots::SlotState;
         use std::collections::HashSet;
 
-        const TOTAL_SEQ: usize = 8; // = max_batch_size → seq_id pool {0..8}
-        let config = ModelConfig {
-            num_layers: 2,
-            num_heads: 2,
-            num_heads_kv: 2,
-            head_dim: 64,
-            n_embd: 128,
-            vocab_size: 1000,
-        };
-        // Plenty of blocks: this test targets prefix-cache churn, not block
-        // starvation, so keep the loop live and deterministic.
-        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1, 1));
+        const TOTAL_SEQ: usize = 8; // = max_batch_size → slots {0..8}
+                                    // Plenty of blocks: this test targets slot churn, not block starvation, so
+                                    // keep the loop live and deterministic.
+        let kv = test_kv(16);
         let sched = Scheduler::new(kv.clone(), TOTAL_SEQ);
-        assert_eq!(
-            sched.prefix_cache_max, 2,
-            "TOTAL_SEQ/4 → cache holds 2 entries"
-        );
 
         // Deterministic prompt of `blocks` full 16-token blocks (+3 leftover tokens),
         // content keyed by `seed` so distinct seeds have distinct prefixes.
@@ -359,32 +1048,19 @@ mod tests {
                 .collect()
         };
 
-        // Assert full conservation of seq_ids and blocks against the live state.
+        // Assert full conservation of sequences and blocks against the live state.
         let check_conservation = |label: &str| {
             let running = sched.running_batch.lock().unwrap();
-            let pool = sched.seq_id_pool.lock().unwrap();
-            let pcache = sched.prefix_cache.lock().unwrap();
+            let slots = sched.slots.lock().unwrap();
 
-            // Every seq_id lives in exactly one place, and all TOTAL_SEQ are present.
+            // Every seq_id appears exactly once, in exactly one state, and all
+            // TOTAL_SEQ are accounted for.
             let mut seen: HashSet<i32> = HashSet::new();
-            for &s in pool.iter() {
-                assert!(seen.insert(s), "{label}: seq {s} duplicated in pool");
-            }
-            for r in running.iter() {
-                if r.kv_seq_id >= 0 {
-                    assert!(
-                        seen.insert(r.kv_seq_id),
-                        "{label}: seq {} duplicated (running req {})",
-                        r.kv_seq_id,
-                        r.id
-                    );
-                }
-            }
-            for (_h, e) in pcache.iter() {
+            for slot in slots.iter() {
                 assert!(
-                    seen.insert(e.seq_id),
-                    "{label}: seq {} duplicated (cache)",
-                    e.seq_id
+                    seen.insert(slot.seq_id),
+                    "{label}: seq {} duplicated in the slot table",
+                    slot.seq_id
                 );
             }
             assert_eq!(
@@ -394,33 +1070,60 @@ mod tests {
                 seen.len()
             );
 
-            // Every allocated block is reachable from a running request or a cache
-            // entry — nothing dropped on the floor.
+            // A Busy slot must correspond to exactly one live request holding that
+            // seq_id, and no two running requests may share one.
+            let mut running_seqs: HashSet<i32> = HashSet::new();
+            for r in running.iter() {
+                if r.kv_seq_id >= 0 {
+                    assert!(
+                        running_seqs.insert(r.kv_seq_id),
+                        "{label}: seq {} claimed by two running requests",
+                        r.kv_seq_id
+                    );
+                }
+            }
+            for slot in slots.iter() {
+                if let SlotState::Busy(req_id) = slot.state {
+                    assert!(
+                        running
+                            .iter()
+                            .any(|r| r.id == req_id && r.kv_seq_id == slot.seq_id),
+                        "{label}: slot {} is Busy({req_id}) with no matching running request",
+                        slot.seq_id
+                    );
+                } else {
+                    assert!(
+                        !running_seqs.contains(&slot.seq_id),
+                        "{label}: slot {} is not Busy but a running request holds it",
+                        slot.seq_id
+                    );
+                }
+            }
+
+            // Every allocated block is reachable from a running request or a slot —
+            // nothing dropped on the floor, nothing counted twice.
             let running_blocks: usize = running.iter().map(|r| r.page_table.len()).sum();
-            let cache_blocks: usize = pcache.iter().map(|(_h, e)| e.block_ids.len()).sum();
+            let slot_blocks = slots.charged_blocks();
             assert_eq!(
                 kv.allocated_blocks(),
-                running_blocks + cache_blocks,
+                running_blocks + slot_blocks,
                 "{label}: KV block leak — {} allocated but only {} reachable",
                 kv.allocated_blocks(),
-                running_blocks + cache_blocks
+                running_blocks + slot_blocks
             );
 
-            // The refuse-when-full guard must keep the cache within bounds.
+            // Reusable KV can never exceed the number of sequences that exist.
             assert!(
-                pcache.len() <= sched.prefix_cache_max,
-                "{label}: prefix cache exceeded its cap ({} > {})",
-                pcache.len(),
-                sched.prefix_cache_max
+                slots.count(|s| s.state == SlotState::Idle) <= slots.len(),
+                "{label}: more idle slots than the table holds"
             );
         };
 
         let mut observed_hit = false;
-        let mut observed_full_refuse = false;
 
         for iter in 0..400usize {
             // 1. Submit one request. 2/3 reuse a small shared-prompt set (so their
-            //    prefixes hit once cached); 1/3 are unique (misses → fresh inserts).
+            //    prefixes hit once parked); 1/3 are unique (misses → fresh slots).
             let seed = if iter % 3 == 0 {
                 100_000 + iter as i32 // unique → miss
             } else {
@@ -431,7 +1134,7 @@ mod tests {
             let req = InferenceRequest::new(id, prompt(seed, 2), 8, SamplingParams::default(), tx);
             sched.submit(req).unwrap();
 
-            // 2. Schedule: cleans the previous iteration's finishes and admits.
+            // 2. Schedule: retires the previous iteration's finishes and admits.
             let hits_pre = sched.prefix_hits.load(Ordering::Relaxed);
             let _batch = sched.schedule_step();
             if sched.prefix_hits.load(Ordering::Relaxed) > hits_pre {
@@ -441,9 +1144,8 @@ mod tests {
             // 3. Conservation must hold after every step.
             check_conservation("mid-churn");
 
-            // 4. Finish the oldest running request once we have a few in flight, and
-            //    try to cache it. When the cache is full this exercises the
-            //    refuse-when-full path (try_insert_prefix → false).
+            // 4. Finish the oldest running request once a few are in flight, parking
+            //    it so its KV becomes reusable — the churn this test exists to drive.
             let finish_id = {
                 let mut running = sched.running_batch.lock().unwrap();
                 if running.len() >= 3 {
@@ -455,30 +1157,22 @@ mod tests {
                 }
             };
             if let Some(id) = finish_id {
-                let cache_full = sched.prefix_cache_size() >= sched.prefix_cache_max;
-                let cached = sched.try_insert_prefix(id);
-                if cache_full && cached.is_none() {
-                    observed_full_refuse = true;
-                }
+                sched.park_finished(id);
             }
+            check_conservation("post-park");
         }
 
         // The churn must have actually exercised the interesting paths, or the test
         // would be conserving trivially.
-        assert!(
-            observed_hit,
-            "stress loop never produced a prefix-cache hit"
-        );
-        assert!(
-            observed_full_refuse,
-            "stress loop never hit the refuse-when-full path"
-        );
+        // (Block starvation and the reclaim path are deliberately NOT exercised here —
+        // this pool is oversized on purpose so the loop stays live and deterministic.
+        // `idle_slot_is_reclaimed_under_block_pressure` covers reclaim directly.)
+        assert!(observed_hit, "stress loop never produced a prefix hit");
         assert!(sched.prefix_hits.load(Ordering::Relaxed) > 0);
 
         // 5. Drain everything and prove nothing leaked: finish all running requests,
-        //    let schedule_step reclaim them, then empty the cache (returning its
-        //    seq_ids and freeing its blocks). Allocation must fall back to zero and
-        //    the pool must be whole again.
+        //    let schedule_step retire them, then release every parked slot. Allocation
+        //    must fall back to zero with every slot Free.
         {
             let mut running = sched.running_batch.lock().unwrap();
             for r in running.iter_mut() {
@@ -487,11 +1181,11 @@ mod tests {
         }
         sched.schedule_step();
         {
-            let mut pcache = sched.prefix_cache.lock().unwrap();
-            let mut pool = sched.seq_id_pool.lock().unwrap();
-            while let Some((_h, e)) = pcache.pop_lru() {
-                kv.free_blocks(&e.block_ids);
-                pool.push(e.seq_id);
+            let mut slots = sched.slots.lock().unwrap();
+            let seq_ids: Vec<i32> = slots.iter().map(|s| s.seq_id).collect();
+            for seq_id in seq_ids {
+                let blocks = slots.release(seq_id);
+                kv.free_blocks(&blocks);
             }
         }
         assert_eq!(
@@ -499,10 +1193,11 @@ mod tests {
             0,
             "KV blocks leaked after full churn + drain"
         );
-        assert_eq!(
-            sched.seq_id_pool.lock().unwrap().len(),
-            TOTAL_SEQ,
-            "seq_id pool not whole after drain"
+        let slots = sched.slots.lock().unwrap();
+        assert_eq!(slots.len(), TOTAL_SEQ, "slot table lost sequences");
+        assert!(
+            slots.iter().all(|s| s.state == SlotState::Free),
+            "not every slot returned to Free after drain"
         );
     }
 

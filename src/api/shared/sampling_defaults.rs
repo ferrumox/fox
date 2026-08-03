@@ -34,6 +34,11 @@ pub mod openai {
     /// Generated-token cap when the caller sends neither `max_tokens` nor
     /// `max_completion_tokens`.
     pub const MAX_TOKENS: usize = 256;
+    /// Cap on `n`/`best_of` — each unit is a fully independent generation
+    /// (fox's `n` is fan-out, not shared-prefill forking; see
+    /// `docs/design/n-best-of-support.md`), so an uncapped value would let one
+    /// HTTP call monopolize `--max-queue-depth`/`--max-batch-size`.
+    pub const MAX_N: u32 = 8;
 }
 
 /// Ollama (`/api/*`) surface defaults.

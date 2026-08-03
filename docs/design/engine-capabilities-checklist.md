@@ -38,8 +38,8 @@ accumulate, real *free* memory (not total), clean fallback if a backend fails mi
 | ⚠️ | Non-standard head_dim + softcapping (Gemma 2/3) | needs FA=AUTO + head_dim from metadata (patched) |
 | ⚠️ | Sliding-window / local attention (Gemma, Mistral, Phi3) | llama.cpp handles it; fox's paged KV doesn't model it |
 | ⚠️ | MoE (Mixtral, Qwen-MoE, DeepSeek-MoE) | load + CPU offload; approximate sizing |
-| ❌ | MLA / latent KV (DeepSeek-V2/V3) | positional sizing wrong |
-| ⚠️ | Recurrent/hybrid (Mamba, RWKV, Jamba) | detected, prefix-cache off; KV formula N/A |
+| ✅ | MLA / latent KV (DeepSeek-V2/V3) | sizing fixed (0.18) via empirical create-then-shrink retry, no per-token formula; verified against real DeepSeek-V2-Lite — see `mla-recurrent-kv-sizing.md` |
+| ✅ | Recurrent/hybrid (Mamba, RWKV, Jamba) | sizing fixed (0.18, same mechanism); prefix-cache-disable detection also fixed (0.18) — was silently wrong (`llama_memory_can_shift`), now `llama_model_is_recurrent`/`llama_model_is_hybrid`; verified against a real Mamba model |
 | ❌ | Encoder-decoder (T5) | |
 | ⚠️ | Embeddings (BERT, nomic) | dimension + all-zeros bugs fixed (0.11, golden-verified); always mean-pooled + L2 — dedicated-model pooling (CLS) not auto-detected |
 | ❌ | Vision / multimodal (llava, qwen-vl, gemma3-vision) | image blocks silently dropped |
@@ -70,7 +70,7 @@ sliding window, MLA, state-space). This is why a single source of truth (`ModelI
 | ✅ | Speculative decoding (draft / n-gram / EAGLE) | n-gram/prompt-lookup (0.15) + draft-model (0.16), both exact + golden-verified via `--speculative`/`--draft-model`; EAGLE-style trained draft heads ❌ |
 | ✅ | Guided/structured decoding (grammar / JSON-schema) | GBNF-constrained via `response_format`/`format` (0.14, golden-verified); regex ❌ |
 | ✅ | Tool/function calling | Hermes + Mistral parsers auto-detected from the model's own template (0.16, `tools` threaded into the Jinja context); Llama3 parser explicit-opt-in only (`--tool-call-parser llama3` — unreliable template auto-detection in practice); generic prompt-based JSON remains the fallback otherwise |
-| ⚠️ | `n>1` / best_of / beam search; logprobs / echo | logprobs/top_logprobs ✅ (0.14); n>1/beam/echo ❌ |
+| ⚠️ | `n>1` / `best_of` / beam search; logprobs / echo | logprobs/top_logprobs ✅ (0.14); `n`/`best_of` ✅ (0.18, independent fan-out); beam search closed as a deliberate non-goal (0.18) — see `vllm-gap-analysis.md`; echo ❌ |
 | ⚠️ | Context management: RoPE scaling partial; **context-shift/rolling** on full (`--context-shift`, shiftable caches) ✅; RoPE scaling still not exposed | |
 | ❌ | LoRA / adapters (incl. multi-LoRA) | |
 | ⚠️ | Thinking/reasoning (`<think>` separation) | real per-model detection via the Jinja template's `enable_thinking` + a small `REASONING_FORMATS` registry (0.11); an unlisted family still falls back to the `<think>` heuristic |
@@ -98,11 +98,22 @@ toolchain) · ✅ config flags/env/file · ✅ Docker/systemd/installers.
 
 ## 7. Cross-cutting — what makes an engine *maintainable* (not just featureful)
 
-- ❌→planned **Single source of truth per model** (`ModelInfo`).
-- ❌→planned **Per-architecture regression net** (golden tests + CI).
+- ✅ **Single source of truth per model** (`ModelInfo`) — landed (P0); a lighter
+  subset of the doc's original proposal (no full `ArchClass`, but includes the
+  0.18 `KvMemoryClass`).
+- ⚠️ **Per-architecture regression net** (golden tests + CI) — a generic
+  (any-model) golden harness exists; still no dedicated per-architecture-class
+  fixture matrix in CI (MoE/MLA/recurrent are verified manually per-feature,
+  not gated in CI).
 - ❌→planned **Explicit support contract** (what's supported, at what level).
 - ⚠️ **Fail loudly, not silently** (several silent failures today).
-- ❌→planned **Observability of derived facts** (`fox probe`).
+- ✅ **Observability of derived facts** (`fox probe`) — landed (P0).
+
+**Note:** this checklist predates the 0.11 P0/P1 rework commits and the 0.16-0.18
+feature work (draft-model speculation, tool-call parsers, vision, LoRA, `n`/`best_of`,
+MLA/recurrent sizing) — several rows above are stale. [`STATUS.md`](../../STATUS.md)
+is the current, actively-maintained source of truth; this file is kept for its
+original architecture-coverage framing, not as an up-to-date inventory.
 
 ---
 

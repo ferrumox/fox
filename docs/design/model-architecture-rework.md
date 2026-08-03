@@ -1,6 +1,12 @@
 # Design — Model-architecture correctness & the "whack-a-mole" problem
 
-Status: **Draft / for discussion**
+Status: **Partially shipped** — P0 (`ModelInfo` + `fox probe`), P1 (routing head_dim/
+embedding_dim through `ModelInfo`), and the §4.2 KV-sizing mandate for MLA/recurrent
+(0.18, see `mla-recurrent-kv-sizing.md`) have landed. P3 (capabilities from model)
+and P4 (API consistency) remain draft/unstarted, as does the full `ArchClass`/
+`KvModel` classification struct in §4.1 (0.18 shipped a lighter, purpose-built
+`KvMemoryClass` instead — see Appendix A item #11). See Appendix A for the
+current per-item state.
 Scope decision: **maximum** — target parity with every architecture class llama.cpp
 supports (dense, GQA, MoE, MLA, recurrent/hybrid, embeddings), not just the models
 we use today.
@@ -295,7 +301,7 @@ Each phase is shippable on its own and gated by the net from P0.
 | # | Issue | Location | Resolved by |
 |---|-------|----------|-------------|
 | 1 | `head_dim = n_embd/n_head` wrong (Gemma/MLA) | `engine/model/llama_cpp/mod.rs` (`resolve_head_dim`, already patched to read metadata) | §4.1 `ModelInfo.head_dim` |
-| 2 | KV `bytes_per_token` hardcodes f16 in `load()` (and no single formula is correct anyway — Gemma 4 SWA/shared-KV) | `engine/model/llama_cpp/mod.rs` (load path) | §4.2 (delete the formula; read KV size from llama.cpp) |
+| 2 | KV `bytes_per_token` hardcodes f16 in `load()` (and no single formula is correct anyway — Gemma 4 SWA/shared-KV) | `engine/model/llama_cpp/mod.rs` (load path) | §4.2 — **✅ 0.18**, via an empirical create-then-shrink-on-failure retry loop rather than a introspection-API read-back (llama.cpp doesn't expose a pre-creation "will N tokens fit" query; "ask by trying" achieves the same "don't predict" goal). The formula survives only as a soft first-guess ceiling. Gemma 4 SWA/shared-KV specifically not re-verified in this pass — the fix is architecture-agnostic, but only MLA/recurrent were used for real-model verification. See `mla-recurrent-kv-sizing.md` |
 | 3 | `embedding_dim = num_heads*head_dim` | `engine/model/llama_cpp/batch.rs`, `mod.rs` | §4.1 (`== n_embd`) + P3 invariant |
 | 4 | Flash-attn forced ENABLED (Gemma softcap garbage) | `mod.rs` (already patched to AUTO) | §3 Gemma row, validated by golden test |
 | 5 | Hardcoded control patterns | `engine/output_filter.rs` | §4.3 control/EOG from model |
@@ -303,5 +309,5 @@ Each phase is shippable on its own and gated by the net from P0.
 | 7 | `U+2581` applied unconditionally | `mod.rs`, `engine/logits.rs` | §4.3 `is_spm` gate |
 | 8 | Sampling defaults diverge by API | `api/v1/chat.rs` vs `api/shared/inference.rs` | §4.4 |
 | 10 | `max_models=1` default; `swap_fraction` unused; silent multimodal drop | `cli/serve.rs`; `api/types/v1.rs` | P4 |
-| 11 | Recurrent/MLA sizing via positional formula | `mod.rs`, `kv_cache/mod.rs` | §4.2 |
+| 11 | Recurrent/MLA sizing via positional formula | `mod.rs`, `kv_cache/mod.rs` | §4.2 — **✅ 0.18**, same fix as #2 (uniform, no per-arch branching). Also surfaced and fixed a real, separate bug along the way: recurrent detection (`llama_memory_can_shift`) had silently gone wrong (an upstream llama.cpp change made it return `true` for recurrent memory), enabling prefix caching for recurrent models when it should have been disabled — replaced with `llama_model_is_recurrent`/`llama_model_is_hybrid`. **Not resolved by this item**: the full `ArchClass`/`KvModel` struct from §4.1 — 0.18 shipped a lighter `KvMemoryClass` (Standard/Latent/Recurrent) for observability only, not the complete classification model this doc originally sketched. See `mla-recurrent-kv-sizing.md` |
 | 12 | Prefix-cache eviction cleanup (suspected leak) | `scheduler/schedule.rs`, `scheduler/mod.rs` | P0 stress test (open) |

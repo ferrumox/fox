@@ -26,16 +26,6 @@ impl LlamaCppModel {
         Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
     }
 
-    /// Read a GGUF metadata value as `f32`. Returns `None` when missing or not parseable.
-    pub(super) fn read_meta_f32(&self, key: &str) -> Option<f32> {
-        self.read_meta_str(key)?.trim().parse::<f32>().ok()
-    }
-
-    /// Read a GGUF metadata value as `u32`. Returns `None` when missing or not parseable.
-    pub(super) fn read_meta_u32(&self, key: &str) -> Option<u32> {
-        self.read_meta_str(key)?.trim().parse::<u32>().ok()
-    }
-
     /// Iterate all GGUF metadata keys/values and look for sampling-related hints.
     /// Logs all keys at TRACE level. Returns a partial `RecommendedSampling`.
     pub(super) fn read_sampling_from_meta(&self) -> RecommendedSampling {

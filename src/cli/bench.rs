@@ -119,7 +119,9 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         split_mode,
         &tensor_split_parsed,
         args.moe_cpu,
-        None, // mmproj_path
+        None,  // mmproj_path
+        &[],   // lora_modules
+        false, // reranking — benches generate, never score
     )?;
     let model_config = model.model_config();
     let load_elapsed = load_start.elapsed();
@@ -189,6 +191,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
             top_p: 1.0,
             top_k: 0,
             repetition_penalty: 1.0,
+            repeat_last_n: -1,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             seed: Some(42),
@@ -200,6 +203,8 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
             logprobs: None,
             min_p: 0.0,
             min_tokens: 0,
+            top_n_sigma: 0.0,
+            min_keep: 0,
             logit_bias: None,
         };
 

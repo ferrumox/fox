@@ -35,6 +35,11 @@ pub struct AppState {
     pub hf_token: Option<String>,
     /// Optional Bearer token required on every request (`--api-key` / `FOX_API_KEY`).
     pub api_key: Option<String>,
+    /// Server-wide default for how far back the repetition/frequency/presence
+    /// penalties look, in generated tokens (`--repeat-last-n`). `-1` = whole
+    /// history (fox's historical behaviour), `0` = disabled, `n` = last `n`.
+    /// A request that sets the field explicitly always wins.
+    pub repeat_last_n: i32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -47,6 +52,7 @@ pub fn router(
     hf_token: Option<String>,
     api_key: Option<String>,
     tool_call_parser: String,
+    repeat_last_n: i32,
 ) -> Router {
     let state = AppState {
         registry,
@@ -58,6 +64,7 @@ pub fn router(
         hf_token,
         api_key,
         tool_call_parser,
+        repeat_last_n,
     };
 
     Router::new()
@@ -81,6 +88,30 @@ pub fn router(
         )
         .route("/health", get(crate::api::v1::models::health))
         .route("/metrics", get(crate::api::v1::models::metrics_handler))
+        .route(
+            "/lora-adapters",
+            axum::routing::get(super::v1::lora::list_lora_adapters)
+                .post(super::v1::lora::set_lora_adapters),
+        )
+        .route("/props", axum::routing::get(super::v1::props::props))
+        .route("/slots", axum::routing::get(super::v1::props::slots))
+        .route("/infill", axum::routing::post(super::v1::infill::infill))
+        .route("/rerank", axum::routing::post(super::v1::rerank::rerank))
+        .route("/v1/rerank", axum::routing::post(super::v1::rerank::rerank))
+        // Tokenizer utilities (llama-server parity) — no inference, just the
+        // loaded model's vocabulary and chat template.
+        .route(
+            "/tokenize",
+            axum::routing::post(super::v1::tokenize::tokenize),
+        )
+        .route(
+            "/detokenize",
+            axum::routing::post(super::v1::tokenize::detokenize),
+        )
+        .route(
+            "/apply-template",
+            axum::routing::post(super::v1::tokenize::apply_template),
+        )
         // Ollama-compatible
         .route(
             "/api/version",

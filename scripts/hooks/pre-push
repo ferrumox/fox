@@ -6,8 +6,11 @@
 #   1. cargo fmt   — formatting
 #   2. cargo clippy -D warnings — lints
 #   3. cargo test  — unit tests
+#   4. performance-claim check — a commit message quoting a throughput/latency
+#      number must say how it was measured (see docs/design/rocm-benchmarking-2026-08.md)
 #
 # To skip in an emergency: git push --no-verify
+# To skip only check 4:    FOX_SKIP_PERF_CHECK=1 git push
 
 set -euo pipefail
 
@@ -54,6 +57,78 @@ if cargo test --all --features test-helpers 2>&1; then
     ok "tests"
 else
     fail "tests failed"
+fi
+
+# 4. Performance-claim check.
+#
+# On 2026-08-02 five separate performance claims were committed and later had to
+# be retracted — not because fox's code was wrong, but because the measurements
+# were: two servers running at once, before/after pairs taken hours apart, a
+# rebuild that silently never applied, a micro-benchmark on synthetic data, and
+# a "winner" declared from overlapping ranges. Full account in
+# docs/design/rocm-benchmarking-2026-08.md.
+#
+# So: if a commit message states a performance number, it must also say how it
+# was measured. This does not check that the number is *right* — it cannot —
+# only that the claim carries its methodology, so a future reader can tell an
+# alternating ab_bench.sh run from a single hopeful pair.
+step "performance-claim check"
+if [[ -n "${FOX_SKIP_PERF_CHECK:-}" ]]; then
+    ok "perf claims (skipped via FOX_SKIP_PERF_CHECK)"
+else
+    # git feeds pre-push "<local ref> <local sha> <remote ref> <remote sha>" on
+    # stdin. Collect the commits actually being pushed; for a brand-new branch
+    # (remote sha all zeros) fall back to whatever is not on any other branch.
+    RANGE_COMMITS=""
+    while read -r _local_ref local_sha _remote_ref remote_sha; do
+        [[ -z "${local_sha:-}" ]] && continue
+        [[ "$local_sha" =~ ^0+$ ]] && continue   # branch deletion
+        if [[ "${remote_sha:-}" =~ ^0+$ ]]; then
+            RANGE_COMMITS+=$'\n'$(git rev-list "$local_sha" --not --remotes 2>/dev/null || true)
+        else
+            RANGE_COMMITS+=$'\n'$(git rev-list "$remote_sha..$local_sha" 2>/dev/null || true)
+        fi
+    done
+    RANGE_COMMITS=$(echo "$RANGE_COMMITS" | grep -v '^$' | sort -u || true)
+
+    # A performance *claim* = a number with a perf unit, AND a word framing it as
+    # a comparison. Both are required: "fixes a 500ms timeout" is not a claim,
+    # "12% faster" is. Deliberately narrow — a hook that cries wolf gets bypassed.
+    UNIT_RE='[0-9]+(\.[0-9]+)?[[:space:]]*(t/s|tok/s|tokens/s|tokens/sec|ms|µs|us|x)\b|[0-9]+(\.[0-9]+)?%'
+    FRAME_RE='faster|slower|speedup|speed-up|improve|improvement|regress|regression|throughput|latency|TTFT|perf\b|performance'
+    # Naming a harness, quoting its output shape, or describing direct
+    # instrumentation all count — the bar is "a reader can tell how this was
+    # obtained", not "you used one specific tool".
+    EVIDENCE_RE='ab_bench|repeat_bench|fox-bench|alternating|alternated|INCONCLUSIVE|median=|range=\[|back-to-back|measured alone|one server at a time|rounds|instrument|phase log|phase timing|profiler|perf record|rocprof'
+
+    OFFENDERS=""
+    for sha in $RANGE_COMMITS; do
+        msg=$(git log -1 --format='%B' "$sha")
+        if echo "$msg" | grep -qiE "$UNIT_RE" && echo "$msg" | grep -qiE "$FRAME_RE"; then
+            if ! echo "$msg" | grep -qiE "$EVIDENCE_RE"; then
+                OFFENDERS+="  $(git log -1 --format='%h %s' "$sha")"$'\n'
+            fi
+        fi
+    done
+
+    if [[ -n "$OFFENDERS" ]]; then
+        echo ""
+        echo -e "${RED}These commits state a performance number without saying how it was measured:${NC}"
+        echo "$OFFENDERS"
+        echo -e "${YELLOW}A single before/after pair on this hardware is worthless${NC} — it drifts"
+        echo "enough to invent a 20% win (see docs/design/rocm-benchmarking-2026-08.md)."
+        echo ""
+        echo "Either measure it properly and say so in the message:"
+        echo "  ./scripts/ab_bench.sh --a-label before --a-cmd '...' \\"
+        echo "                        --b-label after  --b-cmd '...' \\"
+        echo "                        --url http://localhost:8097 --model M --rounds 3"
+        echo "then quote its median=/range=[ output, or name the harness you used."
+        echo ""
+        echo "Or, if the number is illustrative rather than a claim:"
+        echo "  FOX_SKIP_PERF_CHECK=1 git push"
+        fail "performance claim without methodology"
+    fi
+    ok "perf claims"
 fi
 
 echo ""

@@ -160,6 +160,10 @@ mod tests {
             max_prefill_chunk: 0,
             context_shift: false,
             context_keep: 0,
+            reranking: false,
+            cache_ram_bytes: 0,
+            kv_reuse: true,
+            slot_prompt_similarity: crate::scheduler::DEFAULT_SLOT_PROMPT_SIMILARITY,
             speculative: false,
             spec_ngram: 2,
             spec_draft_len: 4,
@@ -177,6 +181,8 @@ mod tests {
             tensor_split: vec![],
             moe_offload_cpu: false,
             mmproj: None,
+            lora_modules: Vec::new(),
+            primary_model: None,
         };
         let reg = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
         let app = router(
@@ -188,6 +194,7 @@ mod tests {
             None,
             None,
             "auto".to_string(),
+            -1,
         );
         let resp = get_req(app, "/v1/models").await;
         assert_eq!(resp.status(), 200);

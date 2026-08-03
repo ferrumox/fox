@@ -17,6 +17,8 @@ const DEFAULT_MAX_MODELS: &str = "1";
 const DEFAULT_KEEP_ALIVE_SECS: &str = "300";
 const DEFAULT_TYPE_KV: &str = "f16";
 const DEFAULT_TOOL_CALL_PARSER: &str = "auto";
+const DEFAULT_REPEAT_LAST_N: &str = "-1";
+const DEFAULT_SLOT_PROMPT_SIMILARITY: &str = "0.1";
 
 use anyhow::Result;
 use clap::Parser;
@@ -68,6 +70,50 @@ pub struct ServeArgs {
     #[arg(long, default_value = "0", env = "FOX_CONTEXT_KEEP")]
     pub context_keep: usize,
 
+    /// How far back the repetition, frequency and presence penalties look, counted in
+    /// generated tokens: `-1` = the whole history, `0` = penalties disabled, `n` = the
+    /// last `n`. Requests may override it per call (`repeat_last_n` / `options.repeat_last_n`).
+    ///
+    /// Defaults to `-1`, fox's historical behaviour. llama.cpp defaults to 64; a bounded
+    /// window both stops penalising tokens from thousands of positions back and turns the
+    /// per-step penalty pass from O(generated) into O(window).
+    #[arg(long, default_value = DEFAULT_REPEAT_LAST_N, env = "FOX_REPEAT_LAST_N")]
+    pub repeat_last_n: i32,
+
+    /// Load the model as a reranker: create its context with RANK pooling so
+    /// `POST /rerank` can read the relevance head. Required — a reranker GGUF does not
+    /// reliably declare its pooling type, so fox cannot detect it (llama-server takes a
+    /// flag for the same reason). A model loaded this way scores query/document pairs;
+    /// it does not generate text.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set, env = "FOX_RERANKING")]
+    pub reranking: bool,
+
+    /// Host-RAM budget in MiB for serialised sequence states. Complements
+    /// `--kv-reuse`: a slot keeps a conversation warm by holding GPU blocks, this keeps
+    /// one warm without holding any — a reclaimed sequence is copied to host memory and
+    /// restored later instead of being re-prefilled. Worth it when VRAM is the scarce
+    /// resource and prompts are long. `0` (the default) disables it.
+    #[arg(long, default_value = "0", env = "FOX_CACHE_RAM")]
+    pub cache_ram: usize,
+
+    /// Keep a finished request's KV cache resident so a later prompt sharing a prefix
+    /// with it skips re-prefilling that much. Each sequence remembers the tokens it
+    /// holds — prompt *and* generated reply — so the next turn of a conversation
+    /// matches well past where the previous prompt ended.
+    ///
+    /// Pass `--kv-reuse false` to restore the previous behaviour (every sequence
+    /// cleared on completion, every prompt prefilled from token 0). That is also the
+    /// baseline arm when A/B-measuring this with `scripts/ab_bench.sh`.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, env = "FOX_KV_REUSE")]
+    pub kv_reuse: bool,
+
+    /// Minimum fraction of an incoming prompt that must already be resident in an idle
+    /// sequence before that sequence's KV is inherited rather than started fresh
+    /// (0.0–1.0). Mirrors llama-server's `--slot-prompt-similarity`. Ignored when
+    /// `--kv-reuse false`.
+    #[arg(long, default_value = DEFAULT_SLOT_PROMPT_SIMILARITY, env = "FOX_SLOT_PROMPT_SIMILARITY")]
+    pub slot_prompt_similarity: f32,
+
     /// Enable n-gram / prompt-lookup speculative decoding — verify several guessed tokens
     /// per forward pass for single-request decode steps. Output is unchanged; only speed.
     /// Off by default. Automatically skipped while a request uses guided decoding.
@@ -99,6 +145,17 @@ pub struct ServeArgs {
     /// mmproj active at a time, matched against whatever model is currently loaded.
     #[arg(long, env = "FOX_MMPROJ")]
     pub mmproj: Option<String>,
+
+    /// Named LoRA adapters to load alongside the primary model, so a client can
+    /// select one by name in the `model` field (OpenAI/Ollama) instead of the
+    /// base model — e.g. `--lora-modules support-es=adapters/es.gguf,legal=
+    /// adapters/legal.gguf:0.8`. Format: `name=path[:scale]` (scale default
+    /// `1.0`, mirrors llama.cpp's own `--lora-scaled FNAME:SCALE`), comma-
+    /// separated for multiple adapters. All adapters apply to the single
+    /// primary model (like `--draft-model`/`--mmproj`, this is one global
+    /// pairing, not per-request-selectable across multiple base models).
+    #[arg(long, env = "FOX_LORA_MODULES")]
+    pub lora_modules: Option<String>,
 
     /// Tokens per KV block
     #[arg(long, default_value = DEFAULT_BLOCK_SIZE, env = "FOX_BLOCK_SIZE")]
@@ -224,6 +281,31 @@ fn parse_split_mode(s: &str) -> u32 {
     }
 }
 
+/// Parse `name=path[:scale][,name=path[:scale]...]` into `(name, path, scale)`
+/// triples. Scale defaults to `1.0` when omitted. Entries that don't contain
+/// `=` are skipped (malformed input just yields fewer adapters rather than a
+/// startup crash — same leniency `parse_tensor_split` already has for a bad
+/// value).
+fn parse_lora_modules(s: &str) -> Vec<(String, PathBuf, f32)> {
+    s.split(',')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            let (name, rest) = entry.split_once('=')?;
+            // Only treat a trailing `:N` as a scale if it actually parses as a
+            // number — a bare colon otherwise belongs to the path (e.g. a
+            // Windows drive letter, `C:\path\to\file.gguf`), not a scale.
+            let (path, scale) = match rest.rsplit_once(':') {
+                Some((p, sc)) if sc.parse::<f32>().is_ok() => (p, sc.parse().unwrap()),
+                _ => (rest, 1.0),
+            };
+            if name.is_empty() || path.is_empty() {
+                return None;
+            }
+            Some((name.to_string(), PathBuf::from(path), scale))
+        })
+        .collect()
+}
+
 /// Parse "3,1" → [0.75, 0.25] (normalizes so values sum to 1.0).
 fn parse_tensor_split(s: &str) -> Vec<f32> {
     let raw: Vec<f32> = s
@@ -235,6 +317,39 @@ fn parse_tensor_split(s: &str) -> Vec<f32> {
         return vec![];
     }
     raw.iter().map(|&v| v / sum).collect()
+}
+
+/// One-time startup note when `--max-models` is left at its default of 1.
+///
+/// The default trades resident-model churn (a second model's request evicts
+/// the first, once idle) for VRAM safety: fox has no cross-model VRAM
+/// accounting today — the per-load "does this fit" check compares against a
+/// static, whole-GPU figure captured at startup, never subtracting what's
+/// already resident, so raising the default without that accounting would
+/// risk silently trading a churn footgun for an OOM footgun. Making the
+/// trade-off visible here (not just in `--help`) is the fix; see STATUS.md's
+/// "Known issues" for the max_models item and why the default itself stays 1.
+fn max_models_default_hint(max_models: usize) -> Option<&'static str> {
+    (max_models <= 1).then_some(
+        "only 1 model will be kept resident at a time (--max-models 1, the default) — \
+         requesting a second model evicts the first once it's idle. Pass --max-models N \
+         to keep more resident if you have the VRAM; fox does not yet track how much VRAM \
+         already-loaded models are using when deciding whether another will fit.",
+    )
+}
+
+/// Warn once if `--swap-fraction` was explicitly set to a nonzero value — the
+/// flag is accepted for forward compatibility but is not wired to anything
+/// (CPU↔GPU KV transfer needs a llama.cpp API that doesn't exist yet).
+/// Silently dropping a value the user explicitly asked for is exactly the
+/// kind of silent failure CLAUDE.md's conventions ask fox to avoid.
+pub(crate) fn swap_fraction_unused_warning(swap_fraction: f32) -> Option<String> {
+    (swap_fraction != 0.0).then(|| {
+        format!(
+            "--swap-fraction {swap_fraction} was set but is not implemented yet (no-op) — \
+             CPU↔GPU KV swap needs a llama.cpp API that doesn't exist yet; this value is ignored."
+        )
+    })
 }
 
 impl ServeArgs {
@@ -279,6 +394,14 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     args.validate()?;
     setup_logging(args.json_logs);
 
+    let effective_max_models = args.max_models.max(1);
+    if let Some(hint) = max_models_default_hint(effective_max_models) {
+        tracing::info!("{hint}");
+    }
+    if let Some(warning) = swap_fraction_unused_warning(args.swap_fraction) {
+        tracing::warn!("{warning}");
+    }
+
     let split_mode = parse_split_mode(&args.split_mode);
     // Use total VRAM across all GPUs when splitting across multiple GPUs.
     let gpu_memory_bytes = if split_mode != 0 {
@@ -303,53 +426,17 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
 
     let models_dir = default_models_dir();
 
-    let registry_cfg = RegistryConfig {
-        models_dir: models_dir.clone(),
-        max_models: args.max_models.max(1),
-        max_batch_size: args.max_batch_size,
-        max_queue_depth: args.max_queue_depth,
-        max_prefill_chunk: args.max_prefill_chunk,
-        context_shift: args.context_shift,
-        context_keep: args.context_keep,
-        speculative: args.speculative,
-        spec_ngram: args.spec_ngram,
-        spec_draft_len: args.spec_draft_len,
-        draft_model: args.draft_model,
-        mmproj: args.mmproj,
-        max_context_len: args.max_context_len,
-        block_size: args.block_size,
-        gpu_memory_bytes,
-        gpu_memory_fraction: args.gpu_memory_fraction,
-        metrics,
-        keep_alive_secs: args.keep_alive_secs,
-        type_k: parse_kv_type(args.type_k.as_deref().unwrap_or(&args.type_kv)),
-        type_v: parse_kv_type(args.type_v.as_deref().unwrap_or(&args.type_kv)),
-        main_gpu: args.main_gpu,
-        split_mode,
-        tensor_split: args
-            .tensor_split
-            .as_deref()
-            .map(parse_tensor_split)
-            .unwrap_or_default(),
-        moe_offload_cpu: args.moe_cpu,
-    };
-
-    let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));
-
-    // Pre-load the initial model if specified; otherwise use lazy loading.
+    // Determine the primary model's NAME up front (no registry needed for this —
+    // just file_stem / directory discovery). Needed both to pre-load below and to
+    // tell LoRA-alias resolution which model `--lora-modules` adapters attach to
+    // (mirrors `--draft-model`/`--mmproj`: one global pairing against whatever the
+    // primary model is, not a per-request-selectable base model).
     let primary_model = match &args.model_path {
-        Some(path) => {
-            let name = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("default")
-                .to_string();
-            tracing::info!("pre-loading model from {:?}", path);
-            registry
-                .get_or_load(path.to_string_lossy().as_ref())
-                .await?;
-            name
-        }
+        Some(path) => path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("default")
+            .to_string(),
         None => {
             // Lazy mode: discover the first model in models_dir as the primary.
             let first = match list_models(&models_dir) {
@@ -377,6 +464,57 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             first.unwrap_or_default()
         }
     };
+
+    let registry_cfg = RegistryConfig {
+        models_dir: models_dir.clone(),
+        max_models: effective_max_models,
+        max_batch_size: args.max_batch_size,
+        max_queue_depth: args.max_queue_depth,
+        max_prefill_chunk: args.max_prefill_chunk,
+        context_shift: args.context_shift,
+        context_keep: args.context_keep,
+        reranking: args.reranking,
+        cache_ram_bytes: args.cache_ram.saturating_mul(1024 * 1024),
+        kv_reuse: args.kv_reuse,
+        slot_prompt_similarity: args.slot_prompt_similarity,
+        speculative: args.speculative,
+        spec_ngram: args.spec_ngram,
+        spec_draft_len: args.spec_draft_len,
+        draft_model: args.draft_model,
+        mmproj: args.mmproj,
+        lora_modules: args
+            .lora_modules
+            .as_deref()
+            .map(parse_lora_modules)
+            .unwrap_or_default(),
+        primary_model: (!primary_model.is_empty()).then(|| primary_model.clone()),
+        max_context_len: args.max_context_len,
+        block_size: args.block_size,
+        gpu_memory_bytes,
+        gpu_memory_fraction: args.gpu_memory_fraction,
+        metrics,
+        keep_alive_secs: args.keep_alive_secs,
+        type_k: parse_kv_type(args.type_k.as_deref().unwrap_or(&args.type_kv)),
+        type_v: parse_kv_type(args.type_v.as_deref().unwrap_or(&args.type_kv)),
+        main_gpu: args.main_gpu,
+        split_mode,
+        tensor_split: args
+            .tensor_split
+            .as_deref()
+            .map(parse_tensor_split)
+            .unwrap_or_default(),
+        moe_offload_cpu: args.moe_cpu,
+    };
+
+    let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));
+
+    // Actually pre-load the initial model now that the registry exists.
+    if let Some(path) = &args.model_path {
+        tracing::info!("pre-loading model from {:?}", path);
+        registry
+            .get_or_load(path.to_string_lossy().as_ref())
+            .await?;
+    }
 
     // Start background keep-alive eviction task.
     std::sync::Arc::clone(&registry).start_eviction_task();
@@ -412,6 +550,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         args.hf_token,
         args.api_key,
         args.tool_call_parser,
+        args.repeat_last_n,
     )
     .layer(tower_http::cors::CorsLayer::permissive());
 
@@ -463,4 +602,101 @@ async fn shutdown_signal() {
 
     #[cfg(not(unix))]
     ctrl_c.await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_lora_modules_single_no_scale_defaults_to_one() {
+        let got = parse_lora_modules("mylora=/models/lora.gguf");
+        assert_eq!(
+            got,
+            vec![(
+                "mylora".to_string(),
+                PathBuf::from("/models/lora.gguf"),
+                1.0
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_lora_modules_with_scale() {
+        let got = parse_lora_modules("legal=/models/legal.gguf:0.8");
+        assert_eq!(
+            got,
+            vec![(
+                "legal".to_string(),
+                PathBuf::from("/models/legal.gguf"),
+                0.8
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_lora_modules_multiple_mixed() {
+        let got = parse_lora_modules("a=/x/a.gguf:0.5,b=/x/b.gguf");
+        assert_eq!(
+            got,
+            vec![
+                ("a".to_string(), PathBuf::from("/x/a.gguf"), 0.5),
+                ("b".to_string(), PathBuf::from("/x/b.gguf"), 1.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_lora_modules_windows_drive_letter_path_not_mistaken_for_scale() {
+        let got = parse_lora_modules(r"win=C:\models\lora.gguf");
+        assert_eq!(
+            got,
+            vec![(
+                "win".to_string(),
+                PathBuf::from(r"C:\models\lora.gguf"),
+                1.0
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_lora_modules_skips_malformed_entries() {
+        let got = parse_lora_modules("noequals,=missingname.gguf,name=");
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn parse_lora_modules_empty_string_yields_no_adapters() {
+        assert!(parse_lora_modules("").is_empty());
+    }
+
+    #[test]
+    fn max_models_default_hint_fires_at_default() {
+        assert!(max_models_default_hint(1).is_some());
+    }
+
+    #[test]
+    fn max_models_default_hint_fires_below_default_too() {
+        // args.max_models.max(1) clamps 0 up to 1 before this is called in
+        // practice, but the function itself should still treat "0" as "1".
+        assert!(max_models_default_hint(0).is_some());
+    }
+
+    #[test]
+    fn max_models_default_hint_silent_when_raised() {
+        assert!(max_models_default_hint(2).is_none());
+        assert!(max_models_default_hint(8).is_none());
+    }
+
+    #[test]
+    fn swap_fraction_unused_warning_silent_at_zero() {
+        assert!(swap_fraction_unused_warning(0.0).is_none());
+    }
+
+    #[test]
+    fn swap_fraction_unused_warning_fires_when_set() {
+        let msg = swap_fraction_unused_warning(0.3).expect("nonzero should warn");
+        assert!(msg.contains("0.3"));
+        assert!(msg.contains("not implemented"));
+    }
 }

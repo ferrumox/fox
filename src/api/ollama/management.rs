@@ -137,24 +137,86 @@ pub async fn ollama_show(
             let quant = parse_quantization(stem).unwrap_or("unknown");
             let size_str = format_size(meta.len());
             let digest = get_digest(&path, &state.digest_cache).await;
+
+            // Everything above is derived from the FILENAME. That is all fox can know
+            // about a model that is not loaded, and it is why this endpoint used to
+            // report `parameters: ""`, `template: ""` and `parameter_size: "unknown"`.
+            //
+            // When the model happens to be resident, ask it instead. Deliberately does
+            // NOT load it to answer: under the default `--max-models 1` that would
+            // evict whatever is serving traffic, so an introspection call would have a
+            // real cost. `GET /props` reports the resident model unconditionally.
+            let resident = state
+                .registry
+                .loaded()
+                .into_iter()
+                .find(|(name, _)| name == stem);
+
+            let mut info_json = serde_json::json!({
+                "general.architecture": arch,
+                "general.quantization": quant,
+                "general.size": size_str,
+                "general.digest": digest,
+                "general.modified_at": modified_at_rfc3339(&meta),
+                "general.path": path.display().to_string(),
+            });
+            let mut parameters = String::new();
+            let mut family = arch.to_string();
+            let mut parameter_size = "unknown".to_string();
+
+            if let Some((_, entry)) = resident {
+                let mi = entry.engine.model_info();
+                family = mi.arch_name.clone();
+                parameter_size = format_param_count(&mi);
+                // Ollama's `parameters` is the Modelfile PARAMETER block: the sampling
+                // defaults this model would be served with.
+                parameters = format!(
+                    "num_ctx {}\nnum_predict {}\n",
+                    mi.effective_ctx,
+                    crate::api::shared::sampling_defaults::ollama::MAX_TOKENS
+                );
+                if let Some(obj) = info_json.as_object_mut() {
+                    obj.insert(
+                        "general.parameter_count".into(),
+                        parameter_size.clone().into(),
+                    );
+                    obj.insert(
+                        format!("{}.context_length", mi.arch_name),
+                        mi.n_ctx_train.into(),
+                    );
+                    obj.insert(
+                        format!("{}.embedding_length", mi.arch_name),
+                        mi.n_embd.into(),
+                    );
+                    obj.insert(format!("{}.block_count", mi.arch_name), mi.n_layer.into());
+                    obj.insert(
+                        format!("{}.attention.head_count", mi.arch_name),
+                        mi.n_head.into(),
+                    );
+                    obj.insert(
+                        format!("{}.attention.head_count_kv", mi.arch_name),
+                        mi.n_head_kv.into(),
+                    );
+                    obj.insert("tokenizer.ggml.tokens".into(), mi.vocab_size.into());
+                    obj.insert("fox.effective_context".into(), mi.effective_ctx.into());
+                    obj.insert("fox.resident".into(), true.into());
+                }
+            }
+
             let resp = ShowResponse {
                 modelfile: format!("# GGUF model: {}", stem),
-                parameters: String::new(),
+                parameters,
+                // The chat template is the model's own Jinja source, which can be tens
+                // of kilobytes; `POST /apply-template` renders it on demand rather than
+                // every `/api/show` shipping it.
                 template: String::new(),
                 details: OllamaDetails {
                     format: "gguf".to_string(),
-                    family: arch.to_string(),
-                    parameter_size: "unknown".to_string(),
+                    family,
+                    parameter_size,
                     quantization_level: quant.to_string(),
                 },
-                model_info: serde_json::json!({
-                    "general.architecture": arch,
-                    "general.quantization": quant,
-                    "general.size": size_str,
-                    "general.digest": digest,
-                    "general.modified_at": modified_at_rfc3339(&meta),
-                    "general.path": path.display().to_string(),
-                }),
+                model_info: info_json,
             };
             Json(resp).into_response()
         }
@@ -361,6 +423,22 @@ pub async fn api_model_unload(
     }
 }
 
+/// Format an exact parameter count the way Ollama writes it ("1.2B", "360M").
+///
+/// Takes the real number from `llama_model_n_params` rather than deriving one. An
+/// earlier version estimated from n_embd/n_layer/vocab and reported 1.6B for
+/// llama-3.2-1b (really 1.24B): it ignored grouped-query attention, which shrinks K
+/// and V, and double-counted tied input/output embeddings. Replacing "unknown" with a
+/// confident wrong number is worse than either.
+fn format_param_count(mi: &crate::engine::model::ModelInfo) -> String {
+    match mi.n_params {
+        0 => "unknown".to_string(),
+        n if n >= 1_000_000_000 => format!("{:.1}B", n as f64 / 1e9),
+        n if n >= 1_000_000 => format!("{:.0}M", n as f64 / 1e6),
+        n => format!("{n}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::api::router::router;
@@ -379,6 +457,10 @@ mod tests {
             max_prefill_chunk: 0,
             context_shift: false,
             context_keep: 0,
+            reranking: false,
+            cache_ram_bytes: 0,
+            kv_reuse: true,
+            slot_prompt_similarity: crate::scheduler::DEFAULT_SLOT_PROMPT_SIMILARITY,
             speculative: false,
             spec_ngram: 2,
             spec_draft_len: 4,
@@ -396,6 +478,8 @@ mod tests {
             tensor_split: vec![],
             moe_offload_cpu: false,
             mmproj: None,
+            lora_modules: Vec::new(),
+            primary_model: None,
         };
         Arc::new(ModelRegistry::new(cfg, HashMap::new()))
     }
@@ -427,6 +511,7 @@ mod tests {
             None,
             None,
             "auto".to_string(),
+            -1,
         );
         let resp = get_req(app, "/api/ps").await;
         assert_eq!(resp.status(), 200);

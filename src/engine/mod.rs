@@ -137,6 +137,46 @@ impl InferenceEngine {
         self.model.tokenize(text)
     }
 
+    /// Score one (query, document) pair for reranking. `Err` when the model has no
+    /// relevance head — see `Model::rerank_score` for how that is detected.
+    pub fn rerank_score(&self, tokens: &[i32]) -> anyhow::Result<f32> {
+        self.model.rerank_score(tokens)
+    }
+
+    /// The vocabulary's separator token, used to join query and document.
+    pub fn sep_token_id(&self) -> Option<i32> {
+        self.model.sep_token_id()
+    }
+
+    /// The model's fill-in-the-middle tokens, or `None` if it has none — which is
+    /// how `/infill` tells a code model from a chat model.
+    pub fn fim_tokens(&self) -> Option<crate::engine::model::FimTokens> {
+        self.model.fim_tokens()
+    }
+
+    /// Turn token ids back into text.
+    ///
+    /// Concatenates the raw piece bytes before decoding, rather than decoding each
+    /// token separately: a multi-byte codepoint (emoji, CJK) is routinely split
+    /// across two BPE tokens, and per-token decoding would turn each half into a
+    /// replacement character. Same reason the streaming path buffers bytes.
+    /// `U+2581` is mapped back to a space, matching the generation path.
+    pub fn detokenize(&self, tokens: &[i32]) -> String {
+        let mut bytes = Vec::new();
+        for &t in tokens {
+            bytes.extend_from_slice(&self.model.token_to_piece_bytes(t));
+        }
+        String::from_utf8_lossy(&bytes).replace(SPM_SPACE, " ")
+    }
+
+    /// The single piece text for one token, without the cross-token byte joining
+    /// above — for `/tokenize`'s `with_pieces`, where per-token output is the point.
+    /// Invalid UTF-8 (a token holding half a codepoint) is reported as raw bytes by
+    /// the caller rather than lossily decoded here.
+    pub fn token_piece_bytes(&self, token: i32) -> Vec<u8> {
+        self.model.token_to_piece_bytes(token)
+    }
+
     pub fn embedding_dim(&self) -> usize {
         self.model.embedding_dim()
     }
@@ -211,6 +251,48 @@ impl InferenceEngine {
 
     pub fn next_request_id(&self) -> u64 {
         self.next_request_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Serialise a sequence's KV to host memory (see `Model::state_seq_save`).
+    pub fn state_seq_save(&self, seq_id: i32) -> anyhow::Result<Vec<u8>> {
+        self.model.state_seq_save(seq_id)
+    }
+
+    /// Restore a previously saved sequence blob into `seq_id`.
+    pub fn state_seq_load(&self, seq_id: i32, data: &[u8]) -> anyhow::Result<usize> {
+        self.model.state_seq_load(seq_id, data)
+    }
+
+    /// Drop every cached sequence state. Called when the model unloads: the blobs
+    /// encode this model's cell layout and are meaningless — and dangerous — to any
+    /// other.
+    pub fn clear_prompt_cache(&self) {
+        self.scheduler.clear_prompt_cache();
+    }
+
+    /// Per-slot state for `GET /slots`.
+    pub fn slots_snapshot(&self) -> Vec<crate::scheduler::SlotSnapshot> {
+        self.scheduler.slots_snapshot()
+    }
+
+    /// Blocks actually held in the pool, and its capacity.
+    ///
+    /// Not the sum of the per-slot counts in `slots_snapshot`: a block shared by a
+    /// prefix copy is counted once by *every* slot referencing it, so that sum cannot
+    /// fall when sharing works and reading it as memory use overstates it by exactly
+    /// the amount that was saved. This is the pool's own occupancy.
+    pub fn kv_blocks(&self) -> (usize, usize) {
+        (
+            self.kv_cache.allocated_blocks(),
+            self.kv_cache.total_blocks(),
+        )
+    }
+
+    /// The loaded model's inspectable facts — architecture, dimensions, capabilities.
+    /// Read from the model itself, never reconstructed from its filename, which is
+    /// what `/props` and `/api/show` need to stop guessing.
+    pub fn model_info(&self) -> crate::engine::model::ModelInfo {
+        self.model.model_info()
     }
 
     pub fn model_name(&self) -> &str {

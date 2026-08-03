@@ -73,6 +73,8 @@ The primary inference endpoint. Accepts a conversation history and returns a mod
 | `logit_bias` | `object` | `null` | Additive per-token bias keyed by token id (string): `{"123": 5, "456": -100}`. `±100` effectively forces/bans a token. |
 | `min_p` | `number` | `0.0` | Min-P sampling: drop tokens below `min_p × max_prob` (fox extension). |
 | `min_tokens` | `integer` | `0` | Suppress end-of-generation until at least this many tokens are produced (fox extension). |
+| `n` | `integer` | `1` | Number of completion choices to return (1–8). Each choice is an independent generation over the same prompt. See [Multiple completions](#multiple-completions-n--best_of). |
+| `best_of` | `integer` | `n` | Generate this many candidates server-side and return only the `n` with the highest total log-likelihood (1–8, must be ≥ `n`). Not supported with `stream: true` when `best_of > n`. |
 
 > **Sampling defaults.** The OpenAI surface mirrors OpenAI: no `top_k` and no repeat
 > penalty (use `frequency_penalty`/`presence_penalty`, both `0.0` = off). The Ollama
@@ -570,6 +572,36 @@ unconstrained probabilities, not the grammar-masked ones.
 
 ---
 
+## Multiple completions (`n` / `best_of`)
+
+Set `n` to get more than one completion per request — each appears in `choices[]`,
+tagged by `index`:
+
+```json
+{
+  "model": "llama3.2",
+  "messages": [{"role": "user", "content": "Give me a name for a coffee shop."}],
+  "n": 3
+}
+```
+
+Each of the `n` choices is a fully independent generation over the same prompt (not a
+shared-prefill fork — see `docs/design/n-best-of-support.md`), so at `temperature: 0`
+they come out identical (expected — greedy decoding is deterministic). At
+`temperature > 0` they diverge on their own; an explicit `seed` still yields distinct
+choices, since each branch perturbs the seed internally rather than reusing it verbatim.
+
+`usage.completion_tokens` is the sum across every returned choice, not just one.
+
+Set `best_of` higher than `n` to sample more candidates than you keep: fox generates
+`best_of` completions, ranks them by total log-likelihood (summed per-token
+log-probability — no need to also set `logprobs: true`, ranking is computed
+internally), and returns only the top `n`. `best_of > n` is rejected with `400` when
+combined with `stream: true` — ranking needs every candidate's full completion before
+anything can be shown, which streaming can't do incrementally.
+
+---
+
 ## Stop sequences
 
 Use the `stop` field to end generation when specific strings are produced.
@@ -643,6 +675,82 @@ for await (const chunk of stream) {
   process.stdout.write(chunk.choices[0]?.delta?.content ?? "");
 }
 ```
+
+---
+
+## Introspection
+
+### `GET /props`
+
+What this server is actually serving, read from the **loaded model** rather than
+inferred from its filename: architecture, backend, `n_ctx` (what fox allocated) vs
+`n_ctx_train`, dimensions, vocabulary size, and capability flags —
+`supports_thinking`, `supports_vision`, `supports_infill`, `supports_kv_reuse` —
+plus which fox features the server was started with.
+
+It also publishes `default_generation_settings` — **the sampling defaults a request
+gets when it sets nothing, per API surface**. fox's two surfaces differ on purpose
+(`/v1/*` mirrors OpenAI, `/api/*` mirrors Ollama), and that divergence has a
+measurable cost a caller cannot otherwise see: OpenAI has no `top_k`, so `/v1/*`
+defaults to `0`, meaning the sampler softmaxes the whole vocabulary rather than 40
+candidates — worth ~8.7% of decode throughput on a Radeon 890M. The default is
+deliberate and unchanged; publishing it is what makes an informed `"top_k": 40`
+possible. llama-server publishes its (single) set under the same key.
+
+`model` is `null` when nothing is resident yet: fox loads lazily, so that is a normal
+state, not an error. This endpoint never *triggers* a load — under the default
+`--max-models 1` that would evict whatever is serving traffic.
+
+### `GET /slots`
+
+One entry per llama.cpp sequence: `free`, `processing` (with its request id), or
+`idle` — meaning it holds reusable KV from a finished request, a cache entry rather
+than work in progress. Also reports `resident_tokens`, `blocks` charged, and
+`idle_secs`. This is how the KV reuse described in
+`docs/design/llama-server-gap-analysis.md` becomes observable.
+
+The resident tokens themselves are **not** exposed. A parked sequence is another
+user's conversation and this endpoint has no per-user authorisation of its own;
+llama-server redacts the same fields.
+
+---
+
+## Tokenizer utilities
+
+Three endpoints that run no inference — they only need the loaded model's vocabulary
+and chat template. Useful for counting tokens before sending a request, and for
+debugging why a chat template renders the way it does. Ported from `llama-server`.
+
+### `POST /tokenize`
+
+```json
+{ "model": "llama3.2", "content": "Hello world", "with_pieces": false }
+```
+
+Returns `{"tokens": [15339, 1917]}`. With `"with_pieces": true`, each entry becomes
+`{"id": 15339, "piece": "Hello"}`. A token that holds only part of a multi-byte
+codepoint (half an emoji, split across two BPE tokens) has no valid UTF-8 piece and
+is reported as `{"id": ..., "bytes": [...]}` instead — decoding it lossily would
+misrepresent the vocabulary.
+
+### `POST /detokenize`
+
+```json
+{ "model": "llama3.2", "tokens": [15339, 1917] }
+```
+
+Returns `{"content": "Hello world"}`. Piece bytes are joined *before* decoding, so a
+codepoint split across two tokens round-trips correctly.
+
+### `POST /apply-template`
+
+```json
+{ "model": "llama3.2", "messages": [{"role": "user", "content": "Hi"}] }
+```
+
+Returns `{"prompt": "..."}` — the fully rendered prompt, produced through the same
+path a real request takes and then detokenized. What you get back is literally what
+the model would receive, control tokens included.
 
 ---
 

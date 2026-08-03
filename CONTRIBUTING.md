@@ -78,6 +78,32 @@ FOX_SKIP_LLAMA=1 cargo test --all --features test-helpers
 - **Lints**: the project must compile clean under `clippy -- -D warnings`.
 - `make setup` installs a pre-push git hook that runs these automatically.
 
+### Performance claims
+
+The pre-push hook also rejects a commit whose message states a throughput or
+latency number without saying how it was measured. This is not pedantry: on
+2026-08-02 five separate performance claims had to be retracted, none of them
+because fox's code was wrong — the measurements were (two servers running at
+once, before/after pairs taken hours apart, a rebuild that silently never
+applied, a micro-benchmark on synthetic data, a "winner" declared from
+overlapping ranges). The full account is in
+[`docs/design/rocm-benchmarking-2026-08.md`](docs/design/rocm-benchmarking-2026-08.md).
+
+Use `scripts/ab_bench.sh` for any before/after comparison — it runs one server
+at a time, alternates the two arms, reports what each actually loaded, and
+returns `INCONCLUSIVE` rather than a winner when the ranges overlap:
+
+```bash
+./scripts/ab_bench.sh \
+  --a-label before --a-cmd './target/release/fox serve --model-path M --port 8097' \
+  --b-label after  --b-cmd './target/release/fox serve --model-path M --port 8097' \
+  --prep-b 'cargo build --release' \
+  --url http://localhost:8097 --model llama-3.2-1b-instruct-q8_0 --rounds 3
+```
+
+Then quote its output, or name whatever harness/instrumentation you used. If
+the number is illustrative rather than a claim, `FOX_SKIP_PERF_CHECK=1 git push`.
+
 ## Architecture overview
 
 Understanding how the pieces fit together makes it much easier to know where to make changes.

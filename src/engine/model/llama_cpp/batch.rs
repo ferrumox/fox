@@ -4,7 +4,9 @@ use anyhow::{anyhow, Result};
 
 use crate::engine::ffi;
 use crate::engine::model::sampling::{sample_greedy, sample_token, SamplerParams};
-use crate::engine::model::{InferenceRequestForModel, Logits, Model, PrefillStep};
+use crate::engine::model::{
+    InferenceRequestForModel, KvCacheFullAtMinimum, Logits, Model, PrefillStep,
+};
 
 use super::LlamaCppModel;
 
@@ -25,7 +27,98 @@ fn bisection_split(ret: i32, len: usize) -> Option<usize> {
     }
 }
 
+/// Allocate an `n_batch` token budget across `desired_lens` (one per request,
+/// in submission order), returning each request's actually-allowed length.
+/// Once the budget is exhausted, later requests get `0` for this call — never
+/// partially over budget, and never negative. This exists because
+/// `llama_decode` aborts via `GGML_ASSERT(n_tokens_all <= cparams.n_batch)`
+/// with no graceful return code, unlike `ret==1` ("no KV slot"), so the
+/// aggregate submitted-token count must never be allowed to exceed `n_batch`
+/// in the first place — see the call site in `do_prefill_batch` for why this
+/// can happen even with `max_prefill_chunk` already capping each request's
+/// own desired length.
+fn allocate_batch_budget(desired_lens: &[usize], n_batch: usize) -> Vec<usize> {
+    let mut budget = n_batch;
+    desired_lens
+        .iter()
+        .map(|&desired| {
+            let allowed = desired.min(budget);
+            budget -= allowed;
+            allowed
+        })
+        .collect()
+}
+
+/// One group of requests sharing the same LoRA selection (by adapter name — see
+/// `LoraSelection`'s doc comment for why equality is name-based). `None` is its
+/// own group ("no adapter"). `do_prefill`/`do_decode` decode each group as an
+/// independent sub-batch, switching the context's active adapter set between
+/// groups — see `docs/design/lora-support.md`.
+struct LoraGroup {
+    selection: Option<crate::scheduler::LoraSelection>,
+    req_ids: Vec<u64>,
+    requests: Vec<InferenceRequestForModel>,
+}
+
+/// Partition requests into `LoraGroup`s, preserving each request's relative
+/// order within its group. Linear (not hash-based) since batch sizes are small
+/// (bounded by `--max-batch-size`) and this keeps output order deterministic.
+fn group_by_lora(req_ids: &[u64], requests: &[InferenceRequestForModel]) -> Vec<LoraGroup> {
+    let mut groups: Vec<LoraGroup> = Vec::new();
+    for (&id, req) in req_ids.iter().zip(requests.iter()) {
+        let key = req.lora.as_ref().map(|l| l.name.as_str());
+        match groups
+            .iter_mut()
+            .find(|g| g.selection.as_ref().map(|l| l.name.as_str()) == key)
+        {
+            Some(g) => {
+                g.req_ids.push(id);
+                g.requests.push(req.clone());
+            }
+            None => groups.push(LoraGroup {
+                selection: req.lora.clone(),
+                req_ids: vec![id],
+                requests: vec![req.clone()],
+            }),
+        }
+    }
+    groups
+}
+
 impl LlamaCppModel {
+    /// Set the context's active LoRA adapter set to match `selection` (`None`
+    /// clears it) before decoding a group's batch. `llama_set_adapters_lora`
+    /// only rebuilds the compute graph when the requested set actually differs
+    /// from what's already active, so calling this unconditionally per group —
+    /// even every step, even for the common all-`None` case — is cheap; fox
+    /// doesn't need to track "did it change" itself.
+    fn apply_lora_group(&self, selection: Option<&crate::scheduler::LoraSelection>) -> Result<()> {
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+        let ctx = ctx_guard.as_ptr();
+        let ret = match selection {
+            Some(sel) => {
+                let (adapter, _) = self.lora_adapters.get(&sel.name).ok_or_else(|| {
+                    anyhow!("LoRA adapter '{}' is not loaded on this model", sel.name)
+                })?;
+                let mut adapters = [adapter.as_ptr()];
+                let mut scales = [sel.scale];
+                unsafe {
+                    ffi::llama_set_adapters_lora(ctx, adapters.as_mut_ptr(), 1, scales.as_mut_ptr())
+                }
+            }
+            None => unsafe {
+                ffi::llama_set_adapters_lora(ctx, std::ptr::null_mut(), 0, std::ptr::null_mut())
+            },
+        };
+        if ret != 0 {
+            anyhow::bail!("llama_set_adapters_lora failed (code {ret})");
+        }
+        Ok(())
+    }
+
     pub(super) fn do_prefill(
         &self,
         req_ids: &[u64],
@@ -58,18 +151,49 @@ impl LlamaCppModel {
         let req_ids = &req_ids[..];
         let requests = &requests[..];
 
-        // Effective start of a request's FIRST prefill chunk: one token before
-        // skip_prefix_tokens so the prefix-cache boundary position is always freshly
-        // computed (see seq_cp comment below). For a non-hit request this is 0.
-        let effective_skip = |r: &InferenceRequestForModel| {
-            r.skip_prefix_tokens
-                .saturating_sub(1)
-                .min(r.prompt_tokens.len())
-        };
+        // Text requests: group by LoRA selection (switching the context's active
+        // adapter set is a whole-context operation — see docs/design/lora-support.md
+        // — so requests using different adapters can never share one llama_decode
+        // call) and prefill each group independently.
+        let mut results = mm_results;
+        for group in group_by_lora(req_ids, requests) {
+            self.apply_lora_group(group.selection.as_ref())?;
+            results.extend(self.do_prefill_batch(
+                &group.req_ids,
+                &group.requests,
+                max_prefill_chunk,
+            )?);
+        }
+        Ok(results)
+    }
 
-        // End (exclusive) of this chunk: advance up to max_prefill_chunk tokens from
-        // prefill_pos (0 = unbounded / single-shot), clamped to the prompt length.
-        let chunk_end = |r: &InferenceRequestForModel| {
+    /// The actual token-batch prefill for one group of requests that all share the
+    /// same LoRA selection (already applied to the context by the caller). Never
+    /// called directly outside `do_prefill` — see that function's LoRA-group split.
+    fn do_prefill_batch(
+        &self,
+        req_ids: &[u64],
+        requests: &[InferenceRequestForModel],
+        max_prefill_chunk: usize,
+    ) -> Result<Vec<PrefillStep>> {
+        if requests.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Start of a request's FIRST prefill chunk. `skip_prefix_tokens` is already the
+        // exact count of resident tokens the scheduler guaranteed: it applies
+        // llama-server's [TAG_PROMPT_LOGITS] guard at admission (stepping back one
+        // token when the prompt is *entirely* resident, so at least one token still
+        // decodes and produces logits) and trims the sequence to exactly that point
+        // via `ScheduledBatch::kv_trims`. No extra `-1` here — that adjustment used to
+        // live in three separate places and each had to agree with the others.
+        let effective_skip =
+            |r: &InferenceRequestForModel| r.skip_prefix_tokens.min(r.prompt_tokens.len());
+
+        // Desired end (exclusive) of this chunk before the n_batch cap below: advance
+        // up to max_prefill_chunk tokens from prefill_pos (0 = unbounded / single-shot),
+        // clamped to the prompt length.
+        let desired_chunk_end = |r: &InferenceRequestForModel| {
             let start = r.prefill_pos.min(r.prompt_tokens.len());
             if max_prefill_chunk == 0 {
                 r.prompt_tokens.len()
@@ -78,10 +202,52 @@ impl LlamaCppModel {
             }
         };
 
-        // Copy cached prefix KV data into each request's sequence BEFORE building the
+        // llama.cpp aborts via GGML_ASSERT(n_tokens_all <= cparams.n_batch) — unlike
+        // ret==1 ("no KV slot"), there is no graceful return code for this, so it must
+        // never be reached rather than retried. `max_prefill_chunk` alone doesn't
+        // guarantee this: it caps one request's own chunk, but several requests
+        // admitted into the same step each contribute their own chunk to the SAME
+        // batch, and their sum is what n_batch actually bounds (also possible with a
+        // single request if max_prefill_chunk itself exceeds n_batch — a small
+        // --max-context-len shrinks n_batch below the 512-token default). Allocate the
+        // n_batch budget across requests in submission order; once exhausted, later
+        // requests in this call submit zero tokens this step — their `prefill_pos`
+        // doesn't advance, so the scheduler re-offers them next step, exactly the
+        // existing mechanism a single request's own multi-step chunking already relies
+        // on (see the empty-`tokens_to_submit` handling below).
+        let n_batch = unsafe {
+            let ctx_guard = self
+                ._ctx
+                .lock()
+                .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+            ffi::llama_n_batch(ctx_guard.as_ptr() as *const _) as usize
+        };
+        let desired_lens: Vec<usize> = requests
+            .iter()
+            .map(|r| {
+                let start = r.prefill_pos.min(r.prompt_tokens.len());
+                desired_chunk_end(r).saturating_sub(start)
+            })
+            .collect();
+        let allowed_lens = allocate_batch_budget(&desired_lens, n_batch);
+        let chunk_ends: Vec<usize> = requests
+            .iter()
+            .zip(allowed_lens.iter())
+            .map(|(r, &allowed_len)| r.prefill_pos.min(r.prompt_tokens.len()) + allowed_len)
+            .collect();
+        let chunk_end = |i: usize| chunk_ends[i];
+
+        // Copy a sibling sequence's KV into this request's sequence BEFORE building the
         // batch — but only on the request's FIRST chunk (prefill_pos == effective_skip),
-        // so a chunked prefill never re-copies. We copy positions 0..skip-1 (exclusive
-        // of the last "cached" position) so the last prefix token is re-submitted below.
+        // so a chunked prefill never re-copies. Copies exactly positions
+        // `[0, skip_prefix_tokens)`, matching what `effective_skip` then declines to
+        // resubmit; the scheduler already guaranteed `skip_prefix_tokens` leaves at
+        // least one token to decode.
+        //
+        // Currently unreachable (`prefix_seq_id` is always `None`) — a request inherits
+        // its predecessor's seq_id outright rather than copying out of it. Kept for the
+        // shared-prefill fork of `n>1`/`best_of`, which needs a copy because the source
+        // is a *live* sibling. See docs/design/llama-server-gap-analysis.md §0.3.
         {
             let ctx_guard = self
                 ._ctx
@@ -102,7 +268,7 @@ impl LlamaCppModel {
                                 // Not the first chunk — the copy already happened.
                                 continue;
                             }
-                            let copy_end = req.skip_prefix_tokens.saturating_sub(1) as i32;
+                            let copy_end = req.skip_prefix_tokens as i32;
                             if copy_end > 0 {
                                 ffi::llama_memory_seq_cp(mem, src, req.kv_seq_id, 0, copy_end);
                             }
@@ -115,19 +281,23 @@ impl LlamaCppModel {
         // This chunk submits prompt_tokens[prefill_pos .. chunk_end] for each request.
         let total_tokens: usize = requests
             .iter()
-            .map(|r| chunk_end(r).saturating_sub(r.prefill_pos.min(r.prompt_tokens.len())))
+            .enumerate()
+            .map(|(i, r)| chunk_end(i).saturating_sub(r.prefill_pos.min(r.prompt_tokens.len())))
             .sum();
 
         // Nothing left to submit (all requests already fully prefilled) — report
         // completion without decoding. Defensive; the scheduler shouldn't emit these.
         if total_tokens == 0 {
-            mm_results.extend(req_ids.iter().enumerate().map(|(i, &req_id)| PrefillStep {
-                req_id,
-                prefill_pos: requests.get(i).map(|r| r.prompt_tokens.len()).unwrap_or(0),
-                logits: None,
-                tokens_in_kv: 0,
-            }));
-            return Ok(mm_results);
+            return Ok(req_ids
+                .iter()
+                .enumerate()
+                .map(|(i, &req_id)| PrefillStep {
+                    req_id,
+                    prefill_pos: requests.get(i).map(|r| r.prompt_tokens.len()).unwrap_or(0),
+                    logits: None,
+                    tokens_in_kv: 0,
+                })
+                .collect());
         }
 
         let n_seq_max = requests.len().max(1) as i32;
@@ -137,10 +307,10 @@ impl LlamaCppModel {
         // final prompt token), or -1 when this chunk doesn't reach the prompt's end.
         let mut batch_logits_indices: Vec<i32> = Vec::with_capacity(requests.len());
 
-        for req in requests.iter() {
+        for (i, req) in requests.iter().enumerate() {
             let seq_id = req.kv_seq_id;
             let start = req.prefill_pos.min(req.prompt_tokens.len());
-            let end = chunk_end(req);
+            let end = chunk_end(i);
             let tokens_to_submit = &req.prompt_tokens[start..end];
             if tokens_to_submit.is_empty() {
                 batch_logits_indices.push(-1);
@@ -194,10 +364,9 @@ impl LlamaCppModel {
                 );
                 let (ids_a, ids_b) = req_ids.split_at(split);
                 let (req_a, req_b) = requests.split_at(split);
-                let mut results = self.do_prefill(ids_a, req_a, max_prefill_chunk)?;
-                results.extend(self.do_prefill(ids_b, req_b, max_prefill_chunk)?);
-                mm_results.extend(results);
-                return Ok(mm_results);
+                let mut results = self.do_prefill_batch(ids_a, req_a, max_prefill_chunk)?;
+                results.extend(self.do_prefill_batch(ids_b, req_b, max_prefill_chunk)?);
+                return Ok(results);
             }
             return Err(anyhow!(
                 "llama_decode failed: {} (batch size {})",
@@ -211,7 +380,7 @@ impl LlamaCppModel {
 
         for (i, &req_id) in req_ids.iter().enumerate() {
             let req = requests.get(i);
-            let new_pos = req.map(chunk_end).unwrap_or(0);
+            let new_pos = req.map(|_| chunk_end(i)).unwrap_or(0);
             let complete = req
                 .map(|r| new_pos >= r.prompt_tokens.len())
                 .unwrap_or(false);
@@ -250,7 +419,12 @@ impl LlamaCppModel {
             } else {
                 sample_greedy(logits_slice)
             };
-            let values: Vec<f32> = logits_slice.to_vec();
+            let needs_logits = req.map(|r| r.needs_logits).unwrap_or(false);
+            let values: Vec<f32> = if needs_logits {
+                logits_slice.to_vec()
+            } else {
+                Vec::new()
+            };
             results.push(PrefillStep {
                 req_id,
                 prefill_pos: new_pos,
@@ -260,8 +434,7 @@ impl LlamaCppModel {
         }
 
         unsafe { ffi::llama_batch_free(batch) };
-        mm_results.extend(results);
-        Ok(mm_results)
+        Ok(results)
     }
 
     /// Prefill a single multimodal request atomically via `mtmd_helper_eval_chunks`,
@@ -339,10 +512,58 @@ impl LlamaCppModel {
             return Ok(vec![]);
         }
 
+        // Group by LoRA selection — same reasoning as do_prefill: the adapter set
+        // is a whole-context property, so requests using different adapters can
+        // never share one llama_decode call. Unlike prefill, decode has no
+        // multimodal split (decode is always plain token-based, regardless of
+        // whether the request's *first* turn was multimodal).
+        let mut results = Vec::with_capacity(requests.len());
+        for group in group_by_lora(req_ids, requests) {
+            self.apply_lora_group(group.selection.as_ref())?;
+            results.extend(self.do_decode_batch(&group.req_ids, &group.requests)?);
+        }
+        Ok(results)
+    }
+
+    /// The actual token-batch decode for one group of requests that all share the
+    /// same LoRA selection (already applied to the context by the caller). Never
+    /// called directly outside `do_decode` — see that function's LoRA-group split.
+    fn do_decode_batch(
+        &self,
+        req_ids: &[u64],
+        requests: &[InferenceRequestForModel],
+    ) -> Result<Vec<(u64, Logits)>> {
+        if requests.is_empty() {
+            return Ok(vec![]);
+        }
+
         let n_tokens = requests.len() as i32;
         let mut batch = unsafe { ffi::llama_batch_init(n_tokens, 0, n_tokens) };
 
-        for (batch_slot, req) in requests.iter().enumerate() {
+        // Emit the batch in ascending kv_seq_id order. llama.cpp's `split_equal`
+        // (used for every decode whenever the KV cache is non-unified, i.e.
+        // `n_stream > 1` — see `llama-kv-cache.cpp`'s
+        // `n_stream == 1 ? split_simple : split_equal`) walks the batch in order and
+        // only keeps growing the current ubatch while
+        // `batch.seq_id[i][0] == last_seq_id + 1` (`llama-batch.cpp`). Emitting in
+        // scheduler-admission order instead means a 4-sequence decode batch is split
+        // into four 1-token ubatches, and the GPU matmul degrades to `ncols_dst=1` —
+        // real batching on fox's side, none on llama.cpp's. Combined with the
+        // scheduler's min-first seq_id pool (which keeps the live IDs dense), this
+        // hands llama.cpp one full-width ubatch, matching what `llama-server` gets
+        // from iterating its slots in `slot.id` order.
+        //
+        // `order` maps batch position -> index into `requests`/`req_ids`; the logits
+        // read below inverts it via `slot_of` so the returned order is unchanged.
+        let mut order: Vec<usize> = (0..requests.len()).collect();
+        order.sort_by_key(|&i| requests[i].kv_seq_id);
+        let mut slot_of = vec![0usize; requests.len()];
+        for (batch_slot, &orig_idx) in order.iter().enumerate() {
+            slot_of[orig_idx] = batch_slot;
+        }
+
+        for (batch_slot, &orig_idx) in order.iter().enumerate() {
+            let req = &requests[orig_idx];
             let input_token = req
                 .last_token
                 .or_else(|| req.prompt_tokens.last().copied())
@@ -385,9 +606,20 @@ impl LlamaCppModel {
                 );
                 let (ids_a, ids_b) = req_ids.split_at(split);
                 let (req_a, req_b) = requests.split_at(split);
-                let mut results = self.do_decode(ids_a, req_a)?;
-                results.extend(self.do_decode(ids_b, req_b)?);
+                let mut results = self.do_decode_batch(ids_a, req_a)?;
+                results.extend(self.do_decode_batch(ids_b, req_b)?);
                 return Ok(results);
+            }
+            // Bisection is exhausted (batch already at size 1) and it's
+            // specifically "no KV slot" (ret==1), not some other fatal code —
+            // signal which request this is so the engine layer (which owns
+            // the scheduler + context-shift config this layer doesn't have)
+            // can try one reactive context roll before giving up. See
+            // docs/design/reactive-context-rolling.md.
+            if ret == 1 && requests.len() == 1 {
+                return Err(anyhow::Error::new(KvCacheFullAtMinimum {
+                    req_id: req_ids[0],
+                }));
             }
             return Err(anyhow!(
                 "llama_decode failed: {} (batch size {})",
@@ -401,7 +633,10 @@ impl LlamaCppModel {
 
         for (out_idx, &req_id) in req_ids.iter().enumerate() {
             let req = requests.get(out_idx);
-            let logits_ptr = unsafe { ffi::llama_get_logits_ith(ctx, out_idx as i32) };
+            // Undo the ascending-seq_id emission order: this request's logits live at
+            // the batch position it was written to, not at its index in `req_ids`.
+            let batch_slot = slot_of.get(out_idx).copied().unwrap_or(out_idx);
+            let logits_ptr = unsafe { ffi::llama_get_logits_ith(ctx, batch_slot as i32) };
             if logits_ptr.is_null() {
                 results.push((req_id, Logits::new(vec![], self.eos_token)));
                 continue;
@@ -413,7 +648,15 @@ impl LlamaCppModel {
             } else {
                 sample_greedy(logits_slice)
             };
-            let values: Vec<f32> = logits_slice.to_vec();
+            // Copying the full vocab-sized logits vector is only useful when the
+            // caller actually reads it (`logprobs`) — skip it otherwise, since
+            // it's a real per-token cost on real vocabs (128K+ entries).
+            let needs_logits = req.map(|r| r.needs_logits).unwrap_or(false);
+            let values: Vec<f32> = if needs_logits {
+                logits_slice.to_vec()
+            } else {
+                Vec::new()
+            };
             results.push((req_id, Logits::new(values, sampled)));
         }
 
@@ -470,6 +713,9 @@ impl LlamaCppModel {
             repetition_penalty: req.repetition_penalty,
             frequency_penalty: req.frequency_penalty,
             presence_penalty: req.presence_penalty,
+            repeat_last_n: req.repeat_last_n,
+            top_n_sigma: req.top_n_sigma,
+            min_keep: req.min_keep,
             logit_bias: req.logit_bias.as_deref(),
             generated_ids: generated,
             seed: req.seed,
@@ -611,7 +857,7 @@ impl LlamaCppModel {
             return Err(anyhow!("llama_decode (speculative) failed: {}", ret));
         }
 
-        let n_vocab = self.config.vocab_size as usize;
+        let n_vocab = self.config.vocab_size;
         let mut committed: Vec<Logits> = Vec::with_capacity(n);
         // Penalty context grows with each committed token so per-position sampling matches
         // the non-speculative path exactly (repetition/frequency/presence penalties).
@@ -678,7 +924,7 @@ impl LlamaCppModel {
             Err(_) => return Vec::new(),
         };
         let ctx = ctx_guard.as_ptr();
-        let n_vocab = self.config.vocab_size as usize;
+        let n_vocab = self.config.vocab_size;
 
         // Feed `new_tokens`, requesting logits only at the last position — that's
         // all that's needed to pick the first draft token.
@@ -772,6 +1018,72 @@ impl LlamaCppModel {
         }
     }
 
+    /// Score one (query, document) pair via the model's classification head.
+    ///
+    /// Deliberately does NOT reuse `do_get_embeddings`: that one marks every token
+    /// for output and mean-pools by hand precisely because the generation context
+    /// resolves to `pooling_type = NONE`. A reranker resolves to `RANK` instead, where
+    /// llama.cpp writes one score per *sequence* and only `llama_get_embeddings_seq`
+    /// can read it. A NULL return there is the model telling us it is not a reranker.
+    pub(super) fn do_rerank_score(&self, tokens: &[i32]) -> Result<f32> {
+        if tokens.is_empty() {
+            return Err(anyhow!("cannot score an empty sequence"));
+        }
+        let n_tokens = tokens.len() as i32;
+
+        let mut batch = unsafe { ffi::llama_batch_init(n_tokens, 0, 1) };
+        for (i, &token) in tokens.iter().enumerate() {
+            unsafe {
+                *batch.token.add(i) = token;
+                *batch.pos.add(i) = i as i32;
+                *batch.n_seq_id.add(i) = 1;
+                let arr = *batch.seq_id.add(i);
+                // Same dedicated slot as embeddings: outside the scheduler's pool, so
+                // scoring can never clobber a live generation's KV.
+                *arr.add(0) = self.embed_seq_id;
+                // RANK pooling reduces over the sequence; only the last token needs
+                // its output flagged.
+                *batch.logits.add(i) = i8::from(i + 1 == tokens.len());
+            }
+            batch.n_tokens += 1;
+        }
+
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+        let ctx = ctx_guard.as_ptr();
+
+        unsafe { ffi::llama_set_embeddings(ctx, true) };
+        let ret = unsafe { ffi::llama_decode(ctx, batch) };
+
+        let cleanup = |ctx: *mut ffi::llama_context| unsafe {
+            let mem = ffi::llama_get_memory(ctx as *const _);
+            if !mem.is_null() {
+                ffi::llama_memory_seq_rm(mem, self.embed_seq_id, 0, -1);
+            }
+            ffi::llama_set_embeddings(ctx, false);
+            ffi::llama_batch_free(batch);
+        };
+
+        if ret != 0 {
+            cleanup(ctx);
+            return Err(anyhow!("llama_decode (rerank) failed: {}", ret));
+        }
+
+        let ptr = unsafe { ffi::llama_get_embeddings_seq(ctx, self.embed_seq_id) };
+        if ptr.is_null() {
+            cleanup(ctx);
+            return Err(anyhow!(
+                "model has no reranking head — llama.cpp resolved its pooling type to \
+                 something other than RANK, so there is no sequence score to read"
+            ));
+        }
+        let score = unsafe { *ptr };
+        cleanup(ctx);
+        Ok(score)
+    }
+
     pub(super) fn do_get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>> {
         if tokens.is_empty() {
             return Ok(vec![]);
@@ -858,7 +1170,45 @@ impl LlamaCppModel {
 
 #[cfg(test)]
 mod tests {
-    use super::bisection_split;
+    use super::{allocate_batch_budget, bisection_split};
+
+    #[test]
+    fn allocate_batch_budget_grants_everyone_when_budget_is_ample() {
+        assert_eq!(allocate_batch_budget(&[10, 20, 5], 100), vec![10, 20, 5]);
+    }
+
+    #[test]
+    fn allocate_batch_budget_starves_later_requests_when_exhausted() {
+        // 100 budget: req 0 gets all 60 it wants, req 1 gets only 40 of its 80,
+        // req 2 (already out of budget) gets 0 and must wait for the next step.
+        assert_eq!(allocate_batch_budget(&[60, 80, 30], 100), vec![60, 40, 0]);
+    }
+
+    #[test]
+    fn allocate_batch_budget_caps_a_single_request_alone() {
+        // Confirms the fix also covers max_prefill_chunk itself exceeding
+        // n_batch with only one request in the call — no concurrency needed.
+        assert_eq!(allocate_batch_budget(&[512], 64), vec![64]);
+    }
+
+    #[test]
+    fn allocate_batch_budget_zero_n_batch_starves_everyone() {
+        assert_eq!(allocate_batch_budget(&[10, 20], 0), vec![0, 0]);
+    }
+
+    #[test]
+    fn allocate_batch_budget_empty_input() {
+        assert_eq!(allocate_batch_budget(&[], 100), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn allocate_batch_budget_never_exceeds_n_batch_in_aggregate() {
+        let allowed = allocate_batch_budget(&[36; 8], 64);
+        assert_eq!(allowed.iter().sum::<usize>(), 64);
+        // Exactly matches the crash this fix closes: 8 requests x 36 tokens
+        // (288) vs n_batch=64 — every allowed length together must total
+        // exactly the budget (fully used, never exceeded).
+    }
 
     #[test]
     fn ret_one_splits_a_batch_in_half() {

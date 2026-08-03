@@ -12,7 +12,7 @@ pub async fn ollama_embed(
     State(state): State<AppState>,
     LenientJson(req): LenientJson<OllamaEmbedRequest>,
 ) -> impl IntoResponse {
-    let entry = match load_model_or_respond(&state.registry, &req.model).await {
+    let (entry, _lora) = match load_model_or_respond(&state.registry, &req.model).await {
         Ok(e) => e,
         Err(r) => return r,
     };

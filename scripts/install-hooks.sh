@@ -24,3 +24,8 @@ done
 echo ""
 echo "Done. Hooks will run automatically on git push."
 echo "To skip in an emergency: git push --no-verify"
+echo ""
+echo "pre-push runs fmt, clippy and tests, and also rejects commit messages that"
+echo "state a performance number without saying how it was measured (see"
+echo "CONTRIBUTING.md → Performance claims). Skip just that one with:"
+echo "  FOX_SKIP_PERF_CHECK=1 git push"

@@ -15,10 +15,12 @@ pub struct RegistryModel {
     pub repo: String,
     pub recommended: String,
     /// Filename of the paired mmproj (vision projector) GGUF, for vision models —
-    /// same repo as `recommended`. `fox pull` doesn't auto-fetch it (it resolves
-    /// repos by live HF search, not from this catalog); pull it explicitly with
-    /// `fox pull <repo> --filename <mmproj>` and pass `--mmproj <name>` to `fox
-    /// serve`. Absent for all non-vision entries.
+    /// same repo as `recommended`. `fox pull <name>` resolves this entry's repo
+    /// but does not auto-fetch the mmproj (prints a follow-up hint instead, so a
+    /// user who only wants text inference doesn't get a surprise extra
+    /// download); pull it explicitly with `fox pull <repo> --filename <mmproj>`
+    /// and pass `--mmproj <name>` to `fox serve`. Absent for all non-vision
+    /// entries.
     #[serde(default)]
     pub mmproj: Option<String>,
     pub description: String,

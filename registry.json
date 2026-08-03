@@ -26,7 +26,7 @@
     },
     "mistral-small": {
       "aliases": ["mistral", "mistral:24b"],
-      "repo": "bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF",
+      "repo": "unsloth/Mistral-Small-3.1-24B-Instruct-2503-GGUF",
       "recommended": "Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf",
       "description": "Mistral Small 3.1 24B — updated Mistral (Mar 2025)",
       "size_gb": 14.0,
@@ -50,7 +50,7 @@
     },
     "gemma3": {
       "aliases": ["gemma", "gemma3:4b"],
-      "repo": "bartowski/gemma-3-4b-it-GGUF",
+      "repo": "unsloth/gemma-3-4b-it-GGUF",
       "recommended": "gemma-3-4b-it-Q4_K_M.gguf",
       "description": "Google Gemma 3 4B — strong small model from Google",
       "size_gb": 2.5,
@@ -58,7 +58,7 @@
     },
     "gemma3:1b": {
       "aliases": ["gemma:1b"],
-      "repo": "bartowski/gemma-3-1b-it-GGUF",
+      "repo": "unsloth/gemma-3-1b-it-GGUF",
       "recommended": "gemma-3-1b-it-Q4_K_M.gguf",
       "description": "Google Gemma 3 1B — ultra-lightweight, edge inference",
       "size_gb": 0.7,
@@ -66,7 +66,7 @@
     },
     "gemma3:12b": {
       "aliases": ["gemma:12b"],
-      "repo": "bartowski/gemma-3-12b-it-GGUF",
+      "repo": "unsloth/gemma-3-12b-it-GGUF",
       "recommended": "gemma-3-12b-it-Q4_K_M.gguf",
       "description": "Google Gemma 3 12B — balanced performance",
       "size_gb": 7.5,
@@ -74,7 +74,7 @@
     },
     "gemma3:27b": {
       "aliases": ["gemma:27b"],
-      "repo": "bartowski/gemma-3-27b-it-GGUF",
+      "repo": "unsloth/gemma-3-27b-it-GGUF",
       "recommended": "gemma-3-27b-it-Q4_K_M.gguf",
       "description": "Google Gemma 3 27B — flagship Gemma, strong reasoning",
       "size_gb": 16.5,
@@ -129,6 +129,22 @@
       "description": "Google Gemma 4 E2B (vision) — natively multimodal flagship-family model, 131K context, verified end-to-end (24/24 e2e checks incl. image_url/images/prefix-cache isolation, 2026-08-01). Pull both files (`fox pull gemma4-e2b` then `fox pull bartowski/google_gemma-4-E2B-it-GGUF --filename mmproj-google_gemma-4-E2B-it-f16.gguf`), then serve with `--mmproj mmproj-google_gemma-4-E2B-it-f16`",
       "size_gb": 3.85,
       "tags": ["chat", "vision", "reasoning"]
+    },
+    "mamba-130m": {
+      "aliases": ["mamba", "mamba130m"],
+      "repo": "Felladrin/gguf-mamba-130m-hf",
+      "recommended": "mamba-130m-hf.Q8_0.gguf",
+      "description": "Mamba 130M — tiny recurrent/hybrid state-space model (no per-token KV cache; prefix caching and context-shift are unsupported for this architecture, by design). Used to verify KV/state sizing correctness for recurrent models (`fox probe` reports `KV memory class: recurrent`) — see docs/design/mla-recurrent-kv-sizing.md. Not instruction-tuned; a raw completion model, not a chat model.",
+      "size_gb": 0.16,
+      "tags": ["recurrent", "completion", "tiny"]
+    },
+    "deepseek-v2-lite": {
+      "aliases": ["deepseek-v2", "deepseek2-lite"],
+      "repo": "mradermacher/DeepSeek-V2-Lite-GGUF",
+      "recommended": "DeepSeek-V2-Lite.Q4_K_M.gguf",
+      "description": "DeepSeek-V2-Lite 16B (2.4B active, MoE) — the smallest real Multi-head Latent Attention (MLA) model available in GGUF; DeepSeek-V2/V3 compress KV into a small latent vector, far smaller than fox's positional KV formula assumes. Used to verify KV sizing correctness for MLA models (`fox probe` reports `KV memory class: latent (MLA)`) — see docs/design/mla-recurrent-kv-sizing.md. Large download (~10GB at the recommended quant).",
+      "size_gb": 9.66,
+      "tags": ["chat", "moe", "mla", "reasoning"]
     }
   }
 }

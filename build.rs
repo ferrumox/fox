@@ -78,10 +78,23 @@ fn main() {
         .define("BUILD_SHARED_LIBS", "ON")
         // Each backend (.so) is dlopen-ed at runtime — zero CUDA dep in the binary.
         .define("GGML_BACKEND_DL", "ON")
-        // GGML_NATIVE (CPU arch-specific optimizations) is incompatible with GGML_BACKEND_DL.
-        // The CPU backend is selected generically; GGML_CPU_ALL_VARIANTS would build
-        // arch-specific variants as separate .so files (optional future improvement).
+        // GGML_NATIVE (CPU arch-specific optimizations) is incompatible with
+        // GGML_BACKEND_DL, so the CPU backend is built without host-specific tuning.
+        // This is NOT the same as falling back to a bare baseline: measured on a Zen 5
+        // host, the resulting libggml-cpu.so performs the same as a hand-built AVX-512
+        // (zen4) variant, and 2.7x faster than the true baseline (x64) variant. See
+        // docs/design/rocm-benchmarking-2026-08.md.
         .define("GGML_NATIVE", "OFF")
+        // If a host *does* land on a poor tier, GGML_CPU_ALL_VARIANTS builds the CPU
+        // backend once per instruction-set tier (x64, sse42, haswell, skylakex, zen4,
+        // ...) as separate .so files and lets ggml pick the best supported one at
+        // runtime — it *requires* GGML_BACKEND_DL, which fox already sets, so one
+        // portable binary still gets AVX-512.
+        //
+        // Off by default: it multiplies CPU-backend compile time by the number of tiers
+        // (12s -> 45s here), and on the one machine this was measured it bought nothing
+        // over the default build. Opt in with FOX_CPU_ALL_VARIANTS=1 after checking
+        // what your host actually loads (FOX_LLAMA_LOG=1 prints the chosen .so).
         .define("LLAMA_BUILD_TESTS", "OFF")
         .define("LLAMA_BUILD_TOOLS", "OFF")
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
@@ -99,6 +112,29 @@ fn main() {
         .define("LLAMA_USE_PREBUILT_UI", "OFF")
         .define("LLAMA_BUILD_WEBUI", "OFF") // legacy name, harmless on newer trees
         .profile("Release");
+
+    // See the GGML_NATIVE comment above: opt-in multi-tier CPU backend.
+    //
+    // Always passed explicitly, never conditionally: CMake caches options in the
+    // build directory, so simply *omitting* the define after a run that set it ON
+    // leaves it ON — unsetting the env var would silently keep building variants.
+    //
+    // Note this stops CMake *building* them but does not remove variants a previous
+    // run already installed into OUT_DIR, which are copied out regardless. Turning
+    // the flag back off therefore needs a `cargo clean` to fully take effect.
+    // Harmless if you don't: ggml just keeps loading the best available variant.
+    println!("cargo:rerun-if-env-changed=FOX_CPU_ALL_VARIANTS");
+    let cpu_all_variants =
+        env::var("FOX_CPU_ALL_VARIANTS").is_ok_and(|v| v != "0" && !v.is_empty());
+    cmake_config.define(
+        "GGML_CPU_ALL_VARIANTS",
+        if cpu_all_variants { "ON" } else { "OFF" },
+    );
+    if cpu_all_variants {
+        println!(
+            "cargo:warning=building all CPU backend variants (FOX_CPU_ALL_VARIANTS) — slower build"
+        );
+    }
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
@@ -169,6 +205,13 @@ fn main() {
                                 );
                                 cmake_config.define("GGML_HIP", "ON");
                                 cmake_config.define("CMAKE_HIP_COMPILER", clang_path);
+                                // CMake's HIP language auto-detects the target
+                                // architecture by probing a visible GPU, which isn't
+                                // available in a build container/CI runner. Forward an
+                                // explicit target (e.g. AMDGPU_TARGETS=gfx1100) when set.
+                                if let Ok(targets) = env::var("AMDGPU_TARGETS") {
+                                    cmake_config.define("AMDGPU_TARGETS", &targets);
+                                }
                                 true
                             }
                             None => {

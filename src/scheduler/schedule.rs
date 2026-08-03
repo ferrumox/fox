@@ -2,11 +2,11 @@ use std::sync::atomic::Ordering;
 
 use tracing::{debug, info};
 
-use crate::kv_cache::{compute_block_hash, prompt_block_hashes, PageTable};
+use crate::kv_cache::PageTable;
 
 use super::batch;
 use super::batch::{ScheduledBatch, StopReason};
-use super::prefix_cache::PrefixCacheEntry;
+use super::slots::common_prefix_len;
 use super::Scheduler;
 
 impl Scheduler {
@@ -19,16 +19,22 @@ impl Scheduler {
 
     /// One scheduling step. Returns prefill and decode batches.
     ///
-    /// 1. Evict Finished requests, free their KV blocks, return seq IDs to pool
-    /// 2. Admit from waiting_queue — check prefix cache first, then normal allocation.
-    ///    Admission NEVER preempts: blocks are fully reserved at admission (prompt +
-    ///    max_new_tokens), so running requests never grow — evicting an older running
-    ///    request for a newer waiting one is both unfair and livelock-prone (the pair
-    ///    can evict each other forever). A request that doesn't fit waits (FIFO).
-    /// 3. Return prefill and decode id lists
+    /// 1. Retire Finished requests: park each one's sequence as a reusable idle slot
+    ///    (KV kept, blocks kept), or release it outright when its KV must not be
+    ///    reused.
+    /// 2. Admit from waiting_queue, choosing each request's slot by longest-common-
+    ///    prefix affinity so it inherits as much resident KV as possible.
+    ///    Admission NEVER preempts a *running* request: blocks are fully reserved at
+    ///    admission (prompt + max_new_tokens), so running requests never grow —
+    ///    evicting an older running request for a newer waiting one is both unfair
+    ///    and livelock-prone (the pair can evict each other forever). A request that
+    ///    doesn't fit waits (FIFO). Reclaiming an *idle* slot is not preemption: its
+    ///    request already finished and the client already has its output.
+    /// 3. Return prefill and decode id lists, plus the KV trims/clears the engine
+    ///    must apply before the next prefill.
     pub fn schedule_step(&self) -> ScheduledBatch {
         // Lock ordering (must be consistent across ALL callers to avoid deadlock):
-        //   running_batch → waiting_queue → seq_id_pool → prefix_cache
+        //   running_batch → waiting_queue → slots
         let mut running = match self.running_batch.lock() {
             Ok(g) => g,
             Err(e) => {
@@ -43,40 +49,48 @@ impl Scheduler {
                 return ScheduledBatch::default();
             }
         };
-        let mut pool = match self.seq_id_pool.lock() {
+        let mut slots = match self.slots.lock() {
             Ok(g) => g,
             Err(e) => {
-                tracing::error!("seq_id_pool lock poisoned: {}", e);
-                return ScheduledBatch::default();
-            }
-        };
-        let mut pcache = match self.prefix_cache.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::error!("prefix_cache lock poisoned: {}", e);
+                tracing::error!("slots lock poisoned: {}", e);
                 return ScheduledBatch::default();
             }
         };
 
-        // 1. Evict Finished and free blocks + return seq IDs.
-        //    Requests whose kv_seq_id == -1 and page_table is empty were already transferred
-        //    to the prefix cache by try_insert_prefix — skip them.
+        let mut kv_trims: Vec<(i32, usize)> = Vec::new();
+        let mut kv_clears: Vec<i32> = Vec::new();
+        let mut kv_saves: Vec<(i32, Vec<i32>)> = Vec::new();
+        let mut kv_restores: Vec<(i32, Vec<u8>)> = Vec::new();
+        // Held across the admission loop rather than re-locked per request. Acquired
+        // after `slots`, matching the documented lock order.
+        let mut pcache = self.prompt_cache.lock().ok();
+
+        // 1. Retire Finished requests.
+        //
+        // `park_finished` (called from the engine on the completion path) has already
+        // decided each one's fate and recorded it in `park_state`; here we only apply
+        // it. A parked request handed its blocks to its slot and left `kv_seq_id = -1`,
+        // so it is skipped below and its blocks are NOT freed — that is the whole
+        // point: the sequence stays resident as a cache entry.
         let (finished, still_running): (Vec<_>, Vec<_>) = std::mem::take(&mut *running)
             .into_iter()
             .partition(|r| r.is_finished());
 
         for req in &finished {
-            if !req.page_table.is_empty() {
-                self.kv_cache.free_blocks(req.page_table.block_ids());
+            if req.kv_seq_id < 0 {
+                continue; // already parked into its slot
+            }
+            let mut blocks = slots.release(req.kv_seq_id);
+            blocks.extend_from_slice(req.page_table.block_ids());
+            if !blocks.is_empty() {
+                self.kv_cache.free_blocks(&blocks);
                 debug!(
                     request_id = req.id,
-                    blocks = req.page_table.len(),
+                    blocks = blocks.len(),
                     "freed KV blocks for finished request"
                 );
             }
-            if req.kv_seq_id >= 0 {
-                pool.push(req.kv_seq_id);
-            }
+            kv_clears.push(req.kv_seq_id);
         }
         *running = still_running;
 
@@ -86,130 +100,300 @@ impl Scheduler {
         // Always empty since admission stopped preempting; retained so future
         // preemption sources (priority, growth) can reuse the engine-side clearing.
         let preempted_seq_ids = Vec::new();
-        let block_size = self.kv_cache.block_size();
+
+        // Forked branches whose parent has not finished prefilling yet. Collected
+        // rather than left at the queue head: they are not blocked on *capacity*, so
+        // stalling everything behind them would be a self-inflicted head-of-line block.
+        // Re-queued in order once the loop ends.
+        let mut deferred: Vec<batch::InferenceRequest> = Vec::new();
 
         'admit: while let Some(mut req) = waiting.pop_front() {
-            if pool.is_empty() {
-                waiting.push_front(req);
-                break;
+            // A forked branch may only be admitted once its parent's prompt is in the
+            // KV — there is nothing to copy before that.
+            if let Some(parent_id) = req.fork_parent {
+                match running.iter().find(|r| r.id == parent_id) {
+                    Some(parent) if parent.state == batch::RequestState::Decoding => {
+                        // Parent is prefilled: adopt its prompt wholesale, leaving one
+                        // token to decode ([TAG_PROMPT_LOGITS]) so this branch produces
+                        // logits of its own.
+                        let parent_seq = parent.kv_seq_id;
+                        let n_positions = req.n_positions();
+                        // Multimodal is excluded: its positions come from image chunks
+                        // while `effective_skip` counts `prompt_tokens`, which is empty,
+                        // so the copy boundary and the resubmission boundary would not
+                        // agree. LoRA too — a branch must not inherit KV computed under
+                        // a different adapter.
+                        let forkable =
+                            req.multimodal.is_none() && !req.skip_prefix_cache && self.kv_reuse;
+                        if forkable && parent_seq >= 0 && n_positions > 0 {
+                            req.fork_source = Some((parent_seq, n_positions - 1));
+                        } else {
+                            req.fork_parent = None; // unusable parent — prefill normally
+                        }
+                    }
+                    // Still prefilling: try again next step.
+                    Some(_) => {
+                        deferred.push(req);
+                        continue 'admit;
+                    }
+                    // Parent already finished, failed, or was never admitted. Fall back
+                    // to an ordinary admission — slot affinity will usually still find
+                    // the parent's parked KV, so this degrades to slower, not wrong.
+                    None => req.fork_parent = None,
+                }
             }
 
-            // A request that could never fit, even into an empty pool, is now rejected
+            // A request that could never fit, even into an empty pool, is rejected
             // synchronously by `Scheduler::submit()` before it ever reaches this queue
             // (0.16) — it's a static check (prompt + max_new_tokens vs. total pool size)
             // that doesn't need a scheduler turn. No corresponding check needed here.
 
-            // --- Block-level prefix cache lookup ---
+            // Pick the slot whose resident KV this prompt can reuse most of.
             //
-            // Compute the chain hash for each complete block of the prompt.
-            // Then search from the longest matching prefix down to 1 block.
-            // This allows two requests that share a common prefix (e.g. the same
-            // system prompt) to reuse each other's cached KV blocks even when the
-            // rest of the prompt differs.
-            let block_hashes = prompt_block_hashes(&req.prompt_tokens, block_size);
-            let mut prefix_hit: Option<(usize, PrefixCacheEntry)> = None;
-            for i in (0..block_hashes.len()).rev() {
-                if let Some(entry) = pcache.pop(&block_hashes[i]) {
-                    prefix_hit = Some((i + 1, entry)); // matched i+1 blocks
-                    break;
+            // `skip_prefix_cache` (LoRA requests): KV computed under one adapter's
+            // weights is invalid input for a different adapter (or none) at the same
+            // positions, so such a request must start from a clean slot — see
+            // docs/design/lora-support.md.
+            let allow_reuse = self.kv_reuse && !req.skip_prefix_cache;
+            let Some(choice) =
+                slots.select(&req.prompt_tokens, self.slot_prompt_similarity, allow_reuse)
+            else {
+                // Every slot is Busy — wait for one to retire.
+                waiting.push_front(req);
+                break 'admit;
+            };
+
+            // Copy-from-a-live-sequence. `select` above only inherits *idle* slots, so
+            // when N requests sharing a system prompt arrive together none of them can
+            // reuse anything — each prefills and then holds its own copy. Measured: 6
+            // concurrent clients behind a 672-token prompt held 264 blocks where ~54
+            // would do. A busy sequence cannot be inherited, but it can be copied from:
+            // `seq_cp` shares cells under `kv_unified` rather than duplicating them.
+            //
+            // The search runs over `running`, not over the slot table: `claim` clears a
+            // slot's token list because while a request owns the sequence *it* is the
+            // source of truth. Only a request that is already `Decoding` has its whole
+            // prompt in the KV and is therefore copyable.
+            if allow_reuse && req.fork_source.is_none() && req.multimodal.is_none() {
+                let best = running
+                    .iter()
+                    .filter(|r| r.kv_seq_id >= 0 && r.multimodal.is_none() && !r.skip_prefix_cache)
+                    .map(|r| {
+                        let lcp = common_prefix_len(&r.prompt_tokens, &req.prompt_tokens);
+                        (r.kv_seq_id, lcp, r.state)
+                    })
+                    .filter(|&(_, lcp, _)| {
+                        lcp > choice.lcp
+                            && (lcp as f32 / req.prompt_tokens.len().max(1) as f32)
+                                >= self.slot_prompt_similarity
+                    })
+                    .max_by_key(|&(_, lcp, _)| lcp);
+
+                if let Some((donor_seq, lcp, state)) = best {
+                    if state == batch::RequestState::Decoding {
+                        req.fork_source = Some((donor_seq, lcp));
+                    } else {
+                        // Still prefilling: nothing to copy yet. Deferring keeps the
+                        // queue moving — it is blocked on a sibling, not on capacity,
+                        // so leaving it at the head would be a self-inflicted
+                        // head-of-line block.
+                        deferred.push(req);
+                        continue 'admit;
+                    }
                 }
             }
 
-            if let Some((matched_blocks, hit)) = prefix_hit {
-                // --- Prefix cache hit path ---
-                //
-                // Allocate only the blocks needed beyond the cached prefix:
-                // remaining prompt tokens (partial last block) + max_new_tokens.
-                let cached_tokens = matched_blocks * block_size;
-                let remaining_tokens = req.prompt_tokens.len().saturating_sub(cached_tokens);
-                let new_blocks = (remaining_tokens + req.max_new_tokens).div_ceil(block_size);
-
-                if new_blocks == 0 || self.kv_cache.can_allocate(new_blocks) {
-                    let new_ids = if new_blocks > 0 {
-                        match self.kv_cache.allocate(new_blocks) {
-                            Ok(ids) => ids,
-                            Err(_) => {
-                                // Allocation failed — restore the entry and wait.
-                                pcache.put(block_hashes[matched_blocks - 1], hit);
-                                waiting.push_front(req);
-                                break 'admit;
-                            }
-                        }
-                    } else {
-                        vec![]
-                    };
-
-                    let id = req.id;
-                    req.page_table = PageTable::new(hit.block_ids);
-                    req.page_table.extend(new_ids);
-                    req.kv_seq_id = hit.seq_id;
-                    req.skip_prefix_tokens = cached_tokens;
-                    // Prefill (re-)starts at the boundary token (effective skip), so a
-                    // chunked prefill submits [cached_tokens-1 .. len] across steps.
-                    req.prefill_pos = cached_tokens.saturating_sub(1);
-                    req.prefix_seq_id = None;
-                    req.stop_reason = None;
-                    req.state = batch::RequestState::Prefilling;
-                    self.prefix_hits.fetch_add(1, Ordering::Relaxed);
-                    info!(
-                        request_id = id,
-                        seq_id = req.kv_seq_id,
-                        matched_blocks,
-                        cached_tokens,
-                        "block prefix cache hit — skipping prefill of cached tokens"
+            // The host-RAM cache is consulted only when it can beat what the live
+            // slots already offer: restoring a state that covers less than `choice.lcp`
+            // would be a memcpy that loses information. On a hit the chosen slot's KV
+            // is replaced wholesale, so its own resident tokens no longer apply.
+            let mut lcp = choice.lcp;
+            if allow_reuse {
+                if let Some(hit) = pcache
+                    .as_mut()
+                    .and_then(|c| c.take_best(&req.prompt_tokens, choice.lcp))
+                {
+                    kv_restores.push((slots.seq_id_at(choice.index), hit.data));
+                    slots.set_resident(
+                        choice.index,
+                        req.prompt_tokens[..hit.resident.min(req.prompt_tokens.len())].to_vec(),
                     );
-                    running.push(req);
-                    continue 'admit;
-                } else {
-                    // No room yet — restore the entry and wait for capacity (FIFO
-                    // head-of-line). Running requests keep their reservations.
-                    pcache.put(block_hashes[matched_blocks - 1], hit);
-                    waiting.push_front(req);
-                    break 'admit;
+                    lcp = hit.matched;
+                }
+            }
+
+            // Token-exact reuse, then llama-server's [TAG_PROMPT_LOGITS] guard
+            // (server-context.cpp:3356-3361): if the prompt is *entirely* resident
+            // there is nothing left to decode and no logits would be produced, so
+            // step one token back and recompute the final position.
+            let mut n_past = lcp.min(req.n_positions());
+            if n_past > 0 && n_past == req.n_positions() {
+                n_past -= 1;
+            }
+
+            // Blocks are a budget, not addresses (see slots.rs): the request inherits
+            // whatever the slot already holds and tops up only the difference.
+            //
+            // Resolve the donor's shared blocks BEFORE sizing the reservation. Charging
+            // for the shared prefix and handing it back afterwards leaves the steady
+            // state correct but the admission decision wrong: a burst can be turned away
+            // for capacity it was never going to hold. Sizing for what the request will
+            // actually own is what lets the sharing widen concurrency rather than only
+            // shrink the pool.
+            let block_size = self.kv_cache.block_size();
+            let fork_share: Vec<crate::kv_cache::BlockId> = match req.fork_source {
+                Some((parent_seq, fork_skip)) => {
+                    let n_past = fork_skip.min(req.n_positions().saturating_sub(1));
+                    // Whole blocks only. The block straddling the divergence point also
+                    // covers positions this request will write, so it must stay private;
+                    // this floor is what keeps a shared block write-free, which in turn
+                    // is why `run_decode` needs no copy-on-write.
+                    let want = n_past / block_size;
+                    let got: Vec<_> = running
+                        .iter()
+                        .find(|r| r.kv_seq_id == parent_seq)
+                        .map(|d| {
+                            d.page_table
+                                .block_ids()
+                                .iter()
+                                .take(want)
+                                .copied()
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if want > 0 && got.len() != want {
+                        // The donor holds fewer blocks than its prefix implies. Reserving
+                        // short here would under-budget a live request, so drop the copy
+                        // and admit normally — slower, never wrong.
+                        req.fork_source = None;
+                        Vec::new()
+                    } else {
+                        got
+                    }
+                }
+                None => Vec::new(),
+            };
+
+            let needed = self.blocks_needed(&req);
+            let needed_own = needed.saturating_sub(fork_share.len());
+            let have = slots.blocks_at(choice.index);
+            let top_up = needed_own.saturating_sub(have);
+
+            // Make room by reclaiming idle slots — LRU first, never the slot we just
+            // chose, and never a Busy one. Not preemption; see SlotTable::reclaim_lru.
+            while top_up > 0 && !self.kv_cache.can_allocate(top_up) {
+                let Some((victim_seq, victim_tokens, victim_blocks)) =
+                    slots.reclaim_lru(choice.index)
+                else {
+                    break;
+                };
+                // Serialise what it held to host RAM instead of throwing it away —
+                // that is the whole point of the RAM cache: the conversation stays
+                // reusable without continuing to occupy a GPU block.
+                if pcache.as_ref().is_some_and(|c| c.enabled()) && !victim_tokens.is_empty() {
+                    kv_saves.push((victim_seq, victim_tokens));
+                }
+                self.kv_cache.free_blocks(&victim_blocks);
+                kv_clears.push(victim_seq);
+                debug!(
+                    seq_id = victim_seq,
+                    blocks = victim_blocks.len(),
+                    "reclaimed idle slot to make room"
+                );
+            }
+
+            if top_up > 0 && !self.kv_cache.can_allocate(top_up) {
+                // Still short — wait for capacity (FIFO head-of-line). Running
+                // requests keep their reservations.
+                waiting.push_front(req);
+                break 'admit;
+            }
+
+            let new_ids = if top_up > 0 {
+                match self.kv_cache.allocate(top_up) {
+                    Ok(ids) => ids,
+                    Err(_) => {
+                        waiting.push_front(req);
+                        break 'admit;
+                    }
                 }
             } else {
-                // --- Normal admission path (no prefix match) ---
-                self.prefix_misses.fetch_add(1, Ordering::Relaxed);
-                let needed = self.blocks_needed(&req);
-                if self.kv_cache.can_allocate(needed) {
-                    match self.kv_cache.allocate(needed) {
-                        Ok(ids) => {
-                            let Some(seq_id) = pool.pop() else {
-                                // Defensive: pool should be non-empty (checked at loop start).
-                                self.kv_cache.free_blocks(&ids);
-                                waiting.push_front(req);
-                                break 'admit;
-                            };
-                            let id = req.id;
-                            req.page_table = PageTable::new(ids);
-                            req.kv_seq_id = seq_id;
-                            // Fresh (non-hit) admission: prefill from the start with no
-                            // cached prefix. Reset defensively so stale prefix state can
-                            // never corrupt positions.
-                            req.prefill_pos = 0;
-                            req.skip_prefix_tokens = 0;
-                            req.prefix_seq_id = None;
-                            req.stop_reason = None;
-                            req.state = batch::RequestState::Prefilling;
-                            info!(
-                                request_id = id,
-                                seq_id = req.kv_seq_id,
-                                "request admitted to batch"
-                            );
-                            running.push(req);
-                            continue 'admit;
-                        }
-                        Err(_) => {
-                            waiting.push_front(req);
-                            break 'admit;
-                        }
-                    }
-                } else {
-                    // Not enough free blocks yet — wait for capacity (FIFO head-of-line).
-                    waiting.push_front(req);
-                    break 'admit;
-                }
+                Vec::new()
+            };
+
+            let id = req.id;
+            let (seq_id, mut blocks) = slots.claim(choice.index, id);
+            // Give back any surplus the previous occupant held beyond this request's
+            // reservation, so a short prompt after a long one doesn't pin the pool.
+            if blocks.len() > needed_own {
+                let surplus = blocks.split_off(needed_own);
+                self.kv_cache.free_blocks(&surplus);
             }
+            blocks.extend(new_ids);
+
+            // The shared prefix goes first, so the page table still reads in position
+            // order; a reference is taken now that the request is certain to be admitted.
+            if !fork_share.is_empty() {
+                for &b in &fork_share {
+                    self.kv_cache.retain_block(b);
+                }
+                debug!(
+                    request_id = req.id,
+                    shared_blocks = fork_share.len(),
+                    own_blocks = blocks.len(),
+                    "reserving only the blocks past the donor's shared prefix"
+                );
+                let mut merged = fork_share;
+                merged.extend(blocks);
+                blocks = merged;
+            }
+            req.page_table = PageTable::new(blocks);
+            req.kv_seq_id = seq_id;
+            // A forked branch overrides whatever the slot offered: copying the
+            // parent's whole prompt beats any partial LCP match, and the two are
+            // mutually exclusive — the copy overwrites positions 0..n.
+            if let Some((parent_seq, fork_skip)) = req.fork_source {
+                // [TAG_PROMPT_LOGITS] again: copying the *entire* prompt would leave
+                // nothing to decode and no logits, so keep one token back.
+                n_past = fork_skip.min(req.n_positions().saturating_sub(1));
+                req.prefix_seq_id = Some(parent_seq);
+                // The destination now holds the copied prefix; record it or a later
+                // LCP match would be computed against tokens that are not resident.
+                let resident = req.prompt_tokens[..n_past.min(req.prompt_tokens.len())].to_vec();
+                slots.set_resident(choice.index, resident);
+            } else {
+                req.prefix_seq_id = None;
+            }
+            req.skip_prefix_tokens = n_past;
+            req.prefill_pos = n_past;
+            req.stop_reason = None;
+            req.state = batch::RequestState::Prefilling;
+
+            // Drop everything the slot holds past the divergence point before the
+            // next prefill writes there (server-context.cpp:3392-3399). Stale cells
+            // beyond n_past would collide with this request's own positions.
+            kv_trims.push((seq_id, n_past));
+
+            if n_past > 0 {
+                self.prefix_hits.fetch_add(1, Ordering::Relaxed);
+                info!(
+                    request_id = id,
+                    seq_id,
+                    cached_tokens = n_past,
+                    prompt_tokens = req.n_positions(),
+                    "slot prefix hit — skipping prefill of resident tokens"
+                );
+            } else {
+                self.prefix_misses.fetch_add(1, Ordering::Relaxed);
+                info!(request_id = id, seq_id, "request admitted to batch");
+            }
+            running.push(req);
+        }
+
+        // Put deferred branches back at the front, in their original order, so they
+        // are reconsidered next step ahead of anything that arrived meanwhile.
+        for req in deferred.into_iter().rev() {
+            waiting.push_front(req);
         }
 
         // 4. Build the prefill and decode lists from the running batch. A request stays
@@ -228,23 +412,10 @@ impl Scheduler {
             prefill,
             decode,
             preempted_seq_ids,
-        }
-    }
-
-    /// Replace the physical block at `logical_idx` in the request's page table with `new_block_id`.
-    ///
-    /// Called by the engine's CoW path after `KVCacheManager::copy_on_write` has allocated a
-    /// new exclusive block for a request that was sharing a block with the prefix cache.
-    pub fn cow_update_page_table(&self, req_id: u64, logical_idx: usize, new_block_id: usize) {
-        if let Ok(mut running) = self.running_batch.lock() {
-            for req in running.iter_mut() {
-                if req.id == req_id {
-                    if let Some(entry) = req.page_table.entries.get_mut(logical_idx) {
-                        *entry = new_block_id;
-                    }
-                    break;
-                }
-            }
+            kv_trims,
+            kv_clears,
+            kv_saves,
+            kv_restores,
         }
     }
 
@@ -323,113 +494,98 @@ impl Scheduler {
         }
     }
 
-    /// Try to cache the finished request's KV state for future block-level prefix reuse.
+    /// Undo the bookkeeping for a prompt-cache restore that failed at the model layer.
     ///
-    /// Only the *complete* block prefix of the prompt is stored: partial trailing blocks
-    /// and all generation blocks are freed immediately.  The cache key is the chain hash
-    /// of the last complete block, which encodes the full block prefix transitively.
-    ///
-    /// Returns `Some(cached_tokens)` if an entry was inserted (so the engine can trim
-    /// the donated sequence's KV to exactly that prefix), `None` if the prompt has no
-    /// complete blocks or the cache is at capacity.
-    ///
-    /// Lock ordering: running_batch → prefix_cache (matches schedule_step order).
-    pub fn try_insert_prefix(&self, req_id: u64) -> Option<usize> {
-        let block_size = self.kv_cache.block_size();
-
-        let mut running = match self.running_batch.lock() {
-            Ok(g) => g,
-            Err(_) => return None,
-        };
-        let mut pcache = match self.prefix_cache.lock() {
-            Ok(g) => g,
-            Err(_) => return None,
-        };
-
-        if pcache.len() >= self.prefix_cache_max {
-            return None;
-        }
-
-        // Do not cache if the inference seq_id pool is currently empty.
-        // The finished request's seq_id has not yet been returned to the pool;
-        // if we donate it to the prefix cache, the pool remains empty and the
-        // next request will be unable to start (pool.is_empty() → not admitted).
-        {
-            let pool = match self.seq_id_pool.lock() {
-                Ok(g) => g,
-                Err(_) => return None,
-            };
-            if pool.is_empty() {
-                return None;
+    /// The scheduler has already told the request how many tokens it may skip, on the
+    /// assumption the restore would succeed. If it did not, the request would prefill
+    /// on top of cells that were never written. Resetting it to prefill from token 0
+    /// costs a re-prefill and nothing else — the alternative is silently wrong output.
+    pub fn invalidate_restore(&self, seq_id: i32) {
+        if let Ok(mut running) = self.running_batch.lock() {
+            for req in running.iter_mut() {
+                if req.kv_seq_id == seq_id {
+                    req.skip_prefix_tokens = 0;
+                    req.prefill_pos = 0;
+                }
             }
         }
-
-        for req in running.iter_mut() {
-            if req.id != req_id || req.kv_seq_id < 0 {
-                continue;
-            }
-
-            // A rolled request's low KV positions no longer hold the prompt prefix
-            // the cache key promises — donating them would silently corrupt hits.
-            if req.rolled_tokens > 0 {
-                return None;
-            }
-
-            let full_blocks = req.prompt_tokens.len() / block_size;
-            if full_blocks == 0 {
-                return None; // prompt too short to cache even one block
-            }
-
-            // Compute the chain hash for the full-block prefix.
-            let final_hash = (0..full_blocks).fold(0u64, |h, i| {
-                let start = i * block_size;
-                let end = start + block_size;
-                compute_block_hash(h, &req.prompt_tokens[start..end])
-            });
-
-            let seq_id = req.kv_seq_id;
-            let all_blocks = std::mem::take(&mut req.page_table).entries;
-
-            // Split: first `full_blocks` blocks go to cache; the rest are freed.
-            let (cached_blocks, excess) = if all_blocks.len() >= full_blocks {
-                let (c, e) = all_blocks.split_at(full_blocks);
-                (c.to_vec(), e.to_vec())
-            } else {
-                // Fewer blocks than expected — free all and skip caching.
-                self.kv_cache.free_blocks(&all_blocks);
-                return None;
-            };
-
-            if !excess.is_empty() {
-                self.kv_cache.free_blocks(&excess);
-            }
-
-            // Zero out seq ownership so schedule_step won't double-free.
-            req.kv_seq_id = -1;
-
-            pcache.put(
-                final_hash,
-                PrefixCacheEntry {
-                    seq_id,
-                    block_ids: cached_blocks,
-                },
-            );
-            debug!(
-                request_id = req_id,
-                full_blocks,
-                cached_tokens = full_blocks * block_size,
-                "cached block prefix KV state"
-            );
-            return Some(full_blocks * block_size);
+        if let Ok(mut slots) = self.slots.lock() {
+            slots.forget_resident(seq_id);
         }
-        None
     }
 
-    /// Return a prefix seq_id back to the pool after the engine has copied and cleared it.
-    pub fn return_prefix_seq_id(&self, seq_id: i32) {
-        if let Ok(mut pool) = self.seq_id_pool.lock() {
-            pool.push(seq_id);
+    /// Park a finished request's sequence so its KV stays resident and reusable.
+    ///
+    /// This is the counterpart to llama-server keeping `slot.prompt.tokens` after a
+    /// task completes (`server-context.cpp:489`). The whole logical sequence —
+    /// **prompt *and* generated tokens** — becomes the slot's resident token list, so
+    /// the next turn of a conversation (whose prompt contains the previous reply)
+    /// matches well past where the previous prompt ended. The old block-hash cache
+    /// discarded the generated tail, which is why multi-turn chat never hit it.
+    ///
+    /// The request keeps no blocks: they transfer to the slot, and `kv_seq_id` is set
+    /// to `-1` so `schedule_step`'s retire pass knows not to free them.
+    ///
+    /// Returns `true` if the sequence was parked. `false` means the caller must clear
+    /// the llama.cpp sequence itself — the KV is not safe to reuse:
+    ///
+    /// * **`--kv-reuse false`** — reuse disabled outright.
+    /// * **context-rolled** (`rolled_tokens > 0`) — rolling discards the oldest KV
+    ///   window and shifts the rest, so resident positions no longer line up with the
+    ///   token list; a later LCP match would read the wrong cells.
+    /// * **LoRA** (`skip_prefix_cache`) — KV computed under one adapter's weights is
+    ///   invalid input for another (docs/design/lora-support.md).
+    /// * **multimodal** — `prompt_tokens` is empty for these (positions come from
+    ///   image chunks), so the token list can't describe what's resident.
+    ///
+    /// Lock ordering: running_batch → slots (matches schedule_step).
+    pub fn park_finished(&self, req_id: u64) -> bool {
+        if !self.kv_reuse {
+            return false;
         }
+        let mut running = match self.running_batch.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        let mut slots = match self.slots.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+
+        let Some(req) = running.iter_mut().find(|r| r.id == req_id) else {
+            return false;
+        };
+        if req.kv_seq_id < 0
+            || req.rolled_tokens > 0
+            || req.skip_prefix_cache
+            || req.multimodal.is_some()
+        {
+            return false;
+        }
+
+        // What llama.cpp actually holds for this sequence: the prompt it prefilled
+        // followed by every token it generated.
+        let mut resident = req.prompt_tokens.clone();
+        resident.extend_from_slice(&req.generated_token_ids);
+
+        let seq_id = req.kv_seq_id;
+        let blocks = std::mem::take(&mut req.page_table).entries;
+        if !slots.park(seq_id, resident, blocks.clone()) {
+            // Unknown seq_id (defensive) — hand the blocks back rather than leaking
+            // them. `page_table` was already emptied above, so free the copy we hold.
+            self.kv_cache.free_blocks(&blocks);
+            return false;
+        }
+
+        // Zero out seq ownership so schedule_step's retire pass won't double-free.
+        req.kv_seq_id = -1;
+        debug!(
+            request_id = req_id,
+            seq_id,
+            resident_tokens = req.prompt_tokens.len() + req.generated_token_ids.len(),
+            "parked sequence as reusable idle slot"
+        );
+        true
     }
 
     /// Get running requests by IDs.
@@ -503,7 +659,12 @@ impl Scheduler {
         self.running_batch.lock().map(|r| r.len()).unwrap_or(0)
     }
 
+    /// Number of slots currently holding reusable KV (the analogue of the old
+    /// prefix cache's entry count).
     pub fn prefix_cache_size(&self) -> usize {
-        self.prefix_cache.lock().map(|c| c.len()).unwrap_or(0)
+        self.slots
+            .lock()
+            .map(|s| s.count(|slot| slot.state == super::slots::SlotState::Idle))
+            .unwrap_or(0)
     }
 }

@@ -28,6 +28,8 @@ impl LlamaCppModel {
         tensor_split: &[f32],
         moe_offload_cpu: bool,
         mmproj_path: Option<&std::path::Path>,
+        lora_modules: &[(String, std::path::PathBuf, f32)],
+        reranking: bool,
     ) -> Result<Self> {
         let _ = (
             model_path,
@@ -42,6 +44,8 @@ impl LlamaCppModel {
             tensor_split,
             moe_offload_cpu,
             mmproj_path,
+            lora_modules,
+            reranking,
         );
         let config = ModelConfig {
             num_layers: 32,

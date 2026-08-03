@@ -188,6 +188,26 @@ pub struct ChatCompletionRequest {
     /// Penalize tokens that already appear in the output (1.0 = disabled).
     #[serde(default)]
     pub repetition_penalty: Option<f32>,
+    /// fox extension mirroring llama-server's `grammar`: a raw GBNF grammar
+    /// constraining generation. More expressive than `response_format`, which can
+    /// only describe JSON. Mutually exclusive with it.
+    #[serde(default)]
+    pub grammar: Option<String>,
+    /// fox extension: keep only tokens whose logit is within N standard deviations
+    /// of the top logit (0 = disabled). Unlike `top_p`, the cutoff is on the logit
+    /// scale, so it does not shift as `temperature` changes.
+    #[serde(default)]
+    pub top_n_sigma: Option<f32>,
+    /// fox extension: floor on how few candidates any truncation step (`min_p`,
+    /// `top_p`, `top_n_sigma`) may leave.
+    #[serde(default)]
+    pub min_keep: Option<usize>,
+    /// fox extension (OpenAI has no equivalent): how far back the repetition,
+    /// frequency and presence penalties look, in generated tokens.
+    /// `-1` = whole history, `0` = disabled, `n` = last `n`. Falls back to the
+    /// server's `--repeat-last-n`.
+    #[serde(default)]
+    pub repeat_last_n: Option<i32>,
     /// Fixed RNG seed for reproducible outputs.
     #[serde(default)]
     pub seed: Option<u64>,
@@ -242,6 +262,16 @@ pub struct ChatCompletionRequest {
     /// Caller identifier — accepted for API compatibility, not used.
     #[serde(default)]
     pub user: Option<String>,
+    /// Number of completion choices to return (1–8). Each choice is an
+    /// independent generation over the same prompt, not a shared-prefill fork
+    /// — see `docs/design/n-best-of-support.md`.
+    #[serde(default)]
+    pub n: Option<u32>,
+    /// Generate this many candidates server-side and return only the `n` with
+    /// the highest total log-likelihood. Must be >= `n`; incompatible with
+    /// `stream: true`.
+    #[serde(default)]
+    pub best_of: Option<u32>,
 }
 
 impl ChatCompletionRequest {
@@ -259,6 +289,29 @@ impl ChatCompletionRequest {
         if let Some(r) = self.repetition_penalty {
             if r < 0.0 {
                 return Err(format!("repetition_penalty must be >= 0, got {r}"));
+            }
+        }
+        if let Some(n) = self.n {
+            if !(1..=crate::api::shared::sampling_defaults::openai::MAX_N).contains(&n) {
+                return Err(format!(
+                    "n must be in [1, {}], got {n}",
+                    crate::api::shared::sampling_defaults::openai::MAX_N
+                ));
+            }
+        }
+        if let Some(best_of) = self.best_of {
+            if !(1..=crate::api::shared::sampling_defaults::openai::MAX_N).contains(&best_of) {
+                return Err(format!(
+                    "best_of must be in [1, {}], got {best_of}",
+                    crate::api::shared::sampling_defaults::openai::MAX_N
+                ));
+            }
+            let n = self.n.unwrap_or(1);
+            if best_of < n {
+                return Err(format!("best_of ({best_of}) must be >= n ({n})"));
+            }
+            if best_of > n && self.stream {
+                return Err("best_of > n is not supported with stream: true".to_string());
             }
         }
         Ok(())
@@ -387,6 +440,12 @@ pub struct ChatMessageDelta {
 
 // --- Completions (legacy) ---
 
+/// OpenAI's legacy `/v1/completions` request.
+///
+/// Every sampling field here is threaded through to the shared generation path —
+/// they were previously declared nowhere and hard-coded to `None` in the handler,
+/// so `top_p`, `stop`, `seed`, `logit_bias` and the penalties silently did nothing
+/// on this endpoint.
 #[derive(Debug, Deserialize)]
 pub struct CompletionRequest {
     pub model: String,
@@ -396,7 +455,60 @@ pub struct CompletionRequest {
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
+    pub top_p: Option<f32>,
+    /// fox extension, as on `/v1/chat/completions`.
+    #[serde(default)]
+    pub top_k: Option<u32>,
+    /// fox extension, as on `/v1/chat/completions`.
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
+    /// fox extension, as on `/v1/chat/completions`.
+    #[serde(default)]
+    pub repeat_last_n: Option<i32>,
+    /// fox extension, as on `/v1/chat/completions`.
+    #[serde(default)]
+    pub top_n_sigma: Option<f32>,
+    /// fox extension, as on `/v1/chat/completions`.
+    #[serde(default)]
+    pub min_keep: Option<usize>,
+    /// fox extension, as on `/v1/chat/completions`.
+    #[serde(default)]
+    pub min_p: Option<f32>,
+    #[serde(default)]
+    pub frequency_penalty: Option<f32>,
+    #[serde(default)]
+    pub presence_penalty: Option<f32>,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_stop")]
+    pub stop: Option<Vec<String>>,
+    #[serde(default)]
+    pub logit_bias: Option<std::collections::HashMap<String, f32>>,
+    /// fox extension: raw GBNF grammar, as on `/v1/chat/completions`.
+    #[serde(default)]
+    pub grammar: Option<String>,
+    /// Legacy semantics: an *integer* count of alternatives per token, unlike chat's
+    /// boolean `logprobs` + `top_logprobs` pair. Mapped onto the latter.
+    #[serde(default)]
+    pub logprobs: Option<u8>,
+    #[serde(default)]
     pub stream: bool,
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub n: Option<u32>,
+    #[serde(default)]
+    pub best_of: Option<u32>,
+    /// Accepted so the handler can reject it explicitly — fox cannot echo the prompt,
+    /// and silently ignoring it would be undetectable by the caller.
+    /// and silently ignoring it would be undetectable by the caller.
+    #[serde(default)]
+    pub echo: Option<bool>,
+    /// Same: accepted only to be rejected explicitly.
+    #[serde(default)]
+    pub suffix: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -435,6 +547,64 @@ pub struct ModelInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chat_req(extra: &str) -> ChatCompletionRequest {
+        let json =
+            format!(r#"{{"model":"m","messages":[{{"role":"user","content":"hi"}}]{extra}}}"#);
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn validate_n_within_bounds_ok() {
+        assert!(chat_req(r#","n":8"#).validate().is_ok());
+        assert!(chat_req(r#","n":1"#).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_n_zero_rejected() {
+        assert!(chat_req(r#","n":0"#).validate().is_err());
+    }
+
+    #[test]
+    fn validate_n_over_max_rejected() {
+        assert!(chat_req(r#","n":9"#).validate().is_err());
+    }
+
+    #[test]
+    fn validate_best_of_within_bounds_ok() {
+        assert!(chat_req(r#","n":2,"best_of":4"#).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_best_of_less_than_n_rejected() {
+        let err = chat_req(r#","n":4,"best_of":2"#).validate().unwrap_err();
+        assert!(err.contains("best_of"));
+    }
+
+    #[test]
+    fn validate_best_of_over_max_rejected() {
+        assert!(chat_req(r#","best_of":9"#).validate().is_err());
+    }
+
+    #[test]
+    fn validate_best_of_greater_than_n_with_stream_rejected() {
+        let err = chat_req(r#","n":1,"best_of":3,"stream":true"#)
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("stream"));
+    }
+
+    #[test]
+    fn validate_best_of_greater_than_n_without_stream_ok() {
+        assert!(chat_req(r#","n":1,"best_of":3"#).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_best_of_equal_to_n_with_stream_ok() {
+        assert!(chat_req(r#","n":2,"best_of":2,"stream":true"#)
+            .validate()
+            .is_ok());
+    }
 
     fn text_block(s: &str) -> ContentBlock {
         ContentBlock {

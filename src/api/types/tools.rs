@@ -54,8 +54,11 @@ pub struct JsonSchemaFormat {
 /// `stream_options` field in chat completion requests.
 #[derive(Debug, Deserialize, Clone)]
 pub struct StreamOptions {
-    /// When true, include token usage in the final streaming chunk.
-    /// Fox always includes usage in the final chunk so this is accepted but has no extra effect.
+    /// Whether to include token usage in the final streaming chunk.
+    ///
+    /// An explicit `false` suppresses it (OpenAI's semantics: usage is opt-in on
+    /// streams). Omitting `stream_options` entirely keeps fox's historical behaviour
+    /// of always attaching usage — a harmless superset that breaks no existing caller.
     #[serde(default)]
     pub include_usage: Option<bool>,
 }

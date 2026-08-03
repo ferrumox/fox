@@ -26,6 +26,22 @@ pub struct RegistryConfig {
     pub context_shift: bool,
     /// Tokens preserved at the front (BOS + system prompt) when context rolling fires.
     pub context_keep: usize,
+    /// Keep a finished request's KV resident so a later prompt sharing a prefix with
+    /// it can skip re-prefilling that much (`--kv-reuse`). False restores the
+    /// pre-0.19 behaviour: every sequence cleared on completion, every prompt
+    /// prefilled from token 0.
+    /// Create the context with RANK pooling so `/rerank` can read the model's
+    /// relevance head (`--reranking`). A reranker GGUF does not reliably declare its
+    /// pooling type, so this cannot be auto-detected; llama-server takes a flag for
+    /// the same reason. A model loaded this way is a reranker, not a generator.
+    pub reranking: bool,
+    /// Host-RAM budget in **bytes** for serialised sequence states (`--cache-ram`,
+    /// given in MiB on the CLI). 0 disables the cache.
+    pub cache_ram_bytes: usize,
+    pub kv_reuse: bool,
+    /// Minimum fraction of an incoming prompt that must already be resident in an idle
+    /// slot before that slot's KV is inherited (`--slot-prompt-similarity`).
+    pub slot_prompt_similarity: f32,
     /// Enable n-gram / prompt-lookup speculative decoding for single-request decode steps.
     pub speculative: bool,
     /// Suffix length matched against history when speculating.
@@ -46,6 +62,17 @@ pub struct RegistryConfig {
     /// whatever model is currently loaded. A mismatched pairing (mmproj for a
     /// different architecture) fails at load time rather than corrupting output.
     pub mmproj: Option<String>,
+    /// Named LoRA adapters `(name, path, scale)` loaded alongside the primary
+    /// model. A client selects one by naming it in the `model` field instead
+    /// of the base model name — resolved the same way as `draft_model`/`mmproj`
+    /// (one global pairing: all adapters here apply to whichever model is the
+    /// primary one, not to arbitrary other loaded models).
+    pub lora_modules: Vec<(String, PathBuf, f32)>,
+    /// Stem name of the primary model — the one `lora_modules` adapters attach to,
+    /// and what a LoRA-alias request (`model: "<adapter-name>"`) resolves to load
+    /// instead of the adapter name itself. `None` when there's no model configured
+    /// at startup (fully lazy mode, no `--model-path`, empty `models_dir`).
+    pub primary_model: Option<String>,
     /// Per-sequence context length. `None` = auto-detect from the model's trained context.
     pub max_context_len: Option<u32>,
     pub block_size: usize,

@@ -72,6 +72,52 @@ impl InferenceEngine {
                 engine.model.clear_sequence(*seq_id);
             }
 
+            // Apply the scheduler's KV bookkeeping BEFORE any prefill runs this step.
+            // The scheduler has no model handle, so it records intent and we execute
+            // it here. Ordering is load-bearing throughout:
+            //
+            //   saves → clears → restores → trims
+            //
+            // A save must read the sequence before the clear wipes it. A restore must
+            // land after the clears (its destination may itself have just been
+            // reclaimed) and before the trims, because the trim bounds the *restored*
+            // state at the new request's divergence point. Getting this order wrong
+            // corrupts context silently — garbage output, not a crash.
+            for (seq_id, tokens) in &batch.kv_saves {
+                match engine.model.state_seq_save(*seq_id) {
+                    Ok(data) => {
+                        tracing::debug!(
+                            seq_id,
+                            bytes = data.len(),
+                            tokens = tokens.len(),
+                            "serialised sequence to the host-RAM prompt cache"
+                        );
+                        engine.scheduler.store_prompt_state(tokens.clone(), data);
+                    }
+                    // A failed save costs a re-prefill later, nothing more — the
+                    // sequence is being discarded either way.
+                    Err(e) => tracing::debug!(seq_id, "prompt-cache save skipped: {e}"),
+                }
+            }
+            for seq_id in &batch.kv_clears {
+                engine.model.clear_sequence(*seq_id);
+            }
+            for (seq_id, data) in &batch.kv_restores {
+                if let Err(e) = engine.model.state_seq_load(*seq_id, data) {
+                    // The scheduler already told the request how much it may skip, so
+                    // a failed restore would leave it reading cells that were never
+                    // written. Wipe the sequence and let it re-prefill from scratch:
+                    // the following trim then bounds an empty sequence, which is a
+                    // no-op, and the request is merely slower rather than wrong.
+                    tracing::warn!(seq_id, "prompt-cache restore failed: {e} — re-prefilling");
+                    engine.model.clear_sequence(*seq_id);
+                    engine.scheduler.invalidate_restore(*seq_id);
+                }
+            }
+            for (seq_id, keep_from) in &batch.kv_trims {
+                engine.model.trim_sequence(*seq_id, *keep_from);
+            }
+
             if batch.is_empty() {
                 engine.scheduler.wait_for_work().await;
                 continue;
@@ -110,6 +156,7 @@ impl InferenceEngine {
                                 is_eos: true,
                                 stop_reason: Some(StopReason::EngineError),
                                 logprob: None,
+                                cached_tokens: 0,
                             });
                             // Clear KV before the seq_id returns to the pool — a failed
                             // llama_decode leaves partial cells that poison the next occupant.
@@ -131,7 +178,18 @@ impl InferenceEngine {
                 // Before decoding, roll any sequence whose KV window is full so it can
                 // continue past n_ctx instead of failing (context shift).
                 engine.roll_full_contexts(&decode_ids).await;
-                match engine.run_decode(&decode_ids).await {
+                let mut decode_result = engine.run_decode(&decode_ids).await;
+                // Reactive context roll: bisection retry (batch.rs) already shrank the
+                // batch as far as it can — if it still failed because exactly one
+                // request has no KV slot even alone, and that request has old context
+                // it can afford to discard, roll it and retry the whole batch once
+                // more before giving up. See docs/design/reactive-context-rolling.md.
+                if let Err(e) = &decode_result {
+                    if let Some(true) = engine.try_reactive_roll(&decode_ids, e).await {
+                        decode_result = engine.run_decode(&decode_ids).await;
+                    }
+                }
+                match decode_result {
                     Ok(decode_results) => {
                         engine.handle_logits(&decode_results, false).await?;
                     }
@@ -154,6 +212,7 @@ impl InferenceEngine {
                                 is_eos: true,
                                 stop_reason: Some(StopReason::EngineError),
                                 logprob: None,
+                                cached_tokens: 0,
                             });
                             if req.kv_seq_id >= 0 {
                                 engine.model.clear_sequence(req.kv_seq_id);
@@ -235,6 +294,67 @@ impl InferenceEngine {
         }
     }
 
+    /// If `err` failed a decode step, that request has old context worth
+    /// discarding, and one more attempt at the full batch might succeed:
+    /// attempt exactly one reactive context roll on the specific request that
+    /// `batch.rs` reported as `KvCacheFullAtMinimum`, and let the caller retry.
+    ///
+    /// Returns `None` when `err` isn't that specific signal at all (a normal
+    /// fatal decode error — unchanged behavior). Returns `Some(false)` when it
+    /// is, but rolling doesn't apply (context-shift disabled, model can't
+    /// shift, or the request doesn't have enough context left to make
+    /// discarding meaningful) — the caller falls through to `EngineError`
+    /// exactly as it did before this feature existed. Returns `Some(true)`
+    /// only after a real, successful roll, which the caller should retry once.
+    async fn try_reactive_roll(&self, decode_ids: &[u64], err: &anyhow::Error) -> Option<bool> {
+        let req_id = err
+            .downcast_ref::<super::model::KvCacheFullAtMinimum>()?
+            .req_id;
+        let n_keep_cfg = self.context_shift?;
+        if !self.supports_prefix_cache {
+            return Some(false);
+        }
+        let n_ctx = self.model.context_len() as usize;
+        let running = self.scheduler.get_running(decode_ids);
+        let Some(req) = running.iter().find(|r| r.id == req_id) else {
+            return Some(false);
+        };
+        if req.kv_seq_id < 0 {
+            return Some(false);
+        }
+        let Some((n_keep, n_discard)) = reactive_roll_amounts(n_keep_cfg, n_ctx, req.context_len())
+        else {
+            return Some(false);
+        };
+        let seq_id = req.kv_seq_id;
+        let model = self.model.clone();
+        let res =
+            tokio::task::spawn_blocking(move || model.roll_context(seq_id, n_keep, n_discard))
+                .await;
+        match res {
+            Ok(Ok(())) => {
+                self.scheduler.record_context_roll(req_id, n_discard);
+                tracing::info!(
+                    request_id = req_id,
+                    seq_id,
+                    n_keep,
+                    n_discard,
+                    n_ctx,
+                    "reactively rolled context after KV-cache-full at minimum batch size — retrying decode"
+                );
+                Some(true)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(request_id = req_id, "reactive context roll failed: {e}");
+                Some(false)
+            }
+            Err(e) => {
+                tracing::warn!(request_id = req_id, "reactive context roll join error: {e}");
+                Some(false)
+            }
+        }
+    }
+
     pub(super) async fn run_prefill(&self, req_ids: &[u64]) -> Result<Vec<(u64, Logits)>> {
         let requests = self.scheduler.get_running(req_ids);
         let model_requests: Vec<InferenceRequestForModel> = requests
@@ -253,6 +373,9 @@ impl InferenceEngine {
                 repetition_penalty: r.sampling.repetition_penalty,
                 frequency_penalty: r.sampling.frequency_penalty,
                 presence_penalty: r.sampling.presence_penalty,
+                repeat_last_n: r.sampling.repeat_last_n,
+                top_n_sigma: r.sampling.top_n_sigma,
+                min_keep: r.sampling.min_keep,
                 seed: r.sampling.seed,
                 generated_token_ids: r.generated_token_ids.clone(),
                 skip_prefix_tokens: r.skip_prefix_tokens,
@@ -263,12 +386,9 @@ impl InferenceEngine {
                 min_tokens: r.sampling.min_tokens,
                 logit_bias: r.sampling.logit_bias.clone(),
                 multimodal: r.multimodal.clone(),
+                lora: r.lora.clone(),
+                needs_logits: r.sampling.logprobs.is_some(),
             })
-            .collect();
-
-        let prefix_cleanup: Vec<i32> = model_requests
-            .iter()
-            .filter_map(|r| r.prefix_seq_id)
             .collect();
 
         let model = self.model.clone();
@@ -280,10 +400,12 @@ impl InferenceEngine {
         .await
         .map_err(|e| anyhow::anyhow!("prefill spawn_blocking: {}", e))??;
 
-        for prefix_seq_id in prefix_cleanup {
-            self.model.clear_sequence(prefix_seq_id);
-            self.scheduler.return_prefix_seq_id(prefix_seq_id);
-        }
+        // NOTE: `prefix_seq_id` (a source sequence to `seq_cp` from before prefill) is
+        // currently never set — a request now inherits its predecessor's seq_id
+        // directly instead of copying out of it, so no post-prefill cleanup is needed.
+        // The field and its handler in `llama_cpp/batch.rs` stay for the shared-prefill
+        // fork of `n>1`/`best_of`, where the source is a *live* sibling slot that must
+        // NOT be cleared here. See docs/design/llama-server-gap-analysis.md §0.3.
 
         // Advance each request's prefill cursor. A request only carries `logits` (and a
         // non-zero `tokens_in_kv`) on its FINAL chunk; intermediate chunks just move the
@@ -307,34 +429,23 @@ impl InferenceEngine {
     }
 
     pub(super) async fn run_decode(&self, req_ids: &[u64]) -> Result<Vec<(u64, Vec<Logits>)>> {
-        // Copy-on-write: if any block in a decoding request is shared (ref_count > 1),
-        // allocate a new exclusive copy before llama.cpp writes to it.
+        // There is deliberately NO copy-on-write here, and that is load-bearing rather
+        // than an omission.
         //
-        // With the current prefix-caching scheme (blocks are transferred exclusively on
-        // cache hit), shared blocks arise only if `retain_block` was called explicitly.
-        // This guard makes the decode path safe for future scenarios where multiple active
-        // requests share KV blocks.
-        for req_id in req_ids {
-            let requests = self.scheduler.get_running(&[*req_id]);
-            let Some(req) = requests.first() else {
-                continue;
-            };
-            for (logical_idx, &block_id) in req.page_table.entries.iter().enumerate() {
-                if self.kv_cache.is_shared(block_id) {
-                    if let Some(new_block_id) = self.kv_cache.copy_on_write(block_id) {
-                        self.scheduler
-                            .cow_update_page_table(*req_id, logical_idx, new_block_id);
-                        tracing::debug!(
-                            request_id = req_id,
-                            logical_idx,
-                            old_block = block_id,
-                            new_block = new_block_id,
-                            "CoW: privatised shared KV block before decode"
-                        );
-                    }
-                }
-            }
-        }
+        // fox's blocks are an admission budget, not addresses — they are never handed to
+        // llama.cpp (see scheduler/slots.rs). When a request copies a shared prefix, the
+        // cells really are shared inside llama.cpp: `seq_cp` under `kv_unified` shares
+        // them rather than duplicating the buffer. So privatising a block here would
+        // allocate budget for memory that nobody occupies, re-inflating exactly the
+        // over-count the sharing exists to remove — while copying no KV, because there is
+        // no KV at this layer to copy.
+        //
+        // What makes that safe is the invariant enforced where the sharing is set up: only
+        // WHOLE blocks below `n_past` are shared, so the block straddling the divergence
+        // point stays private. A shared block therefore never receives a write, and CoW
+        // has nothing to protect. If that floor-division ever becomes a `div_ceil`, this
+        // reasoning collapses and two live sequences start writing the same budgeted
+        // block.
 
         let requests = self.scheduler.get_running(req_ids);
         let model_requests: Vec<InferenceRequestForModel> = requests
@@ -353,6 +464,9 @@ impl InferenceEngine {
                 repetition_penalty: r.sampling.repetition_penalty,
                 frequency_penalty: r.sampling.frequency_penalty,
                 presence_penalty: r.sampling.presence_penalty,
+                repeat_last_n: r.sampling.repeat_last_n,
+                top_n_sigma: r.sampling.top_n_sigma,
+                min_keep: r.sampling.min_keep,
                 seed: r.sampling.seed,
                 generated_token_ids: r.generated_token_ids.clone(),
                 skip_prefix_tokens: 0,
@@ -363,6 +477,8 @@ impl InferenceEngine {
                 min_tokens: r.sampling.min_tokens,
                 logit_bias: r.sampling.logit_bias.clone(),
                 multimodal: r.multimodal.clone(),
+                lora: r.lora.clone(),
+                needs_logits: r.sampling.logprobs.is_some(),
             })
             .collect();
         let model = self.model.clone();
@@ -412,5 +528,70 @@ impl InferenceEngine {
                 .await
                 .map_err(|e| anyhow::anyhow!("decode spawn_blocking: {}", e))??;
         Ok(out.into_iter().map(|(id, l)| (id, vec![l])).collect())
+    }
+}
+
+/// Compute `(n_keep, n_discard)` for a reactive context roll, or `None` when
+/// there isn't enough context beyond the preserved head to make discarding
+/// meaningful (e.g. `n_ctx` itself is tiny, or the request's `ctx_len` barely
+/// exceeds `n_keep`). Deliberately a separate, small function from
+/// `roll_full_contexts`'s inline arithmetic rather than a shared abstraction:
+/// the proactive trigger only ever calls its math once `ctx_len` has already
+/// crossed a large threshold (`n_ctx - reserve`), where this edge case can't
+/// arise, so reusing it here isn't necessary and forcing a shared helper into
+/// that already-shipped, already-tested path isn't worth the risk.
+fn reactive_roll_amounts(
+    n_keep_cfg: usize,
+    n_ctx: usize,
+    ctx_len: usize,
+) -> Option<(usize, usize)> {
+    if n_ctx == 0 {
+        return None;
+    }
+    let n_keep = n_keep_cfg.min(n_ctx.saturating_sub(1));
+    if ctx_len <= n_keep + 1 {
+        return None;
+    }
+    let n_discard = (ctx_len.saturating_sub(n_keep) / 2).max(1);
+    Some((n_keep, n_discard))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reactive_roll_amounts;
+
+    #[test]
+    fn enough_context_yields_keep_and_discard() {
+        let (n_keep, n_discard) = reactive_roll_amounts(0, 2048, 2000).unwrap();
+        assert_eq!(n_keep, 0);
+        assert_eq!(n_discard, 1000);
+    }
+
+    #[test]
+    fn n_keep_cfg_is_clamped_below_n_ctx() {
+        // n_keep_cfg (10_000) exceeds n_ctx (100) — clamp to n_ctx - 1 = 99.
+        let (n_keep, n_discard) = reactive_roll_amounts(10_000, 100, 150).unwrap();
+        assert_eq!(n_keep, 99);
+        assert_eq!(n_discard, 25);
+    }
+
+    #[test]
+    fn discard_is_at_least_one() {
+        // ctx_len just barely above n_keep + 1 — halving would round to 0,
+        // clamped up to 1.
+        let (_, n_discard) = reactive_roll_amounts(100, 2048, 102).unwrap();
+        assert_eq!(n_discard, 1);
+    }
+
+    #[test]
+    fn zero_n_ctx_yields_none() {
+        assert!(reactive_roll_amounts(0, 0, 100).is_none());
+    }
+
+    #[test]
+    fn context_barely_over_keep_yields_none() {
+        // ctx_len <= n_keep + 1: nothing meaningful left to discard.
+        assert!(reactive_roll_amounts(100, 2048, 101).is_none());
+        assert!(reactive_roll_amounts(100, 2048, 100).is_none());
     }
 }

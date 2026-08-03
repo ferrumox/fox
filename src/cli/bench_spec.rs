@@ -252,7 +252,9 @@ pub async fn run_bench_spec(args: BenchSpecArgs) -> Result<()> {
         split_mode,
         &tensor_split,
         args.moe_cpu,
-        None, // mmproj_path
+        None,  // mmproj_path
+        &[],   // lora_modules
+        false, // reranking — benches generate, never score
     )?;
     spinner.finish_and_clear();
 

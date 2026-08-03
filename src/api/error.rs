@@ -109,19 +109,24 @@ impl IntoResponse for AppError {
 /// failure is "model not on disk" (404) or "model failed to load" (e.g. OOM → 503).
 ///
 /// Returns `Ok(entry)` or an `Err(Response)` ready to return from a handler.
+/// Resolve `model` to its engine, also returning a LoRA selection when `model`
+/// names a configured adapter (`--lora-modules`) instead of a real model/alias —
+/// see `ModelRegistry::resolve_for_request`. Callers that don't apply LoRA
+/// (embeddings) can just discard the second element.
 pub async fn load_model_or_respond(
     registry: &ModelRegistry,
     model: &str,
-) -> Result<Arc<EngineEntry>, Response> {
-    // First check if the model exists on disk — gives a clean 404 when it doesn't.
-    if let Err(e) = registry.resolve_model_name(model) {
-        tracing::warn!(model = %model, error = %e, "model not found");
-        return Err(AppError::ModelNotFound(e.to_string()).into_response());
+) -> Result<(Arc<EngineEntry>, Option<crate::scheduler::LoraSelection>), Response> {
+    // First check if the model exists on disk, or names a configured LoRA
+    // adapter — gives a clean 404 when it's neither.
+    if registry.resolve_model_name(model).is_err() && !registry.is_lora_alias(model) {
+        tracing::warn!(model = %model, "model not found");
+        return Err(AppError::ModelNotFound(format!("model '{model}' not found")).into_response());
     }
 
-    // Model exists — try to load it. Failures here are load errors (OOM, corrupt file…).
-    match registry.get_or_load(model).await {
-        Ok(entry) => Ok(entry),
+    // Resolves and loads — failures here are load errors (OOM, corrupt file…).
+    match registry.resolve_for_request(model).await {
+        Ok((entry, lora)) => Ok((entry, lora)),
         Err(e) => {
             tracing::error!(model = %model, error = %e, "failed to load model");
             Err(AppError::ModelLoadFailed(e.to_string()).into_response())

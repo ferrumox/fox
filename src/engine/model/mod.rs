@@ -124,6 +124,20 @@ pub struct RecommendedSampling {
     pub top_k: Option<u32>,
 }
 
+/// A model's fill-in-the-middle special tokens.
+///
+/// FIM models are trained on a specific token order — llama.cpp's own infill path and
+/// every mainstream code model use *suffix before prefix* (`[SUF] suffix [PRE] prefix
+/// [MID]`), which lets the model see what it must join up to before it starts writing.
+/// Emitting them prefix-first still produces fluent text, just text that ignores the
+/// suffix, so the ordering is load-bearing rather than cosmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FimTokens {
+    pub prefix: i32,
+    pub suffix: i32,
+    pub middle: i32,
+}
+
 /// Model architecture configuration.
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
@@ -171,6 +185,30 @@ pub struct PrefillStep {
     pub tokens_in_kv: usize,
 }
 
+/// `llama_decode` failed with ret==1 ("no KV slot for batch") even at the
+/// minimum possible batch size — `batch.rs`'s bisection retry already
+/// narrowed the batch down to this one request and it still doesn't fit.
+/// Distinct from a generic decode failure so the engine layer (which owns
+/// the `Scheduler` and `--context-shift` config that `LlamaCppModel`/
+/// `batch.rs` have no access to) can attempt one targeted context roll
+/// before giving up — see `docs/design/reactive-context-rolling.md`.
+#[derive(Debug)]
+pub(crate) struct KvCacheFullAtMinimum {
+    pub req_id: u64,
+}
+
+impl std::fmt::Display for KvCacheFullAtMinimum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "llama_decode: no KV slot for request {} even at the minimum batch size",
+            self.req_id
+        )
+    }
+}
+
+impl std::error::Error for KvCacheFullAtMinimum {}
+
 /// Inference request (minimal view for model).
 #[derive(Debug, Clone)]
 pub struct InferenceRequestForModel {
@@ -195,6 +233,13 @@ pub struct InferenceRequestForModel {
     pub frequency_penalty: f32,
     /// OpenAI-style presence penalty (additive; 0 = disabled).
     pub presence_penalty: f32,
+    /// Trailing window the penalties look at, in generated tokens (llama.cpp
+    /// `repeat_last_n`): `-1` = whole history, `0` = disabled, `n` = last `n`.
+    pub repeat_last_n: i32,
+    /// Top-nσ logit cutoff in standard deviations (0 = disabled).
+    pub top_n_sigma: f32,
+    /// Floor on candidates left by any truncation step (0 = just the top one).
+    pub min_keep: usize,
     /// RNG seed for reproducible sampling (None = random).
     pub seed: Option<u64>,
     /// Previously generated token IDs (for repetition penalty).
@@ -227,6 +272,16 @@ pub struct InferenceRequestForModel {
     /// an atomic `mtmd_helper_eval_chunks` call instead of the normal token batch
     /// path (see `docs/design/vision-support.md`).
     pub multimodal: Option<MultimodalChunks>,
+    /// LoRA adapter to apply while decoding this request, if any — see
+    /// `docs/design/lora-support.md`. `do_prefill`/`do_decode` group requests by
+    /// this value and call `llama_set_adapters_lora` once per group, since the
+    /// adapter set is a property of the whole `llama_context`, not a sequence.
+    pub lora: Option<crate::scheduler::LoraSelection>,
+    /// Whether the caller asked for `logprobs` on this request. When `false`, the
+    /// model layer skips copying the full vocab-sized logits vector into `Logits`
+    /// (a real per-token cost — see `docs/design/rocm-benchmarking-2026-08.md`) since
+    /// nothing downstream will read it.
+    pub needs_logits: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +375,18 @@ pub trait Model: Send + Sync {
 
     fn tokenize(&self, text: &str) -> Result<Vec<i32>>;
 
+    /// The model's fill-in-the-middle special tokens, if it has them:
+    /// `(prefix, suffix, middle)`. `None` for any model not trained for FIM — most
+    /// chat models — which is what `/infill` checks before accepting a request.
+    ///
+    /// These are a property of the vocabulary, not something a prompt can fake: a
+    /// model without them has no notion of "generate between these two spans", so
+    /// synthesising a prompt would produce plausible-looking nonsense. Default `None`
+    /// so the stub and any non-llama.cpp model report honestly.
+    fn fim_tokens(&self) -> Option<FimTokens> {
+        None
+    }
+
     fn token_to_piece(&self, token: i32) -> Result<String>;
 
     /// Returns the raw bytes produced by `llama_token_to_piece` without UTF-8
@@ -399,6 +466,13 @@ pub trait Model: Send + Sync {
         false
     }
 
+    /// Names of the LoRA adapters loaded alongside this model (`--lora-modules`),
+    /// available for a client to select via the `model` field. Empty for the
+    /// overwhelming majority of models (no adapters configured).
+    fn lora_adapter_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Render the chat prompt (same inputs as `build_prompt_tokens`) and tokenize
     /// it together with `images` via mtmd, splitting on `MEDIA_MARKER` occurrences
     /// in the rendered text. Callers should check `supports_vision()` first — the
@@ -469,6 +543,46 @@ pub trait Model: Send + Sync {
     /// Uses sequence slot 0; caller must not have an active inference request on slot 0.
     fn get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>>;
 
+    /// Serialise one sequence's KV state to host memory.
+    ///
+    /// The blob is opaque and only valid for *this* model in *this* process — it
+    /// encodes cell layout, not just tokens. Restoring it into a different model, or
+    /// after the context was recreated, is undefined; the caller must key it by model
+    /// and drop it on unload.
+    ///
+    /// `Err` when the backend cannot serialise (the stub) or the sequence is empty.
+    fn state_seq_save(&self, _seq_id: i32) -> Result<Vec<u8>> {
+        anyhow::bail!("this model backend cannot serialise sequence state")
+    }
+
+    /// Restore a blob produced by [`Self::state_seq_save`] into `seq_id`, returning the
+    /// number of bytes consumed. The destination sequence must be empty: llama.cpp
+    /// writes the cells at their original positions and does not clear first.
+    fn state_seq_load(&self, _seq_id: i32, _data: &[u8]) -> Result<usize> {
+        anyhow::bail!("this model backend cannot restore sequence state")
+    }
+
+    /// Score one `(query, document)` pair for reranking: a single relevance number
+    /// read from the model's classification head.
+    ///
+    /// Only a reranker model can answer this. fox never sets `pooling_type`, so it
+    /// stays `UNSPECIFIED` and llama.cpp resolves it from the model's own metadata
+    /// (`llama-context.cpp:182-188`) — `RANK` for a reranker, `NONE` for everything
+    /// else. Under `NONE`, `llama_get_embeddings_seq` returns NULL, which is exactly
+    /// the signal used to reject a non-reranker model with a clear error instead of
+    /// inventing a score from a mean-pooled vector.
+    ///
+    /// `Err` when the model is not a reranker or the forward pass fails.
+    fn rerank_score(&self, _tokens: &[i32]) -> Result<f32> {
+        anyhow::bail!("this model backend does not support reranking")
+    }
+
+    /// The vocabulary's separator token, used to join query and document in the
+    /// rerank prompt. `None` when the model has no SEP.
+    fn sep_token_id(&self) -> Option<i32> {
+        None
+    }
+
     /// Return the text forms of the model's EOS and EOT tokens.
     /// Used as base stop sequences so generation halts on model-native terminators
     /// even when the token ID is not caught by `is_eog_token`.
@@ -498,8 +612,11 @@ pub trait Model: Send + Sync {
     /// embedded-template presence) instead of the reconstructed values.
     fn model_info(&self) -> ModelInfo {
         let c = self.model_config();
+        let arch_name = "unknown".to_string();
+        let supports_seq_copy = self.supports_seq_copy();
         ModelInfo {
-            arch_name: "unknown".to_string(),
+            kv_memory_class: model_info::classify_kv_memory(&arch_name, supports_seq_copy),
+            arch_name,
             backend: self.active_backend(),
             n_embd: self.embedding_dim(),
             n_head: c.num_heads,
@@ -509,12 +626,39 @@ pub trait Model: Send + Sync {
             n_ctx_train: self.context_len(),
             effective_ctx: self.context_len(),
             vocab_size: c.vocab_size,
+            n_params: 0, // backends that cannot report it say so, rather than guessing
             eos_token_id: self.eos_token_id(),
             has_chat_template: false,
             supports_thinking: self.supports_thinking(),
-            supports_seq_copy: self.supports_seq_copy(),
+            supports_seq_copy,
             stop_token_count: self.stop_tokens().len(),
             recommended_sampling: self.recommended_sampling(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KvCacheFullAtMinimum;
+
+    #[test]
+    fn kv_cache_full_at_minimum_downcasts_from_anyhow_error() {
+        let err: anyhow::Error = anyhow::Error::new(KvCacheFullAtMinimum { req_id: 42 });
+        let downcast = err
+            .downcast_ref::<KvCacheFullAtMinimum>()
+            .expect("must downcast back to KvCacheFullAtMinimum");
+        assert_eq!(downcast.req_id, 42);
+    }
+
+    #[test]
+    fn kv_cache_full_at_minimum_display_mentions_req_id() {
+        let err = KvCacheFullAtMinimum { req_id: 7 };
+        assert!(err.to_string().contains('7'));
+    }
+
+    #[test]
+    fn unrelated_error_does_not_downcast() {
+        let err = anyhow::anyhow!("some other decode failure");
+        assert!(err.downcast_ref::<KvCacheFullAtMinimum>().is_none());
     }
 }

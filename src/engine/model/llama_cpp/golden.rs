@@ -38,7 +38,9 @@ fn golden_model() -> Option<LlamaCppModel> {
         0,
         &[],
         false,
-        None, // mmproj_path
+        None,  // mmproj_path
+        &[],   // lora_modules
+        false, // reranking — golden tests exercise generation
     )
     .expect("FOX_GOLDEN_MODEL failed to load");
     Some(model)
@@ -174,6 +176,9 @@ fn golden_chunked_prefill_matches_single_shot() {
         top_p: 1.0,
         top_k: 0,
         repetition_penalty: 1.0,
+        repeat_last_n: -1,
+        top_n_sigma: 0.0,
+        min_keep: 0,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
         seed: None,
@@ -186,6 +191,8 @@ fn golden_chunked_prefill_matches_single_shot() {
         min_tokens: 0,
         logit_bias: None,
         multimodal: None,
+        lora: None,
+        needs_logits: true, // this test inspects Logits::values
     };
 
     // argmax of the final-position logits — robust to tiny fp reduction-order diffs.
@@ -254,6 +261,9 @@ fn golden_context_shift_continues_past_n_ctx() {
         top_p: 1.0,
         top_k: 0,
         repetition_penalty: 1.0,
+        repeat_last_n: -1,
+        top_n_sigma: 0.0,
+        min_keep: 0,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
         seed: None,
@@ -266,6 +276,8 @@ fn golden_context_shift_continues_past_n_ctx() {
         min_tokens: 0,
         logit_bias: None,
         multimodal: None,
+        lora: None,
+        needs_logits: true, // this test inspects Logits::values
     };
 
     // Prefill the prompt on seq 0.
@@ -290,6 +302,13 @@ fn golden_context_shift_continues_past_n_ctx() {
         let ctx_len = live + 1; // this token will be written at position `live`
         let out = m.do_decode(&[1], &[mk_req(Some(next), ctx_len)]).unwrap();
         let logits = &out[0].1;
+        // Non-empty first: `values` is only populated when the request sets
+        // `needs_logits`, and `all()` over an empty vec is vacuously true — so
+        // without this the finiteness check below silently asserts nothing.
+        assert!(
+            !logits.values.is_empty(),
+            "expected populated logits (step {step})"
+        );
         assert!(
             logits.values.iter().all(|v| v.is_finite()),
             "logits after roll must be finite (step {step}, rolled {rolled})"
@@ -324,6 +343,9 @@ fn golden_grammar_constrains_output() {
         top_p: 1.0,
         top_k: 0,
         repetition_penalty: 1.0,
+        repeat_last_n: -1,
+        top_n_sigma: 0.0,
+        min_keep: 0,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
         seed: None,
@@ -336,6 +358,8 @@ fn golden_grammar_constrains_output() {
         min_tokens: 0,
         logit_bias: None,
         multimodal: None,
+        lora: None,
+        needs_logits: false,
     };
 
     // Prefill seeds the grammar sampler and yields the first constrained token.
@@ -346,15 +370,13 @@ fn golden_grammar_constrains_output() {
     // constrained pieces. Same position bookkeeping as the context-shift golden:
     // the token is written at position `live` (ctx_len = live + 1).
     let mut gen: Vec<i32> = Vec::new();
-    let mut live = prompt.len();
-    for _ in 0..8 {
+    for live in (prompt.len()..).take(8) {
         if m.is_eog_token(next) {
             break;
         }
         gen.push(next);
         let out = m.do_decode(&[1], &[mk_req(Some(next), live + 1)]).unwrap();
         next = out[0].1.sampled_token;
-        live += 1;
     }
 
     let mut bytes = Vec::new();
@@ -408,6 +430,9 @@ fn golden_json_schema_constrains_to_valid_json() {
         top_p: 1.0,
         top_k: 0,
         repetition_penalty: 1.0,
+        repeat_last_n: -1,
+        top_n_sigma: 0.0,
+        min_keep: 0,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
         seed: None,
@@ -420,20 +445,20 @@ fn golden_json_schema_constrains_to_valid_json() {
         min_tokens: 0,
         logit_bias: None,
         multimodal: None,
+        lora: None,
+        needs_logits: false,
     };
 
     let pre = m.do_prefill(&[1], &[mk_req(None, 0)], 0).unwrap();
     let mut next = pre[0].logits.clone().unwrap().sampled_token;
     let mut gen: Vec<i32> = Vec::new();
-    let mut live = prompt.len();
-    for _ in 0..64 {
+    for live in (prompt.len()..).take(64) {
         if m.is_eog_token(next) {
             break;
         }
         gen.push(next);
         let out = m.do_decode(&[1], &[mk_req(Some(next), live + 1)]).unwrap();
         next = out[0].1.sampled_token;
-        live += 1;
     }
     let mut bytes = Vec::new();
     for &t in &gen {
@@ -483,6 +508,9 @@ fn golden_min_tokens_suppresses_eog() {
         top_p: 1.0,
         top_k: 0,
         repetition_penalty: 1.0,
+        repeat_last_n: -1,
+        top_n_sigma: 0.0,
+        min_keep: 0,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
         seed: None,
@@ -495,6 +523,8 @@ fn golden_min_tokens_suppresses_eog() {
         min_tokens: floor,
         logit_bias: None,
         multimodal: None,
+        lora: None,
+        needs_logits: false,
     };
 
     // Prefill must also respect min_tokens (generated_tokens == 0 < floor).
@@ -505,8 +535,7 @@ fn golden_min_tokens_suppresses_eog() {
         "first token must not be EOG under min_tokens"
     );
 
-    let mut live = prompt.len();
-    for i in 1..floor {
+    for (live, i) in (prompt.len()..).zip(1..floor) {
         // generated_tokens = i (< floor) keeps EOG suppressed.
         let out = m
             .do_decode(&[1], &[mk_req(Some(next), live + 1, i)])
@@ -516,7 +545,6 @@ fn golden_min_tokens_suppresses_eog() {
             !m.is_eog_token(next),
             "token {i} must not be EOG while below the min_tokens floor"
         );
-        live += 1;
     }
 }
 
@@ -546,6 +574,9 @@ fn golden_speculative_matches_greedy() {
             top_p: 1.0,
             top_k: 0,
             repetition_penalty: 1.0,
+            repeat_last_n: -1,
+            top_n_sigma: 0.0,
+            min_keep: 0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             seed: None,
@@ -558,6 +589,8 @@ fn golden_speculative_matches_greedy() {
             min_tokens: 0,
             logit_bias: None,
             multimodal: None,
+            lora: None,
+            needs_logits: false,
         }
     };
 
@@ -630,7 +663,9 @@ fn golden_draft_model_speculative_matches_greedy() {
         0,
         &[],
         false,
-        None, // mmproj_path
+        None,  // mmproj_path
+        &[],   // lora_modules
+        false, // reranking — golden tests exercise generation
     )
     .expect("draft (self-speculation) load failed");
 
@@ -662,6 +697,9 @@ fn golden_draft_model_speculative_matches_greedy() {
             top_p: 1.0,
             top_k: 0,
             repetition_penalty: 1.0,
+            repeat_last_n: -1,
+            top_n_sigma: 0.0,
+            min_keep: 0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             seed: None,
@@ -674,6 +712,8 @@ fn golden_draft_model_speculative_matches_greedy() {
             min_tokens: 0,
             logit_bias: None,
             multimodal: None,
+            lora: None,
+            needs_logits: false,
         }
     };
 
@@ -762,6 +802,9 @@ fn golden_prefix_reuse_after_trim() {
                 top_p: 1.0,
                 top_k: 0,
                 repetition_penalty: 1.0,
+                repeat_last_n: -1,
+                top_n_sigma: 0.0,
+                min_keep: 0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 seed: None,
@@ -774,6 +817,8 @@ fn golden_prefix_reuse_after_trim() {
                 min_tokens: 0,
                 logit_bias: None,
                 multimodal: None,
+                lora: None,
+                needs_logits: true, // this test inspects Logits::values
             }
         };
 
@@ -782,8 +827,7 @@ fn golden_prefix_reuse_after_trim() {
         .do_prefill(&[1], &[mk_req(prompt_a.clone(), None, 0, 0, 0)], 0)
         .unwrap();
     let mut next = pre[0].logits.clone().unwrap().sampled_token;
-    let mut live = prompt_a.len();
-    for _ in 0..2 {
+    for live in (prompt_a.len()..).take(2) {
         let out = m
             .do_decode(
                 &[1],
@@ -791,7 +835,6 @@ fn golden_prefix_reuse_after_trim() {
             )
             .unwrap();
         next = out[0].1.sampled_token;
-        live += 1;
     }
 
     // Donate: keep exactly the cached prefix [0, cached-1); the boundary token is
@@ -815,6 +858,9 @@ fn golden_prefix_reuse_after_trim() {
         )
         .expect("re-prefill on a trimmed donated sequence must not fail");
     let logits = hit[0].logits.clone().expect("hit prefill completes");
+    // See the note in golden_context_shift_continues_past_n_ctx: empty `values`
+    // would make the finiteness assert vacuous.
+    assert!(!logits.values.is_empty(), "expected populated logits");
     assert!(
         logits.values.iter().all(|v| v.is_finite()),
         "post-hit logits must be finite"
@@ -834,6 +880,7 @@ fn golden_prefix_reuse_after_trim() {
             )],
         )
         .expect("decode after a cache-hit prefill must work");
+    assert!(!out[0].1.values.is_empty(), "expected populated logits");
     assert!(out[0].1.values.iter().all(|v| v.is_finite()));
 
     m.clear_sequence(0);
@@ -869,4 +916,189 @@ fn golden_tokenize_roundtrip() {
             "roundtrip lost content for {text:?}: detokenized {out:?}"
         );
     }
+}
+
+/// Prefill `tokens` into `seq_id` and return the final-position logits.
+/// Shared by the state round-trip tests below.
+#[cfg(test)]
+fn decode_prompt_logits(model: &LlamaCppModel, seq_id: i32, tokens: &[i32]) -> Logits {
+    let req = InferenceRequestForModel {
+        id: 1,
+        prompt_tokens: tokens.to_vec(),
+        last_token: None,
+        generated_tokens: 0,
+        max_new_tokens: 1,
+        context_len: 0,
+        kv_seq_id: seq_id,
+        temperature: 0.0,
+        top_p: 1.0,
+        top_k: 0,
+        repetition_penalty: 1.0,
+        repeat_last_n: -1,
+        top_n_sigma: 0.0,
+        min_keep: 0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        seed: None,
+        generated_token_ids: vec![],
+        skip_prefix_tokens: 0,
+        prefix_seq_id: None,
+        prefill_pos: 0,
+        grammar: None,
+        min_p: 0.0,
+        min_tokens: 0,
+        logit_bias: None,
+        multimodal: None,
+        lora: None,
+        needs_logits: true,
+    };
+    let steps = model.prefill_sync(&[1], &[req], 0).expect("prefill");
+    steps
+        .into_iter()
+        .find_map(|s| s.logits)
+        .expect("final chunk carries logits")
+}
+
+/// Re-decode the prompt's last token against an ALREADY-POPULATED sequence, so the
+/// result depends on the resident KV rather than on a fresh prefill. This is what
+/// makes the round-trip assertion meaningful: it reads the restored state.
+#[cfg(test)]
+fn decode_next_logits(model: &LlamaCppModel, seq_id: i32, tokens: &[i32]) -> Logits {
+    // Everything but the last token is already resident; submit only the last one at
+    // its original position, which forces the model to attend over the restored cells.
+    let req = InferenceRequestForModel {
+        id: 2,
+        prompt_tokens: tokens.to_vec(),
+        last_token: None,
+        generated_tokens: 0,
+        max_new_tokens: 1,
+        context_len: 0,
+        kv_seq_id: seq_id,
+        temperature: 0.0,
+        top_p: 1.0,
+        top_k: 0,
+        repetition_penalty: 1.0,
+        repeat_last_n: -1,
+        top_n_sigma: 0.0,
+        min_keep: 0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        seed: None,
+        generated_token_ids: vec![],
+        skip_prefix_tokens: tokens.len() - 1,
+        prefix_seq_id: None,
+        prefill_pos: tokens.len() - 1,
+        grammar: None,
+        min_p: 0.0,
+        min_tokens: 0,
+        logit_bias: None,
+        multimodal: None,
+        lora: None,
+        needs_logits: true,
+    };
+    let steps = model.prefill_sync(&[2], &[req], 0).expect("prefill");
+    steps
+        .into_iter()
+        .find_map(|s| s.logits)
+        .expect("final chunk carries logits")
+}
+
+/// Sequence state must survive a save/restore round-trip *exactly*.
+///
+/// This is the load-bearing assumption under the host-RAM prompt cache: if a restored
+/// sequence decodes differently from the original, the cache silently corrupts every
+/// conversation it serves. Asserting on logits rather than on byte equality of the blob
+/// is deliberate — the blob is an opaque cell layout, and what must be preserved is the
+/// model's behaviour, not its encoding.
+///
+/// The state is saved *before* the prompt's final token, and both sequences then decode
+/// that token. Saving the full prompt and re-submitting its last token would collide
+/// with the cell already restored at that position — an invalid batch, not a round-trip.
+#[test]
+fn golden_state_seq_round_trip_preserves_decode() {
+    let Some(model) = golden_model() else {
+        return; // no FOX_GOLDEN_MODEL — skip
+    };
+
+    let tokens = model
+        .tokenize("The capital of France is")
+        .expect("tokenize");
+    assert!(tokens.len() >= 3, "prompt too short to be meaningful");
+    let prefix = &tokens[..tokens.len() - 1];
+
+    const SRC: i32 = 0;
+    const DST: i32 = 1;
+
+    // Fill SRC with everything but the last token, then snapshot it.
+    let _ = decode_prompt_logits(&model, SRC, prefix);
+    let blob = model.state_seq_save(SRC).expect("state_seq_save");
+    assert!(
+        !blob.is_empty(),
+        "a prefilled sequence must serialise to something"
+    );
+
+    // What the ORIGINAL predicts once the final token lands.
+    let baseline = decode_next_logits(&model, SRC, &tokens);
+
+    // Restore the snapshot into a different, empty sequence and decode the same token.
+    let read = model.state_seq_load(DST, &blob).expect("state_seq_load");
+    assert_eq!(read, blob.len(), "the whole blob must be consumed");
+    let restored = decode_next_logits(&model, DST, &tokens);
+
+    assert_eq!(
+        baseline.sampled_token, restored.sampled_token,
+        "restored sequence sampled a different token — the state did not round-trip"
+    );
+    let max_delta = baseline
+        .values
+        .iter()
+        .zip(restored.values.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_delta < 1e-3,
+        "restored logits diverge from the original (max delta {max_delta})"
+    );
+
+    model.clear_sequence(SRC);
+    model.clear_sequence(DST);
+}
+
+/// Restoring must not be corrupted by whatever the destination already held —
+/// `state_seq_load` clears first, because llama.cpp writes cells at their recorded
+/// positions and does not clear on its own.
+#[test]
+fn golden_state_seq_load_overwrites_a_dirty_destination() {
+    let Some(model) = golden_model() else {
+        return;
+    };
+
+    let tokens = model
+        .tokenize("The capital of France is")
+        .expect("tokenize");
+    let prefix = &tokens[..tokens.len() - 1];
+    let other = model
+        .tokenize("Completely unrelated filler text that runs on for a while")
+        .expect("tokenize");
+
+    const SRC: i32 = 0;
+    const DST: i32 = 1;
+
+    let _ = decode_prompt_logits(&model, SRC, prefix);
+    let blob = model.state_seq_save(SRC).expect("save");
+    let baseline = decode_next_logits(&model, SRC, &tokens);
+
+    // Dirty the destination with a different, LONGER sequence first. Without the
+    // clear inside state_seq_load its leftover cells would survive underneath.
+    let _ = decode_prompt_logits(&model, DST, &other);
+
+    model.state_seq_load(DST, &blob).expect("load");
+    let restored = decode_next_logits(&model, DST, &tokens);
+    assert_eq!(
+        baseline.sampled_token, restored.sampled_token,
+        "a dirty destination corrupted the restored state"
+    );
+
+    model.clear_sequence(SRC);
+    model.clear_sequence(DST);
 }

@@ -139,6 +139,7 @@ pub fn resolve_tool_choice(
 pub fn sampling_from_ollama(
     opts: Option<&OllamaOptions>,
     show_thinking: bool,
+    server_repeat_last_n: i32,
 ) -> (SamplingParams, usize) {
     use super::sampling_defaults as defaults;
     let default_max_tokens = if show_thinking {
@@ -176,6 +177,9 @@ pub fn sampling_from_ollama(
             repetition_penalty: rep,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
+            repeat_last_n: opts
+                .and_then(|o| o.repeat_last_n)
+                .unwrap_or(server_repeat_last_n),
             seed,
             stop,
             show_thinking,
@@ -185,6 +189,8 @@ pub fn sampling_from_ollama(
             logprobs: None,
             min_p: opts.and_then(|o| o.min_p).unwrap_or(0.0).clamp(0.0, 1.0),
             min_tokens: 0,
+            top_n_sigma: opts.and_then(|o| o.top_n_sigma).unwrap_or(0.0).max(0.0),
+            min_keep: opts.and_then(|o| o.min_keep).unwrap_or(0),
             logit_bias: None,
         },
         max_tokens,
@@ -710,11 +716,12 @@ mod tests {
 
     #[test]
     fn test_sampling_from_ollama_defaults() {
-        let (params, max_tokens) = sampling_from_ollama(None, false);
+        let (params, max_tokens) = sampling_from_ollama(None, false, -1);
         assert_eq!(max_tokens, 512);
         assert!((params.temperature - 0.8).abs() < f32::EPSILON);
         assert!((params.top_p - 0.9).abs() < f32::EPSILON);
         assert_eq!(params.top_k, 40);
+        assert_eq!(params.repeat_last_n, -1);
     }
 
     #[test]
@@ -726,15 +733,36 @@ mod tests {
             top_k: Some(10),
             min_p: Some(0.05),
             repeat_penalty: Some(1.2),
+            repeat_last_n: None,
+            top_n_sigma: None,
+            min_keep: None,
             seed: Some(42),
             num_predict: Some(64),
             stop: None,
+            ..Default::default()
         };
-        let (params, max_tokens) = sampling_from_ollama(Some(&opts), false);
+        let (params, max_tokens) = sampling_from_ollama(Some(&opts), false, -1);
         assert_eq!(max_tokens, 64);
         assert!((params.temperature - 0.3).abs() < f32::EPSILON);
         assert_eq!(params.seed, Some(42));
         assert_eq!(params.top_k, 10);
+    }
+
+    #[test]
+    fn test_sampling_from_ollama_repeat_last_n_precedence() {
+        use crate::api::types::OllamaOptions;
+        // Absent from the request → the server default applies.
+        let (params, _) = sampling_from_ollama(None, false, 64);
+        assert_eq!(params.repeat_last_n, 64);
+
+        // Present in the request → the request wins, including the `0` kill switch,
+        // which `unwrap_or` must not confuse with "unset".
+        let opts = OllamaOptions {
+            repeat_last_n: Some(0),
+            ..Default::default()
+        };
+        let (params, _) = sampling_from_ollama(Some(&opts), false, 64);
+        assert_eq!(params.repeat_last_n, 0);
     }
 
     #[test]

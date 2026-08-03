@@ -101,6 +101,15 @@ for i in range(3):
                 {"role": "user", "content": "Count from one to twenty in words."}
             ],
             "max_tokens": 12,
+            # min_tokens suppresses EOG until the cap is reached, so `finish ==
+            # "length"` below is a fact about the engine rather than a coin flip.
+            # Without it the model samples at the default temperature and can emit
+            # EOS early: measured at 0.33% per request under concurrency, which across
+            # this suite's 7 such requests is ~1 failing run in 43 — the intermittent
+            # e2e failure that took two sessions to pin down. The check's intent (it
+            # must decode PAST its prefill token, 1 token is a FAIL) is untouched: a
+            # request that dies early still reports n < 12.
+            "min_tokens": 12,
         },
     )
     n = r.get("usage", {}).get("completion_tokens", 0) if st == 200 else 0
@@ -112,13 +121,23 @@ for i in range(3):
     )
 
 # ── 2) guided decoding: JSON schema (enum + integer → short, deterministic) ──
+#
+# Token budget: the grammar's `integer` rule is `"-"? ("0" | [1-9][0-9]*)` — digits are
+# unbounded, because JSON Schema's `type: integer` has no length bound to translate. So
+# guided decoding does NOT guarantee a *complete* document within a token cap: a run
+# that wanders into a long number gets cut off mid-JSON and `json.loads` fails. With the
+# old 60-token cap that failure was indistinguishable from "the grammar emitted
+# something non-conforming", which is the actual bug this check exists to catch.
+#
+# Fixed two ways: generous headroom, and an explicit truncation check first, so a future
+# failure says which of the two happened instead of leaving it to be guessed.
 print("2) guided decoding (json_schema)")
 st, r = post(
     "/v1/chat/completions",
     {
         "model": MODEL,
         "messages": [{"role": "user", "content": "Is the sky blue? How many suns?"}],
-        "max_tokens": 60,
+        "max_tokens": 256,
         "response_format": {
             "type": "json_schema",
             "json_schema": {
@@ -135,15 +154,26 @@ st, r = post(
         },
     },
 )
-try:
-    p = json.loads(r["choices"][0]["message"]["content"])
+finish = (r.get("choices") or [{}])[0].get("finish_reason") if st == 200 else None
+raw = (r.get("choices") or [{}])[0].get("message", {}).get("content", "") if st == 200 else ""
+if finish == "length":
+    # Not a conformance failure: the document was cut off before it could close.
     check(
-        "output parses and conforms",
-        p["answer"] in ("yes", "no") and isinstance(p["count"], int),
-        str(p),
+        "output was not truncated by max_tokens",
+        False,
+        f"hit max_tokens ({len(raw)} chars, no closing brace) — raise the cap or bound "
+        f"the schema; partial={raw[:120]!r}",
     )
-except Exception as e:  # noqa: BLE001 — any failure is a check failure
-    check("output parses and conforms", False, f"{e} resp={str(r)[:200]}")
+else:
+    try:
+        p = json.loads(raw)
+        check(
+            "output parses and conforms",
+            p["answer"] in ("yes", "no") and isinstance(p["count"], int),
+            str(p),
+        )
+    except Exception as e:  # noqa: BLE001 — any failure is a check failure
+        check("output parses and conforms", False, f"{e} resp={str(r)[:200]}")
 
 # ── 3) unconvertible schema must be a 400, not a silent fallback ─────────────
 print("3) invalid schema rejected")
@@ -204,6 +234,11 @@ n = r.get("usage", {}).get("completion_tokens", 0) if st == 200 else 0
 check("accepted and min_tokens honoured (≥3)", st == 200 and n >= 3, f"tokens={n}")
 
 # ── 6) Ollama surface: format "json" ─────────────────────────────────────────
+#
+# Same truncation trap as check 2, and worse: `format: "json"` compiles to the fully
+# permissive any-JSON grammar, so nothing bounds how long or how deeply nested the
+# document gets. An explicit num_predict plus a truncation check keeps a cut-off
+# document from being misreported as "the grammar produced invalid JSON".
 print('6) Ollama format: "json"')
 st, r = post(
     "/api/chat",
@@ -211,16 +246,25 @@ st, r = post(
         "model": MODEL,
         "stream": False,
         "format": "json",
+        "options": {"num_predict": 256},
         "messages": [
             {"role": "user", "content": "Give me a JSON object with a color key."}
         ],
     },
 )
-try:
-    p = json.loads(r["message"]["content"])
-    check("output parses as JSON", isinstance(p, (dict, list)), str(p)[:80])
-except Exception as e:  # noqa: BLE001
-    check("output parses as JSON", False, f"{e} resp={str(r)[:200]}")
+if st == 200 and r.get("done_reason") == "length":
+    partial = r.get("message", {}).get("content", "")
+    check(
+        "output was not truncated by num_predict",
+        False,
+        f"hit num_predict — raise it or constrain the format; partial={partial[:120]!r}",
+    )
+else:
+    try:
+        p = json.loads(r["message"]["content"])
+        check("output parses as JSON", isinstance(p, (dict, list)), str(p)[:80])
+    except Exception as e:  # noqa: BLE001
+        check("output parses as JSON", False, f"{e} resp={str(r)[:200]}")
 
 # ── 7) speculative decoding proposes drafts on repetitive output ─────────────
 # The prompt embeds a repeating n-gram, so prompt-lookup must find matches during
@@ -329,6 +373,7 @@ def one_client(i):
                 }
             ],
             "max_tokens": 12,
+            "min_tokens": 12,  # see check 1 — keeps `finish == "length"` deterministic
         },
     )
     n = r.get("usage", {}).get("completion_tokens", 0) if st == 200 else 0
@@ -577,6 +622,100 @@ if os.environ.get("FOX_E2E_VISION") == "1":
     )
 else:
     print("14) vision: image input — SKIPPED (run with --mmproj-path / E2E_MMPROJ to enable)")
+
+# ── 15) LoRA: adapter selection via the `model` field ─────────────────────────
+# Exercises resolve_for_request (alias -> primary model + LoraSelection) and the
+# group-and-switch llama_set_adapters_lora path in do_prefill/do_decode. Requests
+# alternate base -> adapter -> base -> adapter. NOTE: this does NOT assert
+# byte-identical output across same-target requests — fox's decode is not
+# bit-reproducible in general (prefix-cache hit vs. miss alone takes a different
+# compute path with different floating-point rounding, confirmed by running two
+# plain base-only requests back-to-back with no adapter involved at all). What
+# this checks instead: (a) the adapter measurably changes output vs. the base
+# model on the same prompt (proves the adapter is actually engaged, not silently
+# ignored), and (b) every request in the interleaved sequence decodes fully and
+# healthily regardless of which config immediately preceded it (proves switching
+# adapters — including the skip_prefix_cache path — doesn't corrupt context state
+# or hang; see docs/design/lora-support.md).
+LORA_NAME = os.environ.get("FOX_E2E_LORA_NAME")
+if LORA_NAME:
+    print("15) LoRA adapter selection")
+
+    # A short-answer factual prompt ("capital of France") is greedy-deterministic
+    # enough at temperature 0 that many adapters won't visibly move it — this needs
+    # an open-ended prompt where an adapter's influence (style, verbosity, reasoning
+    # structure) actually has room to show up in the completion.
+    def ask(model_name):
+        st, r = post(
+            "/v1/chat/completions",
+            {
+                "model": model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "If a train travels 60 miles in 90 minutes, "
+                        "what is its average speed in mph?",
+                    }
+                ],
+                "max_tokens": 64,
+                "min_tokens": 64,
+                "temperature": 0,
+            },
+        )
+        n = r.get("usage", {}).get("completion_tokens", 0) if st == 200 else 0
+        content = r["choices"][0]["message"]["content"] if st == 200 else ""
+        return st, n, content
+
+    sequence = [MODEL, LORA_NAME, MODEL, LORA_NAME]
+    results = [ask(name) for name in sequence]
+
+    check(
+        "every request in the base/adapter/base/adapter sequence decodes fully",
+        all(st == 200 and n >= 64 for st, n, _ in results),
+        f"statuses/tokens={[(st, n) for st, n, _ in results]}",
+    )
+    base1, lora1 = results[0][2], results[1][2]
+    check(
+        "adapter output differs from base (adapter is actually applied)",
+        base1.strip() != lora1.strip(),
+        f"base={base1[:60]!r} lora={lora1[:60]!r}",
+    )
+else:
+    print("15) LoRA adapter selection — SKIPPED (run with --lora-modules / E2E_LORA to enable)")
+
+# ── 16) n: multiple completions per request ───────────────────────────────────
+# n branches are independent fan-out generations, not a shared-prefill fork (see
+# docs/design/n-best-of-support.md) — deliberately NOT asserting the choices are
+# textually distinct (no such guarantee; thread_rng-driven divergence is likely
+# but not proven, per the LoRA e2e experience that exact-content assumptions on
+# this engine are risky to bake into a check). What's actually verified: the
+# right number of choices at the right indices, all non-empty, and usage summed
+# across every branch.
+print("16) n: multiple completions per request")
+st, r = post(
+    "/v1/chat/completions",
+    {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Tell me a short fun fact."}],
+        "max_tokens": 24,
+        "temperature": 0.9,
+        "n": 3,
+    },
+)
+choices = r.get("choices", []) if st == 200 else []
+indices = sorted(c.get("index") for c in choices)
+non_empty = all(c["message"]["content"].strip() for c in choices)
+check(
+    "n=3 returns 3 choices at indices 0,1,2, all non-empty",
+    st == 200 and indices == [0, 1, 2] and non_empty,
+    f"status={st} indices={indices}",
+)
+usage = r.get("usage", {}) if st == 200 else {}
+check(
+    "usage.completion_tokens reflects all 3 branches, not just one",
+    usage.get("completion_tokens", 0) >= 3,
+    f"usage={usage}",
+)
 
 print(f"\n{'=' * 50}\nRESULT: {ok_count} passed, {fail_count} failed")
 sys.exit(1 if fail_count else 0)

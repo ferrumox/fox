@@ -1,0 +1,56 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# llama-server (Vulkan) — the reference server, built from the SAME vendored
+# llama.cpp fox links against, so a fox-vs-llama-server comparison measures fox's
+# serving layer rather than a version difference between two engines.
+#
+# Mirrors Dockerfile.vulkan's toolchain exactly (Ubuntu 24.04, glslc +
+# SPIRV-Headers) for the same reason: differing shader compilers would put a
+# variable into the comparison that has nothing to do with either server.
+#
+# Build:
+#   docker build -f Dockerfile.llama-server-vulkan -t llama-server:vulkan .
+#
+# Extract the bundle and run it natively next to fox's, one at a time:
+#   id=$(docker create llama-server:vulkan) \
+#     && docker cp "$id:/bundle" ./llama-server-vulkan && docker rm "$id"
+# ──────────────────────────────────────────────────────────────────────────────
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git \
+    build-essential cmake ninja-build \
+    glslc glslang-tools libvulkan-dev spirv-headers \
+    libcurl4-openssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY vendor/llama.cpp/ ./llama.cpp/
+
+# GGML_BACKEND_DL matches how fox builds it (backends dlopen-ed at runtime), so
+# neither side gets a statically-favourable link the other lacks.
+RUN cmake -S llama.cpp -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_VULKAN=ON \
+        -DGGML_BACKEND_DL=ON \
+        -DGGML_NATIVE=OFF \
+        -DLLAMA_CURL=OFF \
+        -DLLAMA_BUILD_TESTS=OFF \
+        -DLLAMA_BUILD_EXAMPLES=OFF \
+        -DLLAMA_BUILD_TOOLS=ON \
+        `# The embedded WebUI downloads prebuilt assets from HuggingFace at build` \
+        `# time and fails the build when that fetch misbehaves. It has nothing to do` \
+        `# with serving throughput, which is all this image exists to measure.` \
+        -DLLAMA_BUILD_UI=OFF \
+        -DLLAMA_USE_PREBUILT_UI=OFF \
+    && cmake --build build --target llama-server -j"$(nproc)" \
+    && mkdir -p /bundle \
+    && cp build/bin/llama-server /bundle/ \
+    && find build -name 'lib*.so*' -exec cp {} /bundle/ \;
+
+FROM ubuntu:24.04 AS runtime
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libgomp1 libvulkan1 mesa-vulkan-drivers \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /bundle/ /bundle/

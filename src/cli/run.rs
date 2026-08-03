@@ -61,6 +61,11 @@ pub struct RunArgs {
     #[arg(long, default_value = "1.0")]
     pub repetition_penalty: f32,
 
+    /// How far back the penalties look, in generated tokens: -1 = whole history,
+    /// 0 = disabled, n = last n.
+    #[arg(long, default_value = "-1")]
+    pub repeat_last_n: i32,
+
     /// RNG seed for reproducible output
     #[arg(long)]
     pub seed: Option<u64>,
@@ -133,6 +138,10 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
             .init();
     }
 
+    if let Some(warning) = super::serve::swap_fraction_unused_warning(args.swap_fraction) {
+        eprintln!("Warning: {warning}");
+    }
+
     // Resolve model — auto-pull from HuggingFace if not found locally.
     let (model_name, model_path) = match resolve_model_path(&args.model, args.alias_file.as_deref())
     {
@@ -200,7 +209,9 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         split_mode,
         &tensor_split_parsed,
         args.moe_cpu,
-        None, // mmproj_path — `fox run` has no --mmproj flag yet; use `fox serve` for vision
+        None,  // mmproj_path — `fox run` has no --mmproj flag yet; use `fox serve` for vision
+        &[],   // lora_modules — same: fox run has no --lora-modules flag yet
+        false, // reranking — benches generate, never score
     )?;
     spinner.finish_and_clear();
     theme::print_success("Model loaded.");
@@ -592,6 +603,7 @@ fn build_sampling_params(
         repetition_penalty: args.repetition_penalty,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
+        repeat_last_n: args.repeat_last_n,
         seed: args.seed,
         stop: None,
         show_thinking: args.show_thinking,
@@ -601,6 +613,8 @@ fn build_sampling_params(
         logprobs: None,
         min_p: 0.0,
         min_tokens: 0,
+        top_n_sigma: 0.0,
+        min_keep: 0,
         logit_bias: None,
     }
 }

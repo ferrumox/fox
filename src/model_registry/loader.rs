@@ -47,7 +47,9 @@ async fn load_draft_model(
             split_mode,
             &tensor_split,
             moe_offload_cpu,
-            None, // mmproj_path — draft models are text-only speculation proposers
+            None,  // mmproj_path — draft models are text-only speculation proposers
+            &[],   // lora_modules — adapters apply to the primary model, not the draft
+            false, // reranking — a draft model only ever proposes tokens
         )
     })
     .await
@@ -71,6 +73,7 @@ pub(super) async fn load_model(
     cfg: &RegistryConfig,
     draft: Option<(String, PathBuf)>,
     mmproj: Option<PathBuf>,
+    lora_modules: Vec<(String, PathBuf, f32)>,
 ) -> Result<EngineEntry> {
     let path = path.to_path_buf();
     let name = name.to_string();
@@ -112,6 +115,7 @@ pub(super) async fn load_model(
 
     tracing::info!(model = %name, path = ?path, "loading model");
 
+    let reranking = cfg.reranking;
     let model = tokio::task::spawn_blocking(move || {
         LlamaCppModel::load(
             &path,
@@ -126,6 +130,8 @@ pub(super) async fn load_model(
             &tensor_split,
             moe_offload_cpu,
             mmproj.as_deref(),
+            &lora_modules,
+            reranking,
         )
     })
     .await
@@ -163,11 +169,11 @@ pub(super) async fn load_model(
         })
     };
 
-    let scheduler = Arc::new(Scheduler::with_max_queue_depth(
-        kv_cache.clone(),
-        max_batch_size,
-        max_queue_depth,
-    ));
+    let scheduler = Arc::new(
+        Scheduler::with_max_queue_depth(kv_cache.clone(), max_batch_size, max_queue_depth)
+            .with_kv_reuse(cfg.kv_reuse, cfg.slot_prompt_similarity)
+            .with_prompt_cache(cfg.cache_ram_bytes),
+    );
     let engine = Arc::new(InferenceEngine::new(
         model,
         scheduler,

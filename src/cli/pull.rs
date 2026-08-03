@@ -1,11 +1,17 @@
 // `fox pull` — download a GGUF model from HuggingFace Hub.
 //
 // Usage:
-//   fox pull gemma3                                      (top HF result)
-//   fox pull gemma3:12b                                  (specific size)
-//   fox pull gemma3:12b-q4                               (size + quant prefix)
+//   fox pull llama3.2                                    (curated registry entry)
+//   fox pull gemma3:12b                                  (registry entry, or specific size)
+//   fox pull gemma3:12b-q4                                (size + quant prefix)
 //   fox pull bartowski/gemma-3-12b-it-GGUF               (raw HF repo)
 //   fox pull bartowski/gemma-3-12b-it-GGUF:q4            (raw HF repo + quant)
+//
+// A friendly name is checked against the curated `registry.json` catalog first
+// (exact key, alias, or `<key>-<quant>` — the same names `fox models` lists);
+// only when nothing matches does it fall back to a live HuggingFace search by
+// name (the historical, catalog-unaware behavior, unchanged for anything not
+// in the registry).
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -16,6 +22,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 
 use super::theme;
+use crate::registry::{Registry, RegistryModel};
 
 const HF_API_BASE: &str = "https://huggingface.co/api/models";
 const HF_CDN_BASE: &str = "https://huggingface.co";
@@ -128,6 +135,26 @@ fn parse_model_spec(input: &str) -> ModelSpec {
     }
 }
 
+/// Try to resolve `input` against the curated registry (exact key, alias, or
+/// `<key>-<quant>` where the quant suffix is stripped for a second lookup —
+/// e.g. `gemma3:12b-q4` matches registry key `gemma3:12b` with quant `Q4`,
+/// mirroring `parse_model_spec`'s own size-quant tag splitting). Only tried
+/// for friendly names — raw `owner/repo` input never reaches this.
+fn resolve_from_registry(input: &str) -> Option<(RegistryModel, Option<String>)> {
+    let registry = Registry::load();
+    if let Some((_, model)) = registry.resolve(input) {
+        return Some((model, None));
+    }
+    let (base, quant) = input.rsplit_once('-')?;
+    let up = quant.to_uppercase();
+    if up.starts_with('Q') || up.starts_with("IQ") || up.starts_with('F') {
+        let (_, model) = registry.resolve(base)?;
+        Some((model, Some(up)))
+    } else {
+        None
+    }
+}
+
 #[derive(Deserialize)]
 struct HfSearchResult {
     #[serde(rename = "modelId")]
@@ -164,16 +191,38 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         .with_context(|| format!("creating output dir {:?}", output_dir))?;
 
     let client = build_client(args.hf_token.as_deref())?;
-    let spec = parse_model_spec(&args.model_id);
 
-    // Resolve HF repo: raw input or search.
-    let hf_repo = match spec.raw_repo {
-        Some(repo) => repo,
+    // A friendly name checks the curated registry (exact key, alias, or
+    // `<key>-<quant>`) before ever hitting the network — `fox models` already
+    // advertises "fox pull <name>" for these names, so a registry entry must
+    // actually resolve to the repo/file it names, not coincidentally rely on a
+    // live search happening to surface the same repo.
+    let registry_hit = if args.model_id.contains('/') {
+        None
+    } else {
+        resolve_from_registry(&args.model_id)
+    };
+
+    let (hf_repo, recommended_filename, mmproj_hint, registry_quant) = match registry_hit {
+        Some((model, quant)) => {
+            eprintln!(
+                "Resolved \"{}\" → {} (curated registry)",
+                args.model_id, model.repo
+            );
+            (model.repo, Some(model.recommended), model.mmproj, quant)
+        }
         None => {
-            eprintln!("Searching HuggingFace for \"{}\"…", spec.search_query);
-            let repo = search_top_repo(&spec.search_query, &client).await?;
-            eprintln!("Found: {}", repo);
-            repo
+            let spec = parse_model_spec(&args.model_id);
+            let repo = match spec.raw_repo {
+                Some(repo) => repo,
+                None => {
+                    eprintln!("Searching HuggingFace for \"{}\"…", spec.search_query);
+                    let repo = search_top_repo(&spec.search_query, &client).await?;
+                    eprintln!("Found: {}", repo);
+                    repo
+                }
+            };
+            (repo, None, None, spec.quant)
         }
     };
 
@@ -214,7 +263,8 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         );
     }
 
-    // Select file: --filename > quant prefix > pick balanced from all files.
+    // Select file: --filename > quant prefix > curated "recommended" > pick
+    // balanced from all files.
     let filename = if let Some(f) = args.filename {
         if !gguf_files.contains(&f) {
             anyhow::bail!(
@@ -229,7 +279,7 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
             );
         }
         f
-    } else if let Some(ref q) = spec.quant {
+    } else if let Some(ref q) = registry_quant {
         let matches: Vec<&String> = gguf_files
             .iter()
             .filter(|name| name.to_uppercase().contains(q.as_str()))
@@ -247,6 +297,8 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
             );
         }
         pick_balanced(&matches).to_string()
+    } else if let Some(rec) = recommended_filename.filter(|f| gguf_files.contains(f)) {
+        rec
     } else {
         let all: Vec<&String> = gguf_files.iter().collect();
         pick_balanced(&all).to_string()
@@ -334,6 +386,18 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         &format!("     Run:   fox run {}\n", stem),
     );
     theme::eprint_styled(None, false, true, "     Serve: fox serve\n");
+    if let Some(mmproj) = mmproj_hint {
+        theme::eprint_styled(
+            None,
+            false,
+            true,
+            &format!(
+                "     Vision: this model has a paired mmproj — also run \
+                 `fox pull {hf_repo} --filename {mmproj}`, then serve with `--mmproj {}`\n",
+                mmproj.trim_end_matches(".gguf")
+            ),
+        );
+    }
 
     Ok(())
 }
@@ -364,4 +428,52 @@ fn pick_balanced<'a>(files: &[&'a String]) -> &'a String {
         }
     }
     files[0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_from_registry_exact_key() {
+        let (model, quant) = resolve_from_registry("llama3.2").expect("known registry key");
+        assert_eq!(model.repo, "bartowski/Llama-3.2-3B-Instruct-GGUF");
+        assert!(quant.is_none());
+    }
+
+    #[test]
+    fn resolve_from_registry_alias() {
+        let (model, quant) = resolve_from_registry("moondream").expect("known alias");
+        assert_eq!(model.repo, "ggml-org/moondream2-20250414-GGUF");
+        assert!(quant.is_none());
+    }
+
+    #[test]
+    fn resolve_from_registry_key_with_colon() {
+        // Registry keys can themselves contain ':' (e.g. "gemma3:12b") — must
+        // match verbatim before any quant-suffix stripping is attempted.
+        let (model, quant) = resolve_from_registry("gemma3:12b").expect("compound key");
+        assert!(quant.is_none());
+        assert!(model.repo.contains("gemma-3-12b"));
+    }
+
+    #[test]
+    fn resolve_from_registry_strips_trailing_quant() {
+        let (model, quant) =
+            resolve_from_registry("gemma3:12b-q4").expect("key with trailing quant");
+        assert_eq!(quant.as_deref(), Some("Q4"));
+        assert!(model.repo.contains("gemma-3-12b"));
+    }
+
+    #[test]
+    fn resolve_from_registry_unknown_name_returns_none() {
+        assert!(resolve_from_registry("totally-not-a-registry-name-xyz").is_none());
+    }
+
+    #[test]
+    fn resolve_from_registry_trailing_segment_not_a_quant_returns_none() {
+        // "foo-bar" isn't a registry key, and "bar" doesn't look like a quant
+        // (doesn't start with q/iq/f), so no quant-stripping retry should fire.
+        assert!(resolve_from_registry("gemma3:12b-bar").is_none());
+    }
 }

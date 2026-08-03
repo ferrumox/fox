@@ -44,6 +44,8 @@ pub async fn run_probe(args: ProbeArgs) -> Result<()> {
         &[],   // tensor_split
         false, // moe_offload_cpu
         None,  // mmproj_path
+        &[],   // lora_modules
+        false, // reranking — benches generate, never score
     )?;
 
     let info = model.model_info();
@@ -59,6 +61,7 @@ pub async fn run_probe(args: ProbeArgs) -> Result<()> {
         &format!("{} (kv: {})", info.n_head, info.n_head_kv),
     );
     theme::print_kv_pair("Head dim", &info.head_dim.to_string());
+    theme::print_kv_pair("KV memory class", &info.kv_memory_class.to_string());
     theme::print_kv_pair("Layers", &info.n_layer.to_string());
     theme::print_kv_pair("Vocab size", &info.vocab_size.to_string());
     theme::print_kv_pair("Trained ctx", &info.n_ctx_train.to_string());

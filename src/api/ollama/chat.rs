@@ -17,7 +17,8 @@ use crate::api::shared::inference::{
     resolve_tool_call_parser, resolve_tool_choice, sampling_from_ollama, MessageForTemplate,
 };
 use crate::api::shared::streaming::{
-    collect_tokens, ndjson_response, ndjson_stream, now_rfc3339, ollama_done_reason,
+    collect_tokens_timed, ndjson_response, ndjson_stream, now_rfc3339, ollama_done_reason,
+    GenTimings,
 };
 use crate::api::types::{
     OllamaChatChunk, OllamaChatMessage, OllamaChatRequest, OllamaToolCall, OllamaToolCallFunction,
@@ -31,10 +32,35 @@ pub async fn ollama_chat(
     LenientJson(req): LenientJson<OllamaChatRequest>,
 ) -> axum::response::Response {
     let start = Instant::now();
-    let entry = match load_model_or_respond(&state.registry, &req.model).await {
+    let (entry, lora) = match load_model_or_respond(&state.registry, &req.model).await {
         Ok(e) => e,
         Err(r) => return r,
     };
+    // Honour the request's `keep_alive` (previously parsed and thrown away, so a
+    // client asking to keep a model warm — or drop it promptly — could not tell that
+    // nothing happened). `Immediate` is applied after the response instead, below.
+    let keep_alive = crate::api::types::parse_keep_alive(req.keep_alive.as_ref());
+    match keep_alive {
+        Some(crate::api::types::KeepAlive::Forever) => {
+            state.registry.set_keep_alive(&req.model, None)
+        }
+        Some(crate::api::types::KeepAlive::Secs(n)) => state
+            .registry
+            .set_keep_alive(&req.model, Some(std::time::Duration::from_secs(n))),
+        // `0` = "unload once this request is done". Expressed as a zero TTL rather
+        // than an explicit unload: the eviction pass already refuses to drop a model
+        // with work in flight (`is_busy`), so this cannot kill the very request that
+        // asked for it — including a stream the handler has already returned.
+        // Divergence from Ollama, deliberate: the unload lands on the next eviction
+        // tick (within 60s) rather than the instant the response ends.
+        Some(crate::api::types::KeepAlive::Immediate) => state
+            .registry
+            .set_keep_alive(&req.model, Some(std::time::Duration::ZERO)),
+        None => {}
+    }
+
+    // Real `load_duration` — ~0 when the model was already resident.
+    let load_ns = start.elapsed().as_nanos() as u64;
 
     let has_images = req
         .messages
@@ -132,8 +158,25 @@ pub async fn ollama_chat(
     let stream_mode = req.stream.unwrap_or(true);
     let show_thinking_in_output = use_thinking && !stream_mode;
 
-    let (mut sampling, max_tokens) =
-        sampling_from_ollama(req.options.as_ref(), show_thinking_in_output);
+    if let Some(unsupported) = req
+        .options
+        .as_ref()
+        .map(|o| o.unsupported_options())
+        .filter(|v| !v.is_empty())
+    {
+        tracing::warn!(
+            model = %req.model,
+            options = %unsupported.join(", "),
+            "ignoring unsupported Ollama options — fox accepts them for compatibility \
+             but does not act on them"
+        );
+    }
+
+    let (mut sampling, max_tokens) = sampling_from_ollama(
+        req.options.as_ref(),
+        show_thinking_in_output,
+        state.repeat_last_n,
+    );
     sampling.initial_in_thinking = use_thinking;
 
     // Guided decoding from the `format` field (`"json"` or a JSON schema object).
@@ -188,6 +231,9 @@ pub async fn ollama_chat(
     if let Some(chunks) = multimodal {
         inference_req = inference_req.with_multimodal(chunks);
     }
+    if let Some(selection) = lora {
+        inference_req = inference_req.with_lora(selection);
+    }
     if let Err(e) = entry.engine.submit_request(inference_req) {
         entry
             .engine
@@ -210,53 +256,68 @@ pub async fn ollama_chat(
         // Normal streaming (no tools) — emit NDJSON token by token.
         let log_model = model_name.clone();
         let log_prompt = prompt_tokens_len;
-        let stream = ndjson_stream(rx, move |token: Token, eval_count: u32, elapsed_ns: u64| {
-            let is_done = token.stop_reason.is_some();
-            if is_done {
-                tracing::info!(
-                    model = %log_model,
-                    stream = true,
-                    prompt_tokens = log_prompt as u32,
-                    completion_tokens = eval_count,
-                    duration_ms = elapsed_ns / 1_000_000,
-                    finish_reason = %ollama_done_reason(&token.stop_reason),
-                    "done"
-                );
-            }
-            OllamaChatChunk {
-                model: model_name.clone(),
-                created_at: now_rfc3339(),
-                message: OllamaChatMessage {
-                    role: "assistant".to_string(),
-                    content: token.text.clone(),
-                    thinking: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    images: None,
-                },
-                done: is_done,
-                done_reason: if is_done {
-                    Some(ollama_done_reason(&token.stop_reason))
-                } else {
-                    None
-                },
-                total_duration: if is_done { Some(elapsed_ns) } else { None },
-                load_duration: if is_done { Some(0) } else { None },
-                prompt_eval_count: if is_done {
-                    Some(log_prompt as u32)
-                } else {
-                    None
-                },
-                prompt_eval_duration: if is_done { Some(0) } else { None },
-                eval_count: if is_done { Some(eval_count) } else { None },
-                eval_duration: if is_done { Some(elapsed_ns) } else { None },
-            }
-        });
+        let stream = ndjson_stream(
+            rx,
+            load_ns,
+            move |token: Token, eval_count: u32, t: GenTimings| {
+                let is_done = token.stop_reason.is_some();
+                if is_done {
+                    tracing::info!(
+                        model = %log_model,
+                        stream = true,
+                        prompt_tokens = log_prompt as u32,
+                        completion_tokens = eval_count,
+                        duration_ms = t.total_ns / 1_000_000,
+                        prefill_ms = t.prompt_eval_ns / 1_000_000,
+                        decode_ms = t.eval_ns / 1_000_000,
+                        finish_reason = %ollama_done_reason(&token.stop_reason),
+                        "done"
+                    );
+                }
+                OllamaChatChunk {
+                    model: model_name.clone(),
+                    created_at: now_rfc3339(),
+                    message: OllamaChatMessage {
+                        role: "assistant".to_string(),
+                        content: token.text.clone(),
+                        thinking: None,
+                        tool_calls: None,
+                        tool_call_id: None,
+                        images: None,
+                    },
+                    done: is_done,
+                    done_reason: if is_done {
+                        Some(ollama_done_reason(&token.stop_reason))
+                    } else {
+                        None
+                    },
+                    total_duration: if is_done { Some(t.total_ns) } else { None },
+                    load_duration: if is_done { Some(t.load_ns) } else { None },
+                    prompt_eval_count: if is_done {
+                        Some(log_prompt as u32)
+                    } else {
+                        None
+                    },
+                    prompt_eval_duration: if is_done {
+                        Some(t.prompt_eval_ns)
+                    } else {
+                        None
+                    },
+                    eval_count: if is_done { Some(eval_count) } else { None },
+                    eval_duration: if is_done { Some(t.eval_ns) } else { None },
+                }
+            },
+        );
         ndjson_response(stream)
     } else {
         // Non-streaming OR streaming with tools (buffer everything, then respond).
-        let (full_content, eval_count, stop_reason) = collect_tokens(&mut rx).await;
-        let elapsed_ns = start.elapsed().as_nanos() as u64;
+        let (full_content, eval_count, stop_reason, prompt_eval_ns) =
+            collect_tokens_timed(&mut rx).await;
+        let t = GenTimings::new(
+            load_ns,
+            prompt_eval_ns,
+            start.elapsed().as_nanos() as u64 - load_ns,
+        );
 
         let (think_open, think_close) = entry.engine.reasoning_delimiters();
         let (thinking, visible) = extract_thinking(&full_content, &think_open, &think_close);
@@ -295,7 +356,9 @@ pub async fn ollama_chat(
             stream = false,
             prompt_tokens = prompt_tokens_len as u32,
             completion_tokens = eval_count,
-            duration_ms = elapsed_ns / 1_000_000,
+            duration_ms = t.total_ns / 1_000_000,
+            prefill_ms = t.prompt_eval_ns / 1_000_000,
+            decode_ms = t.eval_ns / 1_000_000,
             finish_reason = %done_reason,
             "done"
         );
@@ -313,12 +376,12 @@ pub async fn ollama_chat(
             },
             done: true,
             done_reason: Some(done_reason),
-            total_duration: Some(elapsed_ns),
-            load_duration: Some(0),
+            total_duration: Some(t.total_ns),
+            load_duration: Some(t.load_ns),
             prompt_eval_count: Some(prompt_tokens_len as u32),
-            prompt_eval_duration: Some(0),
+            prompt_eval_duration: Some(t.prompt_eval_ns),
             eval_count: Some(eval_count),
-            eval_duration: Some(elapsed_ns),
+            eval_duration: Some(t.eval_ns),
         };
         let mut line = serde_json::to_string(&chunk).unwrap_or_default();
         line.push('\n');
