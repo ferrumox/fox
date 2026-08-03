@@ -11,8 +11,8 @@ use std::time::Instant;
 use crate::api::error::load_model_or_respond;
 use crate::api::router::AppState;
 use crate::api::shared::inference::{
-    extract_thinking, prepare_prompt, resolve_tool_choice, sampling_from_ollama,
-    try_parse_tool_call, MessageForTemplate,
+    extract_thinking, parse_tool_call, prepare_prompt, resolve_tool_call_parser,
+    resolve_tool_choice, sampling_from_ollama, MessageForTemplate,
 };
 use crate::api::shared::streaming::{
     collect_tokens, ndjson_response, ndjson_stream, now_rfc3339, ollama_done_reason,
@@ -124,13 +124,18 @@ pub async fn ollama_chat(
 
     let req_id = entry.engine.next_request_id();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
-    entry.engine.submit_request(InferenceRequest::new(
+    if let Err(e) = entry.engine.submit_request(InferenceRequest::new(
         req_id,
         prompt_tokens,
         max_tokens,
         sampling,
         tx,
-    ));
+    )) {
+        entry
+            .engine
+            .record_rejection(crate::api::error::rejection_reason_label(&e));
+        return crate::api::error::AppError::from(e).into_response();
+    }
 
     let model_name = req.model.clone();
 
@@ -199,7 +204,11 @@ pub async fn ollama_chat(
         let (thinking, visible) = extract_thinking(&full_content, &think_open, &think_close);
 
         let (content, ollama_tool_calls) = if has_tools {
-            let (text, oa_calls) = try_parse_tool_call(&visible, eff_tools);
+            let tool_parser = resolve_tool_call_parser(
+                &state.tool_call_parser,
+                entry.engine.native_tool_call_format(),
+            );
+            let (text, oa_calls) = parse_tool_call(&visible, eff_tools, tool_parser);
             let ollama_calls = oa_calls.map(|calls| {
                 calls
                     .into_iter()

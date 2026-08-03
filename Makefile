@@ -91,7 +91,11 @@ golden:
 		(echo "Set GOLDEN_MODEL=/path/to/model.gguf" && exit 1)
 	cargo test --lib --no-run
 	find target \( -name 'libggml*.so*' -o -name 'libllama*.so*' \) -exec cp {} . \;
-	FOX_GOLDEN_MODEL="$(GOLDEN_MODEL)" cargo test --lib golden -- --nocapture
+	# Unfiltered: this is the only CI job that builds real llama.cpp, so it must also
+	# run the plain (non-"golden") unit tests that only compile in a real build
+	# (llama_cpp::batch, llama_cpp::mod, sampling, vocab) — a "golden"-substring
+	# filter here silently skipped them even though they built and passed locally.
+	FOX_GOLDEN_MODEL="$(GOLDEN_MODEL)" cargo test --lib -- --nocapture
 
 # End-to-end smoke — a REAL server with a REAL model over HTTP, across multiple
 # requests. Covers the layer no unit/golden/stub test reaches (cross-request

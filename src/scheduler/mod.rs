@@ -43,10 +43,53 @@ pub struct Scheduler {
     pub prefix_hits: AtomicU64,
     /// Lifetime miss counter (for metrics / logging).
     pub prefix_misses: AtomicU64,
+    /// Maximum requests allowed to wait in `waiting_queue` before `submit()` rejects
+    /// new ones with `SubmitError::QueueFull`. 0 = unbounded.
+    max_queue_depth: usize,
+}
+
+/// Why `Scheduler::submit()` refused a request. Both variants are synchronous,
+/// pre-queue rejections — the request never touches `waiting_queue` or gets a
+/// response channel that could otherwise hang or silently close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitError {
+    /// `waiting_queue` is already at `max_queue_depth`.
+    QueueFull { depth: usize, max: usize },
+    /// The request needs more blocks than the KV pool will ever have, even empty.
+    TooLarge {
+        needed_blocks: usize,
+        total_blocks: usize,
+    },
+}
+
+impl std::fmt::Display for SubmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubmitError::QueueFull { depth, max } => {
+                write!(f, "queue full ({depth}/{max} requests waiting)")
+            }
+            SubmitError::TooLarge {
+                needed_blocks,
+                total_blocks,
+            } => write!(
+                f,
+                "request needs {needed_blocks} KV blocks but the pool only has {total_blocks}"
+            ),
+        }
+    }
 }
 
 impl Scheduler {
     pub fn new(kv_cache: Arc<KVCacheManager>, max_batch_size: usize) -> Self {
+        Self::with_max_queue_depth(kv_cache, max_batch_size, 0)
+    }
+
+    /// Like `new`, with an explicit queue-depth cap (0 = unbounded).
+    pub fn with_max_queue_depth(
+        kv_cache: Arc<KVCacheManager>,
+        max_batch_size: usize,
+        max_queue_depth: usize,
+    ) -> Self {
         let pool: Vec<i32> = (0..max_batch_size as i32).collect();
         // Reserve up to 1/4 of the batch size for prefix cache entries (minimum 1).
         let prefix_cache_max = (max_batch_size / 4).max(1);
@@ -63,11 +106,25 @@ impl Scheduler {
             prefix_cache_max,
             prefix_hits: AtomicU64::new(0),
             prefix_misses: AtomicU64::new(0),
+            max_queue_depth,
         }
     }
 
-    /// Submit a request to the waiting queue.
-    pub fn submit(&self, req: InferenceRequest) {
+    /// Submit a request to the waiting queue. Rejects synchronously (before the
+    /// request ever enters the queue or gets a response channel) when the queue is
+    /// full or the request could never fit in the KV pool even when empty — both
+    /// checks are statically knowable at submission time, so there is no need to
+    /// wait for a scheduler turn to reject them.
+    pub fn submit(&self, req: InferenceRequest) -> Result<(), SubmitError> {
+        let needed = self.blocks_needed(&req);
+        let total = self.kv_cache.total_blocks();
+        if needed > total {
+            return Err(SubmitError::TooLarge {
+                needed_blocks: needed,
+                total_blocks: total,
+            });
+        }
+
         let mut q = match self.waiting_queue.lock() {
             Ok(g) => g,
             Err(e) => {
@@ -75,10 +132,17 @@ impl Scheduler {
                 e.into_inner()
             }
         };
+        if self.max_queue_depth > 0 && q.len() >= self.max_queue_depth {
+            return Err(SubmitError::QueueFull {
+                depth: q.len(),
+                max: self.max_queue_depth,
+            });
+        }
         info!(request_id = req.id, "request admitted to waiting queue");
         q.push_back(req);
         drop(q);
         self.work_notify.notify_one();
+        Ok(())
     }
 
     /// Wait until at least one request is available to schedule.
@@ -110,7 +174,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let req = InferenceRequest::new(1, vec![1, 2, 3], 10, SamplingParams::default(), tx);
-        sched.submit(req);
+        sched.submit(req).unwrap();
 
         assert_eq!(sched.queue_depth(), 1);
         let batch = sched.schedule_step();
@@ -159,7 +223,7 @@ mod tests {
         // Submit a new request with the same 18-token prefix.
         let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
         let req2 = InferenceRequest::new(99, tokens, 5, SamplingParams::default(), tx2);
-        sched.submit(req2);
+        sched.submit(req2).unwrap();
 
         // Return the cached seq_id to the pool (engine normally does this after KV copy).
         sched.return_prefix_seq_id(0);
@@ -217,7 +281,7 @@ mod tests {
         // Submit request B (diverges after the shared first block)
         let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
         let req2 = InferenceRequest::new(2, tokens_b, 5, SamplingParams::default(), tx2);
-        sched.submit(req2);
+        sched.submit(req2).unwrap();
 
         let batch = sched.schedule_step();
         assert!(
@@ -365,7 +429,7 @@ mod tests {
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
             let id = iter as u64 + 1;
             let req = InferenceRequest::new(id, prompt(seed, 2), 8, SamplingParams::default(), tx);
-            sched.submit(req);
+            sched.submit(req).unwrap();
 
             // 2. Schedule: cleans the previous iteration's finishes and admits.
             let hits_pre = sched.prefix_hits.load(Ordering::Relaxed);
@@ -463,13 +527,15 @@ mod tests {
         // 48-token prompt = 3 full blocks; chunked prefill would span several steps.
         let prompt: Vec<i32> = (0..48).collect();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        sched.submit(InferenceRequest::new(
-            1,
-            prompt,
-            8,
-            SamplingParams::default(),
-            tx,
-        ));
+        sched
+            .submit(InferenceRequest::new(
+                1,
+                prompt,
+                8,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
 
         // Step 1: admitted → emitted to prefill, not decode.
         let b = sched.schedule_step();
@@ -576,13 +642,15 @@ mod tests {
         let prompt1: Vec<i32> = (0..16).collect();
         let max_new1 = (total - 2) * 16 - prompt1.len();
         let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel();
-        sched.submit(InferenceRequest::new(
-            1,
-            prompt1.clone(),
-            max_new1,
-            SamplingParams::default(),
-            tx1,
-        ));
+        sched
+            .submit(InferenceRequest::new(
+                1,
+                prompt1.clone(),
+                max_new1,
+                SamplingParams::default(),
+                tx1,
+            ))
+            .unwrap();
         let b = sched.schedule_step();
         assert_eq!(b.prefill, vec![1], "request 1 admitted");
         sched.set_prefilled_tokens(1, prompt1.len());
@@ -592,13 +660,15 @@ mod tests {
 
         // Request 2 needs more blocks than remain. It must WAIT, not evict request 1.
         let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
-        sched.submit(InferenceRequest::new(
-            2,
-            (0..16).collect(),
-            32,
-            SamplingParams::default(),
-            tx2,
-        ));
+        sched
+            .submit(InferenceRequest::new(
+                2,
+                (0..16).collect(),
+                32,
+                SamplingParams::default(),
+                tx2,
+            ))
+            .unwrap();
         let b = sched.schedule_step();
         assert!(
             b.preempted_seq_ids.is_empty(),
@@ -627,9 +697,11 @@ mod tests {
     }
 
     #[test]
-    fn oversized_request_is_rejected_not_queued_forever() {
-        // A request that could never fit even into an EMPTY pool must not block the
-        // queue head forever — it is dropped (channel closes) and the queue advances.
+    fn oversized_request_is_rejected_synchronously_by_submit() {
+        // A request that could never fit even into an EMPTY pool is rejected by
+        // `submit()` itself — before it ever enters the queue — so it can never
+        // block the queue head. This used to be a schedule_step()-time check; 0.16
+        // moved it to submit() since it's statically knowable at submission time.
         let config = ModelConfig {
             num_layers: 2,
             num_heads: 2,
@@ -644,30 +716,112 @@ mod tests {
 
         // Oversized: needs more blocks than the entire pool.
         let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel();
-        sched.submit(InferenceRequest::new(
-            1,
-            (0..16).collect(),
-            (total + 2) * 16,
-            SamplingParams::default(),
-            tx1,
-        ));
-        // A normal request queued behind it.
+        let err = sched
+            .submit(InferenceRequest::new(
+                1,
+                (0..16).collect(),
+                (total + 2) * 16,
+                SamplingParams::default(),
+                tx1,
+            ))
+            .expect_err("oversized request must be rejected by submit(), not queued");
+        assert!(matches!(err, SubmitError::TooLarge { .. }));
+        assert_eq!(
+            sched.queue_depth(),
+            0,
+            "rejected request never entered the queue"
+        );
+
+        // A normal request submits and schedules fine.
         let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
-        sched.submit(InferenceRequest::new(
-            2,
-            (0..16).collect(),
-            16,
-            SamplingParams::default(),
-            tx2,
-        ));
+        sched
+            .submit(InferenceRequest::new(
+                2,
+                (0..16).collect(),
+                16,
+                SamplingParams::default(),
+                tx2,
+            ))
+            .unwrap();
 
         let b = sched.schedule_step();
-        assert_eq!(
-            b.prefill,
-            vec![2],
-            "the oversized request is dropped and the next one admitted"
-        );
+        assert_eq!(b.prefill, vec![2], "the normal request is admitted");
         assert_eq!(sched.queue_depth(), 0, "nothing left waiting");
         assert_eq!(sched.active_requests(), 1, "only the normal request runs");
+    }
+
+    #[test]
+    fn submit_rejects_when_queue_full() {
+        let config = ModelConfig {
+            num_layers: 2,
+            num_heads: 2,
+            num_heads_kv: 2,
+            head_dim: 64,
+            n_embd: 128,
+            vocab_size: 1000,
+        };
+        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1, 1));
+        // max_batch_size=1 keeps the seq_id pool tiny so nothing gets admitted off
+        // the queue between the two submits; max_queue_depth=1 caps the queue itself.
+        let sched = Scheduler::with_max_queue_depth(kv, 1, 1);
+
+        let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                1,
+                (0..16).collect(),
+                8,
+                SamplingParams::default(),
+                tx1,
+            ))
+            .expect("first submit fills the queue to its cap, should succeed");
+        assert_eq!(sched.queue_depth(), 1);
+
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        let err = sched
+            .submit(InferenceRequest::new(
+                2,
+                (0..16).collect(),
+                8,
+                SamplingParams::default(),
+                tx2,
+            ))
+            .expect_err("second submit must be rejected — queue is at max_queue_depth");
+        assert!(matches!(err, SubmitError::QueueFull { depth: 1, max: 1 }));
+        assert_eq!(
+            sched.queue_depth(),
+            1,
+            "rejected request never entered the queue"
+        );
+    }
+
+    #[test]
+    fn submit_unbounded_by_default() {
+        // max_queue_depth=0 (the default via `Scheduler::new`) means unbounded — this
+        // guards against accidentally changing the default and silently capping every
+        // existing deployment's queue.
+        let config = ModelConfig {
+            num_layers: 2,
+            num_heads: 2,
+            num_heads_kv: 2,
+            head_dim: 64,
+            n_embd: 128,
+            vocab_size: 1000,
+        };
+        let kv = Arc::new(KVCacheManager::new(&config, 500_000_000, 0.5, 16, 1, 1));
+        let sched = Scheduler::new(kv, 1);
+        for id in 1..=50u64 {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            sched
+                .submit(InferenceRequest::new(
+                    id,
+                    (0..16).collect(),
+                    8,
+                    SamplingParams::default(),
+                    tx,
+                ))
+                .expect("unbounded queue must accept many more requests than the batch size");
+        }
+        assert_eq!(sched.queue_depth(), 50);
     }
 }

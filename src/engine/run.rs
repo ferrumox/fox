@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::scheduler::StopReason;
+use crate::scheduler::{StopReason, Token};
 
 use super::model::{InferenceRequestForModel, Logits};
 use super::InferenceEngine;
@@ -17,6 +17,7 @@ impl InferenceEngine {
         let mut last_prefix_misses: u64 = 0;
         let mut last_spec_proposed: u64 = 0;
         let mut last_spec_accepted: u64 = 0;
+        let mut last_bisection_retries: u64 = 0;
 
         loop {
             let batch = engine.scheduler.schedule_step();
@@ -58,6 +59,13 @@ impl InferenceEngine {
                 }
                 last_spec_proposed = cur_proposed;
                 last_spec_accepted = cur_accepted;
+
+                let cur_bisection_retries = engine.model.bisection_retry_count();
+                let db = cur_bisection_retries.saturating_sub(last_bisection_retries);
+                if db > 0 {
+                    m.decode_bisection_retries_total.inc_by(db);
+                }
+                last_bisection_retries = cur_bisection_retries;
             }
 
             for seq_id in &batch.preempted_seq_ids {
@@ -85,19 +93,34 @@ impl InferenceEngine {
                     }
                     Err(e) => {
                         tracing::warn!(
-                            "prefill failed (KV cache full?): {} — stopping {} request(s) with Length",
+                            "prefill failed (KV cache full?): {} — stopping {} request(s) with EngineError",
                             e,
                             prefill_ids.len()
                         );
-                        // Clear KV before the seq_id returns to the pool — a failed
-                        // llama_decode leaves partial cells that poison the next occupant.
-                        for req in engine.scheduler.get_running(&prefill_ids) {
+                        // Send an explicit terminal token before the sequence is cleared and
+                        // the request is marked finished — otherwise `response_tx` is only
+                        // dropped later, which closes the channel with no message and the
+                        // HTTP handler reports a fake empty 200 instead of an error.
+                        let failed = engine.scheduler.get_running(&prefill_ids);
+                        for req in &failed {
+                            let _ = req.response_tx.send(Token {
+                                id: req.id,
+                                token_id: -1,
+                                text: String::new(),
+                                is_eos: true,
+                                stop_reason: Some(StopReason::EngineError),
+                                logprob: None,
+                            });
+                            // Clear KV before the seq_id returns to the pool — a failed
+                            // llama_decode leaves partial cells that poison the next occupant.
                             if req.kv_seq_id >= 0 {
                                 engine.model.clear_sequence(req.kv_seq_id);
                             }
                         }
                         for req_id in &prefill_ids {
-                            engine.scheduler.mark_finished(*req_id, StopReason::Length);
+                            engine
+                                .scheduler
+                                .mark_finished(*req_id, StopReason::EngineError);
                             engine.model.free_grammar(*req_id);
                         }
                     }
@@ -116,18 +139,30 @@ impl InferenceEngine {
                         // KV cache exhausted or llama_decode failure — stop all affected
                         // requests gracefully instead of crashing the engine loop.
                         tracing::warn!(
-                            "decode failed (KV cache full?): {} — stopping {} request(s) with Length",
+                            "decode failed (KV cache full?): {} — stopping {} request(s) with EngineError",
                             e,
                             decode_ids.len()
                         );
-                        // Same poisoned-sequence guard as the prefill error path.
-                        for req in engine.scheduler.get_running(&decode_ids) {
+                        // Same explicit-terminal-token + poisoned-sequence guard as the
+                        // prefill error path (see comment there).
+                        let failed = engine.scheduler.get_running(&decode_ids);
+                        for req in &failed {
+                            let _ = req.response_tx.send(Token {
+                                id: req.id,
+                                token_id: -1,
+                                text: String::new(),
+                                is_eos: true,
+                                stop_reason: Some(StopReason::EngineError),
+                                logprob: None,
+                            });
                             if req.kv_seq_id >= 0 {
                                 engine.model.clear_sequence(req.kv_seq_id);
                             }
                         }
                         for req_id in &decode_ids {
-                            engine.scheduler.mark_finished(*req_id, StopReason::Length);
+                            engine
+                                .scheduler
+                                .mark_finished(*req_id, StopReason::EngineError);
                             engine.model.free_grammar(*req_id);
                         }
                     }
@@ -160,7 +195,7 @@ impl InferenceEngine {
         // Roll with headroom for the largest possible next step (a speculative verify
         // batch writes up to draft_len + 1 cells): triggering exactly AT n_ctx is too
         // late — the boundary-crossing step fails before the roll can fire.
-        let reserve = self.speculative.map(|(_, d)| d + 1).unwrap_or(1);
+        let reserve = self.speculative.as_ref().map(|(_, d)| d + 1).unwrap_or(1);
         let threshold = n_ctx.saturating_sub(reserve);
         for req in self.scheduler.get_running(decode_ids) {
             let ctx_len = req.context_len();
@@ -333,16 +368,29 @@ impl InferenceEngine {
 
         // Speculative fast path: a single decoding request with no grammar, when enabled.
         // Speculation helps most at low concurrency; multi-request batches decode normally.
-        if let (Some((ngram, draft_len)), [only_id]) = (self.speculative, req_ids) {
+        if let (Some((proposer, draft_len)), [only_id]) = (&self.speculative, req_ids) {
             let no_grammar = model_requests
                 .first()
                 .map(|r| r.grammar.is_none())
                 .unwrap_or(false);
             if no_grammar {
                 let only_id = *only_id;
+                let draft_len = *draft_len;
+                let proposer = proposer.clone();
                 let request = model_requests.into_iter().next().unwrap();
+                // Proposing and verifying both run inside spawn_blocking: n-gram
+                // proposing is cheap CPU work, but a draft-model proposer makes its
+                // own llama.cpp FFI call, which must never run on the async executor.
                 let (committed, proposed) = tokio::task::spawn_blocking(move || {
-                    model.speculative_decode_sync(only_id, &request, ngram, draft_len)
+                    let mut seq = Vec::with_capacity(
+                        request.prompt_tokens.len() + request.generated_token_ids.len(),
+                    );
+                    seq.extend_from_slice(&request.prompt_tokens);
+                    seq.extend_from_slice(&request.generated_token_ids);
+                    let drafts = proposer.propose(only_id, &seq, draft_len);
+                    let proposed = drafts.len();
+                    let committed = model.speculative_decode_sync(only_id, &request, drafts)?;
+                    anyhow::Ok((committed, proposed))
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("speculative decode spawn_blocking: {}", e))??;

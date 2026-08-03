@@ -53,12 +53,14 @@ fox serve --json-logs --port 8080 --max-models 2 --keep-alive-secs 600
 |------|---|---|---|
 | `--max-context-len <N>` | `FOX_MAX_CONTEXT_LEN` | auto | Maximum context length in tokens. Auto-detected from the model's trained context if omitted. Larger values require more KV cache memory. |
 | `--max-batch-size <N>` | `FOX_MAX_BATCH_SIZE` | `32` | Maximum number of sequences processed in a single forward pass. |
+| `--max-queue-depth <N>` | `FOX_MAX_QUEUE_DEPTH` | `0` | Maximum requests allowed to wait in the scheduler queue before new ones are rejected with HTTP 429 (`queue_full`). `0` = unbounded. |
 | `--max-prefill-chunk <N>` | `FOX_MAX_PREFILL_CHUNK` | `512` | Maximum prompt tokens prefilled per request per scheduler step. Chunking a long prompt lets it interleave with other requests' token generation instead of blocking the engine loop for the whole prefill. `0` disables chunking (single-shot). |
 | `--context-shift <BOOL>` | `FOX_CONTEXT_SHIFT` | `true` | When a conversation fills the context window, discard the oldest KV window and keep generating instead of stopping the request with `length`. Automatically skipped for recurrent/hybrid models whose KV cache cannot shift. Pass `--context-shift false` to disable. |
 | `--context-keep <N>` | `FOX_CONTEXT_KEEP` | `0` | Tokens preserved at the front (BOS + system prompt) when the context is rolled. Only meaningful with `--context-shift true`. |
 | `--speculative <BOOL>` | `FOX_SPECULATIVE` | `false` | N-gram / prompt-lookup speculative decoding: verify several guessed tokens per forward pass on single-request decode steps. Output is unchanged — only speed. Fastest on repetitive output (code, JSON, RAG). Skipped while a request uses guided decoding. |
 | `--spec-ngram <N>` | `FOX_SPEC_NGRAM` | `2` | Suffix length matched against the request's history when speculating. |
 | `--spec-draft-len <N>` | `FOX_SPEC_DRAFT_LEN` | `4` | Maximum draft tokens proposed per speculative step. |
+| `--draft-model <NAME>` | `FOX_DRAFT_MODEL` | — | Name/path of a smaller model to use as the speculative-decoding draft proposer instead of n-gram lookup — generalizes speculation to any text, not just repetitive output. Requires `--speculative true` (ignored with a startup warning otherwise). The draft and target must share the same tokenizer — checked at load time, fails loudly on mismatch. Loaded once alongside the target and kept resident for the process lifetime; not subject to LRU eviction or VRAM budgeting — size both models to fit. `--spec-ngram` is ignored in this mode. |
 | `--gpu-memory-fraction <F>` | `FOX_GPU_MEMORY_FRACTION` | `0.85` | Fraction of GPU VRAM reserved for the KV cache. Must be between 0.0 and 1.0. The remaining memory is left for model weights and other allocations. |
 | `--type-kv <TYPE>` | `FOX_TYPE_KV` | `f16` | KV cache element type for both K and V: `f16`, `q8_0`, or `q4_0`. |
 | `--type-k <TYPE>` | `FOX_TYPE_K` | — | Override K cache type independently (same values as `--type-kv`). Takes precedence over `--type-kv` for the K cache. |
@@ -71,6 +73,7 @@ fox serve --json-logs --port 8080 --max-models 2 --keep-alive-secs 600
 | Flag | Env variable | Default | Description |
 |------|---|---|---|
 | `--system-prompt <TEXT>` | `FOX_SYSTEM_PROMPT` | `"You are a helpful assistant."` | Default system prompt injected at the start of every conversation that does not already include one. Pass an empty string (`""`) to disable injection. |
+| `--tool-call-parser <auto\|generic\|hermes\|mistral\|llama3>` | `FOX_TOOL_CALL_PARSER` | `auto` | Which format to parse tool calls from the model's raw output. `auto` picks `hermes` when the loaded model's own chat template natively formats tool calls (`<tool_call>` tags — Hermes/Qwen tool-use templates), `mistral` via a `[TOOL_CALLS]` marker (handles both the classic JSON-array wire format and the newer per-call `name[ARGS]{...}` format), `generic` (fox's original prompt-injected JSON) otherwise. `llama3` (`{"name":..,"parameters":..}`, optionally `<|python_tag|>`-prefixed) is explicit-opt-in only — most GGUF chat templates for Llama3 models don't retain a detectable tool-call convention, so `auto` never selects it. |
 
 ### Multi-GPU
 

@@ -121,9 +121,12 @@ async fn run_one(
         model_name.to_string(),
         None,
         EngineOptions {
-            speculative, // the knob under test
+            speculative: speculative.map(|(ngram, draft_len)| {
+                crate::engine::SpeculativeConfig::Ngram { ngram, draft_len }
+            }),
             ..Default::default()
         },
+        None,
     ));
 
     let messages = vec![
@@ -161,7 +164,9 @@ async fn run_one(
         sampling,
         tx,
     );
-    engine.submit_request(req);
+    engine
+        .submit_request(req)
+        .expect("submit: single request against a freshly-sized queue should never be rejected");
 
     let mut text = String::new();
     let mut gen_tokens = 0usize;

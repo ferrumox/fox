@@ -21,6 +21,10 @@ pub struct AppState {
     pub primary_model: String,
     /// Injected as the first message when no system message is present.
     pub system_prompt: Option<String>,
+    /// Which format to parse tool calls from: `auto` (default), `generic`, `hermes`.
+    /// `auto` picks Hermes when the loaded model's own chat template natively
+    /// formats tool calls, generic prompt-based parsing otherwise.
+    pub tool_call_parser: String,
     /// Unix timestamp (seconds) when the server started.
     pub started_at: u64,
     /// Directory where `.gguf` model files are stored.
@@ -33,6 +37,7 @@ pub struct AppState {
     pub api_key: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn router(
     registry: Arc<ModelRegistry>,
     primary_model: String,
@@ -41,6 +46,7 @@ pub fn router(
     models_dir: PathBuf,
     hf_token: Option<String>,
     api_key: Option<String>,
+    tool_call_parser: String,
 ) -> Router {
     let state = AppState {
         registry,
@@ -51,6 +57,7 @@ pub fn router(
         digest_cache: Arc::new(Mutex::new(HashMap::new())),
         hf_token,
         api_key,
+        tool_call_parser,
     };
 
     Router::new()

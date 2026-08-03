@@ -19,6 +19,29 @@ pub enum AppError {
     ModelLoadFailed(String),
     EmbeddingFailed(String),
     InternalError(String),
+    /// The scheduler's waiting queue is full (`--max-queue-depth`).
+    ServerBusy(String),
+    /// The request needs more KV blocks than the pool will ever have, even empty.
+    RequestTooLarge(String),
+}
+
+impl From<crate::scheduler::SubmitError> for AppError {
+    fn from(e: crate::scheduler::SubmitError) -> Self {
+        match e {
+            crate::scheduler::SubmitError::QueueFull { .. } => AppError::ServerBusy(e.to_string()),
+            crate::scheduler::SubmitError::TooLarge { .. } => {
+                AppError::RequestTooLarge(e.to_string())
+            }
+        }
+    }
+}
+
+/// The metric label to record for a rejected submission.
+pub fn rejection_reason_label(e: &crate::scheduler::SubmitError) -> &'static str {
+    match e {
+        crate::scheduler::SubmitError::QueueFull { .. } => "queue_full",
+        crate::scheduler::SubmitError::TooLarge { .. } => "too_large",
+    }
 }
 
 impl IntoResponse for AppError {
@@ -53,6 +76,18 @@ impl IntoResponse for AppError {
                 m,
                 "server_error",
                 "internal_error",
+            ),
+            AppError::ServerBusy(m) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                m,
+                "server_error",
+                "queue_full",
+            ),
+            AppError::RequestTooLarge(m) => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                m,
+                "invalid_request_error",
+                "request_too_large",
             ),
         };
         (

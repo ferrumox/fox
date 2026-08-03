@@ -36,7 +36,7 @@ use anyhow::anyhow;
 use crate::engine::ffi;
 #[cfg(not(fox_stub))]
 use crate::engine::model::{
-    InferenceRequestForModel, Logits, Model, ModelConfig, ModelInfo, PrefillStep,
+    InferenceRequestForModel, Logits, Model, ModelConfig, ModelInfo, NativeToolFormat, PrefillStep,
 };
 
 /// SentencePiece uses U+2581 (▁) for word boundaries.
@@ -337,6 +337,11 @@ pub struct LlamaCppModel {
     /// Created lazily on the first constrained sample and freed via `free_grammar` on
     /// every terminal path (so they never leak). Empty unless a request set a grammar.
     pub(super) grammars: dashmap::DashMap<u64, GrammarSampler>,
+    /// Lifetime count of batch-size-bisection retries triggered by `llama_decode`
+    /// returning `1` ("no KV slot for batch") in `do_prefill`/`do_decode`. Surfaced
+    /// via `Model::bisection_retry_count()` and diffed into a Prometheus counter in
+    /// `run_loop`, same pattern as `spec_proposed`/`spec_accepted`.
+    pub(super) decode_bisection_retries: std::sync::atomic::AtomicU64,
 }
 
 #[cfg(not(fox_stub))]
@@ -552,6 +557,7 @@ impl LlamaCppModel {
             owns_model: true,
             chat_env: std::sync::OnceLock::new(),
             grammars: dashmap::DashMap::new(),
+            decode_bisection_retries: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -626,6 +632,7 @@ impl LlamaCppModel {
             owns_model: false, // weights are owned by the original LlamaCppModel
             chat_env: std::sync::OnceLock::new(),
             grammars: dashmap::DashMap::new(),
+            decode_bisection_retries: std::sync::atomic::AtomicU64::new(0),
         })
     }
 }
@@ -686,8 +693,27 @@ impl Model for LlamaCppModel {
         &self,
         messages: &[(String, String)],
         enable_thinking: bool,
+        tools: Option<&serde_json::Value>,
     ) -> Result<Vec<i32>> {
-        self.build_prompt_tokens_impl(messages, enable_thinking)
+        self.build_prompt_tokens_impl(messages, enable_thinking, tools)
+    }
+
+    fn native_tool_call_format(&self) -> Option<NativeToolFormat> {
+        // Detected from the model's OWN chat template, never its name — same
+        // principle as `reasoning_delimiters`/`supports_thinking` above. Hermes and
+        // Qwen tool-use templates instruct the model to wrap tool calls in
+        // `<tool_call>...</tool_call>`; Mistral's instructs the `[TOOL_CALLS]`
+        // marker. A model without either marker in its template gets fox's generic
+        // prompt-injected tool listing instead. Llama3 is deliberately not detected
+        // here — see `NativeToolFormat`'s doc comment.
+        let t = self.raw_chat_template()?;
+        if t.contains("<tool_call>") {
+            Some(NativeToolFormat::Hermes)
+        } else if t.contains("[TOOL_CALLS]") {
+            Some(NativeToolFormat::Mistral)
+        } else {
+            None
+        }
     }
 
     fn reasoning_delimiters(&self) -> Option<(String, String)> {
@@ -849,10 +875,28 @@ impl Model for LlamaCppModel {
         &self,
         _req_id: u64,
         request: &InferenceRequestForModel,
-        ngram: usize,
+        drafts: Vec<i32>,
+    ) -> Result<Vec<Logits>> {
+        self.do_speculative_decode(request, drafts)
+    }
+
+    fn draft_propose(
+        &self,
+        seq_id: i32,
+        new_tokens: &[i32],
+        base_pos: i32,
         draft_len: usize,
-    ) -> Result<(Vec<Logits>, usize)> {
-        self.do_speculative_decode(request, ngram, draft_len)
+    ) -> Vec<i32> {
+        self.do_draft_propose(seq_id, new_tokens, base_pos, draft_len)
+    }
+
+    fn vocab_fingerprint(&self) -> u64 {
+        self.compute_vocab_fingerprint()
+    }
+
+    fn bisection_retry_count(&self) -> u64 {
+        self.decode_bisection_retries
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn embedding_dim(&self) -> usize {

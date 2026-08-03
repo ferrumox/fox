@@ -29,17 +29,24 @@ pub fn now_rfc3339() -> String {
 pub fn ollama_done_reason(reason: &Option<StopReason>) -> String {
     match reason {
         Some(StopReason::Length) => "length".to_string(),
+        Some(StopReason::EngineError) => "error".to_string(),
         _ => "stop".to_string(),
     }
 }
 
 /// Convert a `StopReason` to the OpenAI `finish_reason` string.
+///
+/// `"error"` is a fox-specific extension (not part of the OpenAI spec) for a request
+/// that failed mid-generation (e.g. a `llama_decode` failure) — there is no existing
+/// standard finish_reason for that, and returning `"stop"`/`"length"` would misreport
+/// a crash as a normal completion.
 pub fn finish_reason_str(reason: &StopReason) -> &'static str {
     match reason {
         StopReason::Eos => "stop",
         StopReason::Length => "length",
         StopReason::Preempt => "stop",
         StopReason::StopSequence => "stop",
+        StopReason::EngineError => "error",
     }
 }
 

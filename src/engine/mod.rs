@@ -19,9 +19,20 @@ use crate::metrics::Metrics;
 use crate::scheduler::InferenceRequest;
 
 use self::model::Model;
+use self::speculative::{DraftModelProposer, NgramProposer, Proposer};
 
 /// SentencePiece uses U+2581 (▁) for word boundaries. Replace with space so words don't concatenate.
 const SPM_SPACE: char = '\u{2581}';
+
+/// Which proposer to use for speculative decoding.
+#[derive(Debug, Clone, Copy)]
+pub enum SpeculativeConfig {
+    /// N-gram / prompt-lookup (0.15): match the request's own recent history.
+    Ngram { ngram: usize, draft_len: usize },
+    /// Draft-model (0.16): a second, smaller resident model predicts ahead. Requires
+    /// `InferenceEngine::new`'s `draft_model` parameter to be `Some`.
+    Draft { draft_len: usize },
+}
 
 /// Tunable engine behaviors. `Default` disables everything (single-shot prefill,
 /// no context rolling, no speculation) — what tests and benches want.
@@ -32,8 +43,8 @@ pub struct EngineOptions {
     /// Context rolling on full: `Some(n_keep)` keeps generating past `n_ctx`,
     /// preserving the first `n_keep` tokens. Shiftable (non-recurrent) caches only.
     pub context_shift: Option<usize>,
-    /// N-gram speculation for single-request decode steps: `Some((ngram, draft_len))`.
-    pub speculative: Option<(usize, usize)>,
+    /// Speculative decoding for single-request decode steps, if enabled.
+    pub speculative: Option<SpeculativeConfig>,
 }
 
 /// Main inference engine coordinating scheduler, model, and KV cache.
@@ -53,10 +64,12 @@ pub struct InferenceEngine {
     supports_prefix_cache: bool,
     /// Text forms of the model's EOS and EOT tokens, used as base stop sequences.
     model_stop_tokens: Vec<String>,
-    // See `EngineOptions` for the semantics of these three.
+    // See `EngineOptions` for the semantics of these two.
     max_prefill_chunk: usize,
     context_shift: Option<usize>,
-    speculative: Option<(usize, usize)>,
+    /// Resolved proposer (n-gram or draft-model) + draft_len, built from
+    /// `EngineOptions::speculative` at construction time.
+    speculative: Option<(Arc<dyn Proposer>, usize)>,
     /// Lifetime draft tokens proposed by speculation (for the acceptance metrics).
     spec_proposed: AtomicU64,
     /// Lifetime draft tokens the target model accepted.
@@ -64,6 +77,9 @@ pub struct InferenceEngine {
 }
 
 impl InferenceEngine {
+    /// `draft_model` is the second, smaller model to use when
+    /// `options.speculative == Some(SpeculativeConfig::Draft { .. })`; ignored (and
+    /// may be `None`) otherwise.
     pub fn new(
         model: Arc<dyn Model>,
         scheduler: Arc<crate::scheduler::Scheduler>,
@@ -71,6 +87,7 @@ impl InferenceEngine {
         model_name: String,
         metrics: Option<Arc<Metrics>>,
         options: EngineOptions,
+        draft_model: Option<Arc<dyn Model>>,
     ) -> Self {
         let supports_prefix_cache = model.supports_seq_copy();
         if supports_prefix_cache {
@@ -84,6 +101,20 @@ impl InferenceEngine {
         if !model_stop_tokens.is_empty() {
             tracing::info!("model stop tokens: {:?}", model_stop_tokens);
         }
+        let speculative = options.speculative.map(|cfg| match cfg {
+            SpeculativeConfig::Ngram { ngram, draft_len } => {
+                (Arc::new(NgramProposer { ngram }) as Arc<dyn Proposer>, draft_len)
+            }
+            SpeculativeConfig::Draft { draft_len } => {
+                let dm = draft_model
+                    .clone()
+                    .expect("SpeculativeConfig::Draft requires InferenceEngine::new's draft_model to be Some");
+                (
+                    Arc::new(DraftModelProposer::new(dm)) as Arc<dyn Proposer>,
+                    draft_len,
+                )
+            }
+        });
         Self {
             model,
             scheduler,
@@ -96,7 +127,7 @@ impl InferenceEngine {
             model_stop_tokens,
             max_prefill_chunk: options.max_prefill_chunk,
             context_shift: options.context_shift,
-            speculative: options.speculative,
+            speculative,
             spec_proposed: AtomicU64::new(0),
             spec_accepted: AtomicU64::new(0),
         }
@@ -126,8 +157,17 @@ impl InferenceEngine {
         &self,
         messages: &[(String, String)],
         enable_thinking: bool,
+        tools: Option<&serde_json::Value>,
     ) -> anyhow::Result<Vec<i32>> {
-        self.model.build_prompt_tokens(messages, enable_thinking)
+        self.model
+            .build_prompt_tokens(messages, enable_thinking, tools)
+    }
+
+    /// Which tool-call wire format the loaded model's own chat template natively
+    /// speaks, if any (see [`crate::engine::model::NativeToolFormat`]), as opposed to
+    /// needing fox's generic prompt-injected tool listing.
+    pub fn native_tool_call_format(&self) -> Option<crate::engine::model::NativeToolFormat> {
+        self.model.native_tool_call_format()
     }
 
     /// The model's reasoning (open, close) delimiters, resolved to the default
@@ -138,8 +178,18 @@ impl InferenceEngine {
             .unwrap_or_else(|| ("<think>".to_string(), "</think>".to_string()))
     }
 
-    pub fn submit_request(&self, req: InferenceRequest) {
-        self.scheduler.submit(req);
+    pub fn submit_request(
+        &self,
+        req: InferenceRequest,
+    ) -> Result<(), crate::scheduler::SubmitError> {
+        self.scheduler.submit(req)
+    }
+
+    /// Record a rejected request in the `requests_rejected_total{reason}` metric.
+    pub fn record_rejection(&self, reason: &str) {
+        if let Some(m) = &self.metrics {
+            m.requests_rejected_total.with_label_values(&[reason]).inc();
+        }
     }
 
     pub fn next_request_id(&self) -> u64 {

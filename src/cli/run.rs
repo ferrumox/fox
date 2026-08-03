@@ -222,9 +222,15 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         EngineOptions {
             // Roll context on full so long single-shot generations don't stop early.
             context_shift: Some(0),
-            speculative: args.speculative.then_some((2, 4)),
+            speculative: args
+                .speculative
+                .then_some(crate::engine::SpeculativeConfig::Ngram {
+                    ngram: 2,
+                    draft_len: 4,
+                }),
             ..Default::default()
         },
+        None,
     ));
 
     match args.prompt.clone() {
@@ -443,7 +449,9 @@ async fn stream_turn_collecting(
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let req_id = engine.next_request_id();
     let req = InferenceRequest::new(req_id, prompt_tokens, args.max_new_tokens, sampling, tx);
-    engine.submit_request(req);
+    engine
+        .submit_request(req)
+        .expect("submit: single request against a freshly-sized queue should never be rejected");
 
     let stdout = std::io::stdout();
     let mut response = String::new();
@@ -527,7 +535,9 @@ async fn stream_turn(
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let req_id = engine.next_request_id();
     let req = InferenceRequest::new(req_id, prompt_tokens, args.max_new_tokens, sampling, tx);
-    engine.submit_request(req);
+    engine
+        .submit_request(req)
+        .expect("submit: single request against a freshly-sized queue should never be rejected");
 
     // Drive the engine loop in the background for this single request.
     let engine_loop = {

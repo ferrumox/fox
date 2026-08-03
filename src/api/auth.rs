@@ -60,12 +60,14 @@ mod tests {
                     models_dir: PathBuf::from("/tmp"),
                     max_models: 1,
                     max_batch_size: 1,
+                    max_queue_depth: 0,
                     max_prefill_chunk: 0,
                     context_shift: false,
                     context_keep: 0,
                     speculative: false,
                     spec_ngram: 2,
                     spec_draft_len: 4,
+                    draft_model: None,
                     max_context_len: Some(512),
                     block_size: 16,
                     gpu_memory_bytes: 0,
@@ -88,6 +90,7 @@ mod tests {
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
             hf_token: None,
             api_key: api_key.map(str::to_string),
+            tool_call_parser: "auto".to_string(),
         }
     }
 

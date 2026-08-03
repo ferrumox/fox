@@ -87,9 +87,12 @@ impl LlamaCppModel {
     }
 
     /// Render the model's real Jinja chat template (from the GGUF) with `minijinja`,
-    /// threading `enable_thinking`. Returns `None` when the model has no embedded
-    /// template or it fails to render — the caller then falls back to the built-in
-    /// llama.cpp format.
+    /// threading `enable_thinking` and `tools` (OpenAI-shaped tool definitions, so a
+    /// template with native tool-formatting macros — e.g. Hermes/Qwen tool-use
+    /// templates — can render its own tool listing; `tools.function.{name,...}`
+    /// unwraps directly, no transform needed). Returns `None` when the model has no
+    /// embedded template or it fails to render — the caller then falls back to the
+    /// built-in llama.cpp format.
     ///
     /// The `minijinja::Environment` (with the template already parsed) is built once
     /// and cached in `self.chat_env`, so only the *render* runs per request — parsing
@@ -98,6 +101,7 @@ impl LlamaCppModel {
         &self,
         messages: &[(String, String)],
         enable_thinking: bool,
+        tools: Option<&serde_json::Value>,
     ) -> Option<String> {
         let env = self
             .chat_env
@@ -125,12 +129,19 @@ impl LlamaCppModel {
             .map(|(role, content)| context! { role => role, content => content })
             .collect();
 
+        // A template that doesn't reference `tools` (the vast majority of models)
+        // simply ignores this context key — no behavior change for them.
+        let tools_value = tools
+            .map(minijinja::Value::from_serialize)
+            .unwrap_or(minijinja::Value::UNDEFINED);
+
         tmpl.render(context! {
             messages => msgs,
             add_generation_prompt => true,
             enable_thinking => enable_thinking,
             bos_token => bos,
             eos_token => eos,
+            tools => tools_value,
         })
         .ok()
     }
@@ -142,8 +153,9 @@ impl LlamaCppModel {
         &self,
         messages: &[(String, String)],
         enable_thinking: bool,
+        tools: Option<&serde_json::Value>,
     ) -> Result<Vec<i32>> {
-        if let Some(rendered) = self.render_chat_jinja(messages, enable_thinking) {
+        if let Some(rendered) = self.render_chat_jinja(messages, enable_thinking, tools) {
             tracing::debug!(
                 chars = rendered.len(),
                 enable_thinking,
@@ -369,5 +381,66 @@ impl LlamaCppModel {
         }
 
         Err(anyhow!("no chat template could be applied"))
+    }
+
+    /// A hash identifying this model's tokenizer: vocab size, BOS/EOS token ids, and
+    /// every token's piece text. Two models with the same fingerprint share a
+    /// tokenizer — the precondition draft-model speculation requires, since a draft
+    /// token id from a mismatched tokenizer is meaningless input to the target's
+    /// verify batch (silently wrong, not just low-acceptance). One-time cost at load,
+    /// not a hot path, so a plain `DefaultHasher` (no new dependency) is fine.
+    pub(super) fn compute_vocab_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let vocab = self.vocab;
+        let n_vocab = self.config.vocab_size;
+        n_vocab.hash(&mut hasher);
+        self.eos_token.hash(&mut hasher);
+        let bos = unsafe { ffi::llama_vocab_bos(vocab) };
+        bos.hash(&mut hasher);
+        for id in 0..n_vocab as i32 {
+            self.token_to_piece_bytes_impl(id).hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Standalone `minijinja` mechanics test — proves the `tools` context key
+    // (added in 0.16 for native tool-call formatting, e.g. Hermes/Qwen tool-use
+    // templates) actually reaches a template, without needing a real loaded GGUF
+    // model (`render_chat_jinja` itself requires `&LlamaCppModel`).
+    use minijinja::{context, Environment, Value};
+
+    #[test]
+    fn tools_context_key_is_visible_to_a_template() {
+        let mut env = Environment::new();
+        env.add_template(
+            "chat",
+            "{% for tool in tools %}{{ tool.function.name }},{% endfor %}",
+        )
+        .unwrap();
+        let tmpl = env.get_template("chat").unwrap();
+
+        let tools_json = serde_json::json!([
+            {"type": "function", "function": {"name": "get_weather", "parameters": {}}},
+            {"type": "function", "function": {"name": "search", "parameters": {}}},
+        ]);
+        let rendered = tmpl
+            .render(context! { tools => Value::from_serialize(&tools_json) })
+            .unwrap();
+        assert_eq!(rendered, "get_weather,search,");
+    }
+
+    #[test]
+    fn absent_tools_context_key_renders_as_undefined_not_error() {
+        // A template that doesn't reference `tools` at all (the vast majority of
+        // models) must render unaffected when no tools context key is supplied.
+        let mut env = Environment::new();
+        env.add_template("chat", "hello").unwrap();
+        let tmpl = env.get_template("chat").unwrap();
+        let rendered = tmpl.render(context! { tools => Value::UNDEFINED }).unwrap();
+        assert_eq!(rendered, "hello");
     }
 }

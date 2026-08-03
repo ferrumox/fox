@@ -94,17 +94,10 @@ impl Scheduler {
                 break;
             }
 
-            // Could never fit, even into an empty pool: drop it (channel closes)
-            // instead of blocking the queue head forever. API-side limits are 0.16.
-            if self.blocks_needed(&req) > self.kv_cache.total_blocks() {
-                tracing::error!(
-                    request_id = req.id,
-                    needed = self.blocks_needed(&req),
-                    total = self.kv_cache.total_blocks(),
-                    "request larger than the entire KV pool — rejecting"
-                );
-                continue 'admit;
-            }
+            // A request that could never fit, even into an empty pool, is now rejected
+            // synchronously by `Scheduler::submit()` before it ever reaches this queue
+            // (0.16) — it's a static check (prompt + max_new_tokens vs. total pool size)
+            // that doesn't need a scheduler turn. No corresponding check needed here.
 
             // --- Block-level prefix cache lookup ---
             //

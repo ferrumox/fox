@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0]
+
+fox gets **production hardening + native tool calling**: a request now fails fast
+instead of hanging forever when the queue is full or the engine hits an
+unrecoverable error; a recoverable `llama_decode` OOM retries by bisecting the
+batch instead of killing every request in it; tool calls are parsed in the
+model's own native wire format (Hermes/Qwen, Mistral) instead of always falling
+back to fox's generic prompt-injected listing; and speculative decoding
+generalizes beyond repetitive/context-echoing text via an optional draft model.
+
+### Added
+
+- **Backpressure / fail-fast** (`--max-queue-depth` / `FOX_MAX_QUEUE_DEPTH`,
+  default unbounded) — `Scheduler::submit()` is now fallible: a full queue is
+  rejected with HTTP `429` instead of queueing forever, and an oversized request
+  (bigger than the entire KV pool) is rejected synchronously instead of blocking
+  the queue head. A real engine failure now gets a distinct `StopReason::EngineError`
+  and an explicit terminal token on the response channel instead of silently
+  closing it (which used to read as a fake empty `200`).
+- **OOM recovery — batch-size bisection retry** — `do_prefill`/`do_decode` now
+  distinguish `llama_decode`'s return codes instead of treating any non-zero as
+  fatal: `1` ("no KV slot for the batch") retries by splitting the batch in half
+  and decoding each half independently — llama.cpp's own documented mitigation —
+  recursing down to a single request before giving up. `2`/`-1`/`< -1` stay
+  immediately fatal. Observable via the `ferrumox_decode_bisection_retries_total`
+  Prometheus counter plus a `tracing::warn!` per retry.
+- **Hermes, Mistral, and Llama3 tool-call parsers** (`--tool-call-parser
+  auto|generic|hermes|mistral|llama3`, default `auto`) — `tools` is now threaded
+  into the Jinja chat-template render context, so a model whose real template
+  natively formats tool calls (Hermes/Qwen `<tool_call>{...}</tool_call>`,
+  Mistral `[TOOL_CALLS]`) renders and parses its own format instead of fox's
+  generic system-message listing, auto-detected from the model's own template.
+  The Mistral parser handles both real-world wire formats (the classic JSON array
+  and the newer per-call `name[ARGS]{...}`). Llama3 is explicit-opt-in only — most
+  GGUF chat templates for Llama3 models strip the tool-calling block entirely, so
+  there's no reliable template signal to auto-detect it by. Models without a
+  detected/selected native format keep the original generic prompt-based JSON
+  parsing as the fallback.
+- **Draft-model speculative decoding** (`--draft-model <name>`) — generalizes
+  0.15's n-gram speculation beyond repetitive/context-echoing output via a second,
+  smaller resident model proposing tokens for the target to verify. Requires
+  `--speculative true` (ignored with a startup warning otherwise); the draft and
+  target must share the same tokenizer, checked via a vocab-fingerprint at load
+  time and failing loudly on mismatch. Loaded once alongside the target and kept
+  resident for the process lifetime — not subject to LRU eviction or VRAM
+  budgeting in this release, so both models need to be sized to fit together.
+  `--spec-ngram` is ignored in this mode. Landed alongside a `Proposer` trait
+  extraction so n-gram and draft-model speculation share the same verify/accept
+  machinery.
+
+
+
 ## [0.15.1]
 
 The bug-hunt release. Exercising a **real server end-to-end on the target machine**

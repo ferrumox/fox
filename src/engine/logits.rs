@@ -189,6 +189,7 @@ impl InferenceEngine {
                             Some(StopReason::Length) => "length",
                             Some(StopReason::StopSequence) => "stop",
                             Some(StopReason::Preempt) => "preempt",
+                            Some(StopReason::EngineError) => "error",
                             None => "unknown",
                         };
                         m.requests_total.with_label_values(&[reason_label]).inc();
@@ -198,6 +199,9 @@ impl InferenceEngine {
 
                     // Cache the KV state for potential prefix reuse on future identical prompts.
                     // Disabled for models that don't support llama_memory_seq_cp (e.g. Mamba/hybrid).
+                    // `EngineError` is deliberately NOT in this list: a request that failed
+                    // mid-decode has a partial/unreliable KV state that must never become a
+                    // reusable prefix for a future request.
                     let should_clear = if self.supports_prefix_cache
                         && matches!(
                             stop_reason,

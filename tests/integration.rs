@@ -250,6 +250,7 @@ async fn multi_model_each_request_routes_to_correct_engine() {
         dir.path().to_path_buf(),
         None,
         None,
+        "auto".to_string(),
     );
 
     let resp_a = post_json(
@@ -1244,4 +1245,65 @@ async fn thinking_ollama_generate_streaming_no_tags_in_response() {
         !response.contains("thought"),
         "stream response must not contain thinking text"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Backpressure — queue-full rejection (0.16)
+//
+// Regression test for a real bug: before 0.16, a rejected request's response
+// channel was dropped with no message sent, which the HTTP handler read as a
+// closed channel and reported as a fake HTTP 200 with empty content instead of
+// an error. `Scheduler::submit()` now rejects synchronously (before the request
+// ever gets a channel), so a full queue must produce a real 429, not a 200.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn chat_request_body() -> serde_json::Value {
+    serde_json::json!({
+        "model": "stub",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "stream": false,
+        "max_tokens": 4,
+    })
+}
+
+#[tokio::test]
+async fn queue_full_returns_429_not_a_fake_200() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, entry) = make_test_state_with_queue_depth("stub", dir.path(), 1);
+    // Freeze processing so the first request is never dequeued — deterministic,
+    // no race with the stub instantly finishing it (same technique as the
+    // registry's own "busy model" unit test).
+    entry.abort_loop_for_test();
+    let app = make_router(&state);
+
+    // First request fills the one queue slot. Don't await it to completion — with
+    // the loop aborted it would hang forever waiting for tokens that never come.
+    let app1 = app.clone();
+    let first = tokio::spawn(async move {
+        let _ = post_json(app1, "/v1/chat/completions", chat_request_body()).await;
+    });
+    // Let the spawned task run up to its blocking `rx.recv().await` point
+    // (everything before that — model resolution, prompt prep, submit_request —
+    // is synchronous, so a handful of cooperative yields is enough; this is
+    // deterministic scheduling, not a timing race).
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !first.is_finished(),
+        "first request should be stuck waiting on the aborted engine loop"
+    );
+
+    // Second request must be rejected synchronously with a real error, not a
+    // fake empty success.
+    let resp = post_json(app.clone(), "/v1/chat/completions", chat_request_body()).await;
+    assert_eq!(resp.status(), 429);
+    let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert_eq!(v["error"]["code"], "queue_full");
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("queue full"));
+
+    first.abort();
 }

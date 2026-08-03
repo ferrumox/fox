@@ -156,12 +156,14 @@ mod tests {
             models_dir: dir.path().to_path_buf(),
             max_models: 4,
             max_batch_size: 4,
+            max_queue_depth: 0,
             max_prefill_chunk: 0,
             context_shift: false,
             context_keep: 0,
             speculative: false,
             spec_ngram: 2,
             spec_draft_len: 4,
+            draft_model: None,
             max_context_len: Some(512),
             block_size: 16,
             gpu_memory_bytes: 4 * 1024 * 1024,
@@ -184,6 +186,7 @@ mod tests {
             dir.path().to_path_buf(),
             None,
             None,
+            "auto".to_string(),
         );
         let resp = get_req(app, "/v1/models").await;
         assert_eq!(resp.status(), 200);

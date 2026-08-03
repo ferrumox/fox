@@ -91,8 +91,23 @@ impl ModelRegistry {
         // Evict if we are at capacity before loading.
         self.evict_lru_if_needed();
 
+        // Resolve the draft model's (stem, path) here — where `&self` is available —
+        // rather than threading `&ModelRegistry` into the free `load_model` function.
+        // Only takes effect alongside `--speculative true`; a draft model configured
+        // without it would silently load an unused second model, so warn and skip.
+        let draft = match &self.config.draft_model {
+            Some(name) if self.config.speculative => Some(self.resolve_model_name(name)?),
+            Some(_) => {
+                tracing::warn!(
+                    "--draft-model is set but --speculative is false — ignoring, no draft model will be loaded"
+                );
+                None
+            }
+            None => None,
+        };
+
         // Load the model (FFI is blocking, so we use spawn_blocking inside).
-        let entry = Arc::new(load_model(&stem, &path, &self.config).await?);
+        let entry = Arc::new(load_model(&stem, &path, &self.config, draft).await?);
         self.engines.insert(stem.clone(), entry.clone());
         self.last_used.insert(stem.clone(), Instant::now());
         if let Ok(mut lru) = self.lru.lock() {
@@ -264,12 +279,14 @@ mod tests {
             models_dir: dir.to_path_buf(),
             max_models,
             max_batch_size: 4,
+            max_queue_depth: 0,
             max_prefill_chunk: 0,
             context_shift: false,
             context_keep: 0,
             speculative: false,
             spec_ngram: 2,
             spec_draft_len: 4,
+            draft_model: None,
             max_context_len: Some(512),
             block_size: 16,
             gpu_memory_bytes: 4 * 1024 * 1024,
@@ -464,7 +481,7 @@ mod tests {
         // a deterministic "busy" state (no race with the stub finishing it).
         entry.loop_handle.abort();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        entry.engine.submit_request(InferenceRequest::new(
+        let _ = entry.engine.submit_request(InferenceRequest::new(
             1,
             vec![1, 2, 3],
             4,

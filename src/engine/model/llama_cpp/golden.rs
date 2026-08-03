@@ -17,6 +17,7 @@
 // cache another tiny GGUF in that job and pass it through, per the support matrix.
 
 use crate::engine::model::{InferenceRequestForModel, LlamaCppModel, Logits, Model};
+use crate::engine::speculative::Proposer;
 use crate::model_registry::kv_type;
 
 /// Load the model named by FOX_GOLDEN_MODEL, or `None` (→ the test skips).
@@ -128,7 +129,7 @@ fn golden_chat_template_renders() {
     ];
 
     let first = m
-        .build_prompt_tokens(&messages, false)
+        .build_prompt_tokens(&messages, false, None)
         .expect("build_prompt_tokens should succeed");
     assert!(
         !first.is_empty(),
@@ -137,7 +138,7 @@ fn golden_chat_template_renders() {
 
     // Second call hits the cached environment — output must be identical.
     let second = m
-        .build_prompt_tokens(&messages, false)
+        .build_prompt_tokens(&messages, false, None)
         .expect("second build_prompt_tokens should succeed");
     assert_eq!(
         first, second,
@@ -577,9 +578,11 @@ fn golden_speculative_matches_greedy() {
     let mut accepted_total = 0usize;
     while spec.len() < steps {
         let last = *spec.last().unwrap();
-        let (committed, _proposed) = m
-            .do_speculative_decode(&mk_req(1, Some(last), live + 1, spec.clone()), 2, 4)
-            .unwrap();
+        let req = mk_req(1, Some(last), live + 1, spec.clone());
+        let mut seq = req.prompt_tokens.clone();
+        seq.extend_from_slice(&req.generated_token_ids);
+        let drafts = crate::engine::speculative::propose_ngram(&seq, 2, 4);
+        let committed = m.do_speculative_decode(&req, drafts).unwrap();
         assert!(!committed.is_empty(), "must commit at least one token");
         accepted_total += committed.len() - 1; // committed = accepted + 1
         live += committed.len();
@@ -594,6 +597,120 @@ fn golden_speculative_matches_greedy() {
     assert!(
         accepted_total > 0,
         "n-gram speculation must accept at least one draft on a repetitive prompt"
+    );
+}
+
+/// Draft-model speculative decoding (0.16) must be output-exact, same guarantee as
+/// n-gram speculation above — the verify step samples from the TARGET's own logits
+/// regardless of proposer source. Self-speculation (the same model loaded twice, once
+/// as target and once as "draft") is the strongest possible exactness check: any
+/// divergence from greedy proves a KV-resync/rollback bug in `DraftModelProposer`
+/// itself, not a modeling-quality issue (a real, smaller draft would legitimately
+/// accept less often, but never cause a WRONG committed token).
+#[test]
+fn golden_draft_model_speculative_matches_greedy() {
+    let m = golden!();
+    let path = std::env::var("FOX_GOLDEN_MODEL").expect("golden!() already checked this");
+    let draft = LlamaCppModel::load(
+        std::path::Path::new(&path),
+        1,
+        Some(2048),
+        24 * 1024 * 1024 * 1024,
+        0.9,
+        kv_type::F16,
+        kv_type::F16,
+        0,
+        0,
+        &[],
+        false,
+    )
+    .expect("draft (self-speculation) load failed");
+
+    // The load-time precondition draft-model speculation requires: same tokenizer.
+    assert_eq!(
+        m.vocab_fingerprint(),
+        draft.vocab_fingerprint(),
+        "the same model loaded twice must have identical vocab fingerprints"
+    );
+
+    let draft: std::sync::Arc<dyn Model> = std::sync::Arc::new(draft);
+    let proposer = crate::engine::speculative::DraftModelProposer::new(draft);
+
+    let prompt = m
+        .tokenize("1 2 3 1 2 3 1 2 3 1 2 3 1 2 3 1 2 3 1 2 3")
+        .unwrap();
+    let steps = 24usize;
+
+    let mk_req = |seq_id: i32, last: Option<i32>, ctx_len: usize, generated: Vec<i32>| {
+        InferenceRequestForModel {
+            id: 1,
+            prompt_tokens: prompt.clone(),
+            last_token: last,
+            generated_tokens: generated.len(),
+            max_new_tokens: 256,
+            context_len: ctx_len,
+            kv_seq_id: seq_id,
+            temperature: 0.0, // greedy → deterministic reference
+            top_p: 1.0,
+            top_k: 0,
+            repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            seed: None,
+            generated_token_ids: generated,
+            skip_prefix_tokens: 0,
+            prefix_seq_id: None,
+            prefill_pos: 0,
+            grammar: None,
+            min_p: 0.0,
+            min_tokens: 0,
+            logit_bias: None,
+        }
+    };
+
+    // ── Reference: plain one-token-at-a-time decode on sequence 0. ──
+    let pre0 = m
+        .do_prefill(&[1], &[mk_req(0, None, 0, vec![])], 0)
+        .unwrap();
+    let mut plain = vec![pre0[0].logits.clone().unwrap().sampled_token];
+    let mut live = prompt.len();
+    while plain.len() < steps {
+        let last = *plain.last().unwrap();
+        let out = m
+            .do_decode(&[1], &[mk_req(0, Some(last), live + 1, plain.clone())])
+            .unwrap();
+        plain.push(out[0].1.sampled_token);
+        live += 1;
+    }
+
+    // ── Draft-model speculative decode on sequence 1: same prompt, same sampler. ──
+    let pre1 = m
+        .do_prefill(&[1], &[mk_req(1, None, 0, vec![])], 0)
+        .unwrap();
+    let mut spec = vec![pre1[0].logits.clone().unwrap().sampled_token];
+    let mut live = prompt.len();
+    let mut accepted_total = 0usize;
+    while spec.len() < steps {
+        let last = *spec.last().unwrap();
+        let req = mk_req(1, Some(last), live + 1, spec.clone());
+        let mut seq = req.prompt_tokens.clone();
+        seq.extend_from_slice(&req.generated_token_ids);
+        let drafts = proposer.propose(req.id, &seq, 4);
+        let committed = m.do_speculative_decode(&req, drafts).unwrap();
+        assert!(!committed.is_empty(), "must commit at least one token");
+        accepted_total += committed.len() - 1; // committed = accepted + 1
+        live += committed.len();
+        spec.extend(committed.iter().map(|l| l.sampled_token));
+    }
+    spec.truncate(steps);
+
+    assert_eq!(
+        plain, spec,
+        "draft-model speculative output must be byte-identical to plain decode"
+    );
+    assert!(
+        accepted_total > 0,
+        "self-speculation (identical target/draft) should accept at least one draft"
     );
 }
 

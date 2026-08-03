@@ -121,6 +121,10 @@ pub enum StopReason {
     Preempt,
     /// A user-supplied stop string was found in the output.
     StopSequence,
+    /// Prefill/decode failed (e.g. `llama_decode` error, KV cache exhaustion mid-step).
+    /// Distinct from `Length` so clients and metrics can tell a real engine failure
+    /// apart from a normal max-tokens stop.
+    EngineError,
 }
 
 /// Request state machine.

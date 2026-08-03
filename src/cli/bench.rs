@@ -144,6 +144,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         model_name.clone(),
         None,
         EngineOptions::default(),
+        None,
     ));
 
     // ── Tokenize prompt ──────────────────────────────────────────────────────
@@ -212,7 +213,9 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         );
 
         let submit_time = Instant::now();
-        engine.submit_request(req);
+        engine.submit_request(req).expect(
+            "submit: single request against a freshly-sized queue should never be rejected",
+        );
 
         let mut first_token_elapsed: Option<f64> = None;
         let mut gen_tokens: usize = 0;

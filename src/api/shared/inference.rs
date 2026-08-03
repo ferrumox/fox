@@ -247,6 +247,29 @@ pub fn tools_system_message(tools: &[Tool], required: bool, specific: Option<&st
     format!("You have access to the following tools:\n{json}\n\n{usage}\n\n{constraint}")
 }
 
+/// Build a validated `ToolCall` from a name + arguments value, rejecting names not
+/// present in `known_tools` (when provided). Shared by every tool-call output format
+/// (generic JSON, Hermes tags, …) so the whitelist/id-generation logic lives once.
+fn build_tool_call(
+    name: &str,
+    args: &serde_json::Value,
+    known_tools: Option<&[Tool]>,
+) -> Option<ToolCall> {
+    if let Some(tools) = known_tools {
+        if !tools.iter().any(|t| t.function.name == name) {
+            return None;
+        }
+    }
+    Some(ToolCall {
+        id: format!("call_{}", &Uuid::new_v4().to_string()[..8]),
+        call_type: "function".to_string(),
+        function: ToolCallFunction {
+            name: name.to_string(),
+            arguments: args.to_string(),
+        },
+    })
+}
+
 /// Try to parse `response` text as a JSON tool call.
 /// Returns `(content, tool_calls)`.
 pub fn try_parse_tool_call(
@@ -264,21 +287,10 @@ pub fn try_parse_tool_call(
         value.get("name").and_then(|n| n.as_str()),
         value.get("arguments"),
     ) {
-        // Validate name against known tools when provided.
-        if let Some(tools) = known_tools {
-            if !tools.iter().any(|t| t.function.name == name) {
-                return (response.to_string(), None);
-            }
-        }
-        let call = ToolCall {
-            id: format!("call_{}", &Uuid::new_v4().to_string()[..8]),
-            call_type: "function".to_string(),
-            function: ToolCallFunction {
-                name: name.to_string(),
-                arguments: args.to_string(),
-            },
+        return match build_tool_call(name, args, known_tools) {
+            Some(call) => (String::new(), Some(vec![call])),
+            None => (response.to_string(), None),
         };
-        return (String::new(), Some(vec![call]));
     }
 
     // Pattern: {"tool_calls": [...]}
@@ -286,22 +298,9 @@ pub fn try_parse_tool_call(
         let tool_calls: Vec<ToolCall> = calls
             .iter()
             .filter_map(|c| {
-                let name = c.get("name")?.as_str()?.to_string();
-                // Validate name if known_tools provided.
-                if let Some(tools) = known_tools {
-                    if !tools.iter().any(|t| t.function.name == name) {
-                        return None;
-                    }
-                }
-                let args = c.get("arguments")?.to_string();
-                Some(ToolCall {
-                    id: format!("call_{}", &Uuid::new_v4().to_string()[..8]),
-                    call_type: "function".to_string(),
-                    function: ToolCallFunction {
-                        name,
-                        arguments: args,
-                    },
-                })
+                let name = c.get("name")?.as_str()?;
+                let args = c.get("arguments")?;
+                build_tool_call(name, args, known_tools)
             })
             .collect();
         if !tool_calls.is_empty() {
@@ -310,6 +309,198 @@ pub fn try_parse_tool_call(
     }
 
     (response.to_string(), None)
+}
+
+/// One or more `<tool_call>{"name":..,"arguments":..}</tool_call>` blocks — the
+/// output format Hermes/Qwen tool-use chat templates instruct the model to emit.
+/// Parallel tool calls are native to the format (one block per call). Text outside
+/// the blocks (leading/trailing prose) becomes the returned content. A block with
+/// invalid JSON, or naming a tool not in `known_tools`, is silently dropped — same
+/// whitelist behavior as the generic parser.
+fn parse_hermes_tool_calls(
+    response: &str,
+    known_tools: Option<&[Tool]>,
+) -> (String, Option<Vec<ToolCall>>) {
+    const OPEN: &str = "<tool_call>";
+    const CLOSE: &str = "</tool_call>";
+
+    let mut calls = Vec::new();
+    let mut content = String::new();
+    let mut rest = response;
+
+    while let Some(start) = rest.find(OPEN) {
+        content.push_str(&rest[..start]);
+        let after_open = &rest[start + OPEN.len()..];
+        let Some(end) = after_open.find(CLOSE) else {
+            // Unterminated block (generation cut off) — keep it out of content and stop.
+            rest = "";
+            break;
+        };
+        let block = after_open[..end].trim();
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(block) {
+            if let (Some(name), Some(args)) = (
+                value.get("name").and_then(|n| n.as_str()),
+                value.get("arguments"),
+            ) {
+                if let Some(call) = build_tool_call(name, args, known_tools) {
+                    calls.push(call);
+                }
+            }
+        }
+        rest = &after_open[end + CLOSE.len()..];
+    }
+    content.push_str(rest);
+
+    if calls.is_empty() {
+        (response.to_string(), None)
+    } else {
+        (content.trim().to_string(), Some(calls))
+    }
+}
+
+/// One or more Mistral-style `[TOOL_CALLS]`-marked calls. Two real wire formats
+/// exist depending on the model/template version, so both are attempted:
+///
+/// 1. Classic (documented at docs.mistral.ai, vLLM's `--tool-call-parser mistral`):
+///    a single `[TOOL_CALLS]` marker followed by a JSON array —
+///    `[TOOL_CALLS] [{"name": "...", "arguments": {...}}]`.
+/// 2. Newer (the currently-vendored llama.cpp's own PEG chat parser): one marker
+///    per call, each followed by `<name>[ARGS]<json-object>` —
+///    `[TOOL_CALLS]get_weather[ARGS]{"city": "Madrid"}`, repeated for parallel calls.
+///
+/// Text before the first marker becomes the returned content. No marker, or neither
+/// shape parses, falls through to passthrough (same behavior as the other parsers).
+fn parse_mistral_tool_calls(
+    response: &str,
+    known_tools: Option<&[Tool]>,
+) -> (String, Option<Vec<ToolCall>>) {
+    const MARKER: &str = "[TOOL_CALLS]";
+    const ARGS: &str = "[ARGS]";
+
+    let Some(start) = response.find(MARKER) else {
+        return (response.to_string(), None);
+    };
+    let before = response[..start].trim().to_string();
+    let after_first = response[start + MARKER.len()..].trim();
+
+    // Attempt 1: classic JSON-array format directly after the (single) marker.
+    if let Ok(serde_json::Value::Array(items)) =
+        serde_json::from_str::<serde_json::Value>(after_first)
+    {
+        let calls: Vec<ToolCall> = items
+            .iter()
+            .filter_map(|item| {
+                let name = item.get("name")?.as_str()?;
+                let args = item.get("arguments")?;
+                build_tool_call(name, args, known_tools)
+            })
+            .collect();
+        if !calls.is_empty() {
+            return (before, Some(calls));
+        }
+    }
+
+    // Attempt 2: repeated `[TOOL_CALLS]name[ARGS]{...}` per call.
+    let mut calls = Vec::new();
+    for segment in response[start..].split(MARKER).skip(1) {
+        let Some(args_start) = segment.find(ARGS) else {
+            continue;
+        };
+        let name = segment[..args_start].trim();
+        let rest = segment[args_start + ARGS.len()..].trim();
+        if let Ok(args) = serde_json::from_str::<serde_json::Value>(rest) {
+            if let Some(call) = build_tool_call(name, &args, known_tools) {
+                calls.push(call);
+            }
+        }
+    }
+    if calls.is_empty() {
+        (response.to_string(), None)
+    } else {
+        (before, Some(calls))
+    }
+}
+
+/// Which format to parse tool calls out of the model's raw output text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCallParserKind {
+    /// `{"name":..,"arguments":..}` or `{"tool_calls":[...]}` as the whole response
+    /// (fox's original prompt-engineered format — the default/fallback).
+    Generic,
+    /// One or more `<tool_call>{...}</tool_call>` blocks (Hermes/Qwen tool-use
+    /// template format).
+    Hermes,
+    /// `[TOOL_CALLS]`-marked calls (Mistral tool-use template format) — see
+    /// [`parse_mistral_tool_calls`] for the two wire-format variants handled.
+    Mistral,
+    /// A single JSON object, optionally prefixed by `<|python_tag|>`, whose args key
+    /// is `arguments` or `parameters` (Llama3's custom-tool JSON convention).
+    /// Explicit-opt-in only — see [`crate::engine::model::NativeToolFormat`].
+    Llama3,
+}
+
+/// One JSON object (optionally `<|python_tag|>`-prefixed), args key `arguments` or
+/// `parameters` — Llama3's custom-tool-calling convention. Single call only: the
+/// format has no parallel-call shape.
+fn parse_llama3_tool_calls(
+    response: &str,
+    known_tools: Option<&[Tool]>,
+) -> (String, Option<Vec<ToolCall>>) {
+    const PY_TAG: &str = "<|python_tag|>";
+    let trimmed = response.trim();
+    let json_part = trimmed.strip_prefix(PY_TAG).unwrap_or(trimmed).trim();
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_part) else {
+        return (response.to_string(), None);
+    };
+    let name = value.get("name").and_then(|n| n.as_str());
+    let args = value.get("arguments").or_else(|| value.get("parameters"));
+
+    if let (Some(name), Some(args)) = (name, args) {
+        return match build_tool_call(name, args, known_tools) {
+            Some(call) => (String::new(), Some(vec![call])),
+            None => (response.to_string(), None),
+        };
+    }
+    (response.to_string(), None)
+}
+
+/// Resolve the effective parser. An explicit `configured` override (`"generic"` /
+/// `"hermes"` / `"mistral"` / `"llama3"`) wins; anything else (including `"auto"`,
+/// the default) picks Hermes/Mistral when the loaded model's own chat template
+/// natively formats tool calls that way, generic otherwise — see
+/// `InferenceEngine::native_tool_call_format`. Llama3 is never auto-selected (see
+/// [`crate::engine::model::NativeToolFormat`]).
+pub fn resolve_tool_call_parser(
+    configured: &str,
+    native: Option<crate::engine::model::NativeToolFormat>,
+) -> ToolCallParserKind {
+    use crate::engine::model::NativeToolFormat;
+    match configured {
+        "generic" => ToolCallParserKind::Generic,
+        "hermes" => ToolCallParserKind::Hermes,
+        "mistral" => ToolCallParserKind::Mistral,
+        "llama3" => ToolCallParserKind::Llama3,
+        _ => match native {
+            Some(NativeToolFormat::Hermes) => ToolCallParserKind::Hermes,
+            Some(NativeToolFormat::Mistral) => ToolCallParserKind::Mistral,
+            None => ToolCallParserKind::Generic,
+        },
+    }
+}
+
+/// Parse `response` for tool calls using the given parser. Returns `(content, tool_calls)`.
+pub fn parse_tool_call(
+    response: &str,
+    known_tools: Option<&[Tool]>,
+    parser: ToolCallParserKind,
+) -> (String, Option<Vec<ToolCall>>) {
+    match parser {
+        ToolCallParserKind::Generic => try_parse_tool_call(response, known_tools),
+        ToolCallParserKind::Hermes => parse_hermes_tool_calls(response, known_tools),
+        ToolCallParserKind::Mistral => parse_mistral_tool_calls(response, known_tools),
+        ToolCallParserKind::Llama3 => parse_llama3_tool_calls(response, known_tools),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -375,22 +566,31 @@ pub fn prepare_prompt(
         }
     }
 
-    // Append tool descriptions.
+    // Whether the model's own chat template natively formats tool calls (Hermes/Qwen
+    // tool-use templates). When it does, `tools` is threaded straight into the Jinja
+    // render below and the template renders its own tool listing — injecting fox's
+    // generic system-message listing too would duplicate it in the prompt.
+    let model_native_tools = tools.is_some() && entry.engine.native_tool_call_format().is_some();
+
+    // Append tool descriptions — only for models without a native tool-formatting
+    // template; see `model_native_tools` above.
     if let Some(tools) = tools {
-        let tool_msg = tools_system_message(tools, tool_required, specific_tool);
-        if messages.first().map(|m| m.role.as_str()) == Some("system") {
-            let sys = messages[0].content.get_or_insert_with(String::new);
-            sys.push_str(&format!("\n\n{tool_msg}"));
-        } else {
-            messages.insert(
-                0,
-                MessageForTemplate {
-                    role: "system".to_string(),
-                    content: Some(tool_msg),
-                    tool_calls: None,
-                    tool_call_id: None,
-                },
-            );
+        if !model_native_tools {
+            let tool_msg = tools_system_message(tools, tool_required, specific_tool);
+            if messages.first().map(|m| m.role.as_str()) == Some("system") {
+                let sys = messages[0].content.get_or_insert_with(String::new);
+                sys.push_str(&format!("\n\n{tool_msg}"));
+            } else {
+                messages.insert(
+                    0,
+                    MessageForTemplate {
+                        role: "system".to_string(),
+                        content: Some(tool_msg),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    },
+                );
+            }
         }
     }
 
@@ -414,11 +614,16 @@ pub fn prepare_prompt(
 
     let flat: Vec<(String, String)> = messages.iter().map(flatten_message_for_template).collect();
 
+    // Serialize tools once for the Jinja context (OpenAI-shaped `Tool` already
+    // matches what native tool-use templates expect — no transform needed).
+    let tools_json = tools.map(|t| serde_json::to_value(t).unwrap_or_default());
+
     // Build the prompt tokens via the model's chat template (real Jinja when the
-    // model has one, threading `enable_thinking`; built-in format otherwise).
+    // model has one, threading `enable_thinking` and `tools`; built-in format
+    // otherwise).
     let tokens: Vec<i32> = entry
         .engine
-        .build_prompt_tokens(&flat, show_thinking)
+        .build_prompt_tokens(&flat, show_thinking, tools_json.as_ref())
         .unwrap_or_else(|_| {
             // Last-ditch fallback: plain "role: content" text, byte-tokenized.
             let prompt = flat
@@ -548,6 +753,275 @@ mod tests {
             try_parse_tool_call(r#"{"name":"unknown_tool","arguments":{}}"#, Some(&tools));
         assert!(calls.is_none());
         assert!(!content.is_empty());
+    }
+
+    #[test]
+    fn test_parse_hermes_tool_call_single() {
+        let response = r#"<tool_call>
+{"name": "get_weather", "arguments": {"city": "Madrid"}}
+</tool_call>"#;
+        let (content, calls) = parse_hermes_tool_calls(response, None);
+        assert!(content.is_empty());
+        let calls = calls.expect("should have tool calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert!(calls[0].function.arguments.contains("Madrid"));
+    }
+
+    #[test]
+    fn test_parse_hermes_tool_call_parallel() {
+        let response = r#"<tool_call>
+{"name": "get_weather", "arguments": {"city": "Madrid"}}
+</tool_call>
+<tool_call>
+{"name": "get_weather", "arguments": {"city": "Lisbon"}}
+</tool_call>"#;
+        let (content, calls) = parse_hermes_tool_calls(response, None);
+        assert!(content.is_empty());
+        let calls = calls.expect("should have parallel tool calls");
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].function.arguments.contains("Madrid"));
+        assert!(calls[1].function.arguments.contains("Lisbon"));
+    }
+
+    #[test]
+    fn test_parse_hermes_tool_call_with_surrounding_prose() {
+        let response = r#"Sure, let me check that for you.
+<tool_call>
+{"name": "get_weather", "arguments": {"city": "Madrid"}}
+</tool_call>
+Let me know if you need anything else."#;
+        let (content, calls) = parse_hermes_tool_calls(response, None);
+        assert!(calls.is_some());
+        assert!(content.contains("Sure, let me check"));
+        assert!(content.contains("Let me know"));
+        assert!(!content.contains("tool_call"));
+    }
+
+    #[test]
+    fn test_parse_hermes_tool_call_unknown_tool_rejected() {
+        use crate::api::types::{Tool, ToolFunction};
+        let tools = vec![Tool {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }];
+        let response = r#"<tool_call>
+{"name": "unknown_tool", "arguments": {}}
+</tool_call>"#;
+        let (content, calls) = parse_hermes_tool_calls(response, Some(&tools));
+        assert!(calls.is_none());
+        assert_eq!(content, response);
+    }
+
+    #[test]
+    fn test_parse_hermes_no_tool_call_tags_is_plain_text() {
+        let response = "The sky is blue because of Rayleigh scattering.";
+        let (content, calls) = parse_hermes_tool_calls(response, None);
+        assert_eq!(content, response);
+        assert!(calls.is_none());
+    }
+
+    #[test]
+    fn test_resolve_tool_call_parser_explicit_overrides_win() {
+        use crate::engine::model::NativeToolFormat;
+        assert_eq!(
+            resolve_tool_call_parser("generic", Some(NativeToolFormat::Hermes)),
+            ToolCallParserKind::Generic
+        );
+        assert_eq!(
+            resolve_tool_call_parser("hermes", None),
+            ToolCallParserKind::Hermes
+        );
+        assert_eq!(
+            resolve_tool_call_parser("mistral", None),
+            ToolCallParserKind::Mistral
+        );
+        assert_eq!(
+            resolve_tool_call_parser("llama3", None),
+            ToolCallParserKind::Llama3
+        );
+        // Llama3 is never reached via "auto", even with an explicit override
+        // present for the OTHER formats — only its own literal string selects it.
+        assert_eq!(
+            resolve_tool_call_parser("llama3", Some(NativeToolFormat::Hermes)),
+            ToolCallParserKind::Llama3
+        );
+    }
+
+    #[test]
+    fn test_resolve_tool_call_parser_auto_follows_model_native() {
+        use crate::engine::model::NativeToolFormat;
+        assert_eq!(
+            resolve_tool_call_parser("auto", Some(NativeToolFormat::Hermes)),
+            ToolCallParserKind::Hermes
+        );
+        assert_eq!(
+            resolve_tool_call_parser("auto", Some(NativeToolFormat::Mistral)),
+            ToolCallParserKind::Mistral
+        );
+        assert_eq!(
+            resolve_tool_call_parser("auto", None),
+            ToolCallParserKind::Generic
+        );
+    }
+
+    #[test]
+    fn test_parse_tool_call_dispatches_by_parser_kind() {
+        let generic_response = r#"{"name":"f","arguments":{}}"#;
+        let (_, calls) = parse_tool_call(generic_response, None, ToolCallParserKind::Generic);
+        assert!(calls.is_some());
+
+        let hermes_response = "<tool_call>\n{\"name\":\"f\",\"arguments\":{}}\n</tool_call>";
+        let (_, calls) = parse_tool_call(hermes_response, None, ToolCallParserKind::Hermes);
+        assert!(calls.is_some());
+
+        // Cross-format text must NOT parse under the wrong parser.
+        let (_, calls) = parse_tool_call(hermes_response, None, ToolCallParserKind::Generic);
+        assert!(calls.is_none());
+
+        let mistral_response = r#"[TOOL_CALLS] [{"name":"f","arguments":{}}]"#;
+        let (_, calls) = parse_tool_call(mistral_response, None, ToolCallParserKind::Mistral);
+        assert!(calls.is_some());
+
+        let llama3_response = r#"{"name":"f","parameters":{}}"#;
+        let (_, calls) = parse_tool_call(llama3_response, None, ToolCallParserKind::Llama3);
+        assert!(calls.is_some());
+    }
+
+    #[test]
+    fn test_parse_mistral_tool_call_classic_array_single() {
+        let response = r#"[TOOL_CALLS] [{"name": "get_weather", "arguments": {"city": "Madrid"}}]"#;
+        let (content, calls) = parse_mistral_tool_calls(response, None);
+        assert!(content.is_empty());
+        let calls = calls.expect("should have tool calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert!(calls[0].function.arguments.contains("Madrid"));
+    }
+
+    #[test]
+    fn test_parse_mistral_tool_call_classic_array_parallel() {
+        let response = r#"[TOOL_CALLS] [{"name": "get_weather", "arguments": {"city": "Madrid"}}, {"name": "get_weather", "arguments": {"city": "Lisbon"}}]"#;
+        let (_, calls) = parse_mistral_tool_calls(response, None);
+        let calls = calls.expect("should have parallel tool calls");
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].function.arguments.contains("Madrid"));
+        assert!(calls[1].function.arguments.contains("Lisbon"));
+    }
+
+    #[test]
+    fn test_parse_mistral_tool_call_new_format_single() {
+        let response = r#"[TOOL_CALLS]get_weather[ARGS]{"city": "Madrid"}"#;
+        let (content, calls) = parse_mistral_tool_calls(response, None);
+        assert!(content.is_empty());
+        let calls = calls.expect("should have tool calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert!(calls[0].function.arguments.contains("Madrid"));
+    }
+
+    #[test]
+    fn test_parse_mistral_tool_call_new_format_parallel() {
+        let response = r#"[TOOL_CALLS]get_weather[ARGS]{"city": "Madrid"}[TOOL_CALLS]get_weather[ARGS]{"city": "Lisbon"}"#;
+        let (_, calls) = parse_mistral_tool_calls(response, None);
+        let calls = calls.expect("should have parallel tool calls");
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].function.arguments.contains("Madrid"));
+        assert!(calls[1].function.arguments.contains("Lisbon"));
+    }
+
+    #[test]
+    fn test_parse_mistral_tool_call_with_surrounding_prose() {
+        let response = r#"Let me check that.[TOOL_CALLS] [{"name": "get_weather", "arguments": {"city": "Madrid"}}]"#;
+        let (content, calls) = parse_mistral_tool_calls(response, None);
+        assert!(calls.is_some());
+        assert_eq!(content, "Let me check that.");
+    }
+
+    #[test]
+    fn test_parse_mistral_no_marker_is_plain_text() {
+        let response = "The sky is blue because of Rayleigh scattering.";
+        let (content, calls) = parse_mistral_tool_calls(response, None);
+        assert_eq!(content, response);
+        assert!(calls.is_none());
+    }
+
+    #[test]
+    fn test_parse_mistral_invalid_json_is_plain_text() {
+        let response = "[TOOL_CALLS] not json at all";
+        let (content, calls) = parse_mistral_tool_calls(response, None);
+        assert_eq!(content, response);
+        assert!(calls.is_none());
+    }
+
+    #[test]
+    fn test_parse_mistral_unknown_tool_rejected() {
+        use crate::api::types::{Tool, ToolFunction};
+        let tools = vec![Tool {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }];
+        let response = r#"[TOOL_CALLS] [{"name": "unknown_tool", "arguments": {}}]"#;
+        let (_, calls) = parse_mistral_tool_calls(response, Some(&tools));
+        assert!(calls.is_none());
+    }
+
+    #[test]
+    fn test_parse_llama3_tool_call_arguments_key() {
+        let response = r#"{"name": "get_weather", "arguments": {"city": "Madrid"}}"#;
+        let (content, calls) = parse_llama3_tool_calls(response, None);
+        assert!(content.is_empty());
+        let calls = calls.expect("should have tool calls");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert!(calls[0].function.arguments.contains("Madrid"));
+    }
+
+    #[test]
+    fn test_parse_llama3_tool_call_parameters_key() {
+        let response = r#"{"name": "get_weather", "parameters": {"city": "Madrid"}}"#;
+        let (_, calls) = parse_llama3_tool_calls(response, None);
+        let calls = calls.expect("should have tool calls");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert!(calls[0].function.arguments.contains("Madrid"));
+    }
+
+    #[test]
+    fn test_parse_llama3_tool_call_python_tag_prefix_stripped() {
+        let response = r#"<|python_tag|>{"name": "get_weather", "parameters": {"city": "Madrid"}}"#;
+        let (_, calls) = parse_llama3_tool_calls(response, None);
+        assert!(calls.is_some());
+    }
+
+    #[test]
+    fn test_parse_llama3_invalid_json_is_plain_text() {
+        let response = "The sky is blue because of Rayleigh scattering.";
+        let (content, calls) = parse_llama3_tool_calls(response, None);
+        assert_eq!(content, response);
+        assert!(calls.is_none());
+    }
+
+    #[test]
+    fn test_parse_llama3_unknown_tool_rejected() {
+        use crate::api::types::{Tool, ToolFunction};
+        let tools = vec![Tool {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }];
+        let response = r#"{"name": "unknown_tool", "parameters": {}}"#;
+        let (_, calls) = parse_llama3_tool_calls(response, Some(&tools));
+        assert!(calls.is_none());
     }
 
     #[test]

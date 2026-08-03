@@ -132,6 +132,7 @@ async fn run_one_type(
         model_name.to_string(),
         None,
         EngineOptions::default(),
+        None,
     ));
 
     let messages = vec![
@@ -190,7 +191,9 @@ async fn run_one_type(
         );
 
         let t0 = Instant::now();
-        engine.submit_request(req);
+        engine.submit_request(req).expect(
+            "submit: single request against a freshly-sized queue should never be rejected",
+        );
 
         let mut ttft: Option<f64> = None;
         let mut gen_start: Option<Instant> = None;

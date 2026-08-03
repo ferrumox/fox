@@ -35,7 +35,41 @@ Remaining headroom *within* this level (cheap, incremental):
   and share across a conversation's turns. Only worth it if profiling shows the scan
   matters (it's O(seq) per step today).
 
-## Level 2 — draft model (classic speculative) — **VIABLE NOW, the natural 0.16+ theme**
+## Level 2 — draft model (classic speculative) — **shipped in 0.16 (simple scope)**
+
+Landed: `Proposer` trait (`propose(req_id, seq, draft_len) -> Vec<i32>`) with
+`NgramProposer` (0.15, unchanged) and `DraftModelProposer` (0.16) as its two
+implementations — `engine/speculative.rs`. `--draft-model <name>` loads a second GGUF
+via the same `LlamaCppModel::load` path (`max_batch_size=1`, it never batches), feeds
+the existing 0.15 verify batch unchanged (`do_speculative_decode` now takes the
+proposed `drafts: Vec<i32>` directly instead of computing them itself — the same
+function serves both proposers). Vocab compatibility is a hard load-time check
+(`Model::vocab_fingerprint`, hash of vocab size + BOS/EOS + every token's piece text) —
+mismatch fails loudly through the same `ModelLoadFailed` path as any other load error.
+Golden-verified exact (`golden_draft_model_speculative_matches_greedy`, self-speculation
+— the same model as both target and draft, the strongest possible exactness check).
+
+**Deliberately NOT done in 0.16** (simple-scope decision, not an oversight):
+- **No eviction pairing / VRAM budgeting.** The draft is loaded *eagerly*, alongside
+  the target, and lives exactly as long as the target's `EngineEntry` — it is not an
+  independently-evictable registry entry, sidestepping the "what if the draft gets
+  evicted separately" class of bugs by construction. The operator is responsible for
+  sizing both models to fit in memory; `--max-models`/LRU eviction only ever sees the
+  target as a unit.
+- **No draft-scheduling sophistication.** The draft decodes sequentially, one dedicated
+  KV sequence, no batching against the target's own step.
+- `--speculative` stays a plain bool (backward compatible with existing
+  `--speculative true/false` callers); `--draft-model` is a purely additive flag that,
+  combined with `--speculative true`, selects `SpeculativeConfig::Draft` instead of
+  `SpeculativeConfig::Ngram`.
+
+If a future release wants proper multi-draft memory management (several draft/target
+pairs, VRAM-aware eviction), that's a distinct follow-up, not a gap in this one.
+
+<details>
+<summary>Original pre-implementation plan (superseded by the above; kept for context)</summary>
+
+**VIABLE NOW, the natural 0.16+ theme**
 
 **Proposer:** a small model of the same family (e.g. Qwen-0.5B for Qwen-7B,
 Llama-3.2-1B for Llama-8B) autoregressively predicts `draft_len` tokens; the target
@@ -63,6 +97,8 @@ the draft's own compute eats part of the win — expect the low end of the range
   batching it sensibly against the target's step matters for the win.
 - Proposer trait: `propose(seq) -> Vec<i32>` — n-gram and draft-model become two
   implementations; config picks (`--speculative ngram|draft`).
+
+</details>
 
 ## Level 3 — MTP / NextN (the model drafts for itself) — **VIABLE SOON; watch item**
 

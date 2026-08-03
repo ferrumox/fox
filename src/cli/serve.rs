@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // Default values for ServeArgs — centralised so grep/docs find them in one place.
 const DEFAULT_GPU_MEMORY_FRACTION: &str = "0.85";
 const DEFAULT_MAX_BATCH_SIZE: &str = "32";
+const DEFAULT_MAX_QUEUE_DEPTH: &str = "0";
 const DEFAULT_MAX_PREFILL_CHUNK: &str = "512";
 const DEFAULT_BLOCK_SIZE: &str = "16";
 const DEFAULT_HOST: &str = "0.0.0.0";
@@ -15,6 +16,7 @@ const DEFAULT_SWAP_FRACTION: &str = "0.0";
 const DEFAULT_MAX_MODELS: &str = "1";
 const DEFAULT_KEEP_ALIVE_SECS: &str = "300";
 const DEFAULT_TYPE_KV: &str = "f16";
+const DEFAULT_TOOL_CALL_PARSER: &str = "auto";
 
 use anyhow::Result;
 use clap::Parser;
@@ -44,6 +46,11 @@ pub struct ServeArgs {
     /// Maximum batch size for inference
     #[arg(long, default_value = DEFAULT_MAX_BATCH_SIZE, env = "FOX_MAX_BATCH_SIZE")]
     pub max_batch_size: usize,
+
+    /// Maximum requests allowed to wait in the scheduler queue before new ones are
+    /// rejected with HTTP 429 (0 = unbounded).
+    #[arg(long, default_value = DEFAULT_MAX_QUEUE_DEPTH, env = "FOX_MAX_QUEUE_DEPTH")]
+    pub max_queue_depth: usize,
 
     /// Max prompt tokens prefilled per request per scheduler step (0 = single-shot).
     /// Chunking a long prompt lets it interleave with other requests' token generation
@@ -75,6 +82,17 @@ pub struct ServeArgs {
     #[arg(long, default_value = "4", env = "FOX_SPEC_DRAFT_LEN")]
     pub spec_draft_len: usize,
 
+    /// Model name/path for a smaller "draft" model used to propose tokens for
+    /// verification by the main model (classic draft-model speculative decoding),
+    /// instead of n-gram lookup. Requires --speculative true (a value set without it
+    /// is ignored, with a startup warning). The draft and target must share the same
+    /// tokenizer — checked at load time, fails loudly on mismatch. Loaded once
+    /// alongside the target and kept resident for the process lifetime; NOT subject
+    /// to LRU eviction or VRAM budgeting in this release — size both models to fit.
+    /// `--spec-ngram` is ignored in this mode.
+    #[arg(long, env = "FOX_DRAFT_MODEL")]
+    pub draft_model: Option<String>,
+
     /// Tokens per KV block
     #[arg(long, default_value = DEFAULT_BLOCK_SIZE, env = "FOX_BLOCK_SIZE")]
     pub block_size: usize,
@@ -100,6 +118,15 @@ pub struct ServeArgs {
         env = "FOX_SYSTEM_PROMPT"
     )]
     pub system_prompt: String,
+
+    /// Which format to parse tool calls from the model's raw output: `auto` (default
+    /// — picks `hermes` when the loaded model's own chat template natively formats
+    /// tool calls via `<tool_call>` tags, `mistral` via a `[TOOL_CALLS]` marker,
+    /// generic prompt-based JSON otherwise), `generic`, `hermes`, `mistral`, or
+    /// `llama3` (explicit-opt-in only — never auto-selected, since most GGUF chat
+    /// templates for Llama3 models don't retain a detectable tool-call convention).
+    #[arg(long, default_value = DEFAULT_TOOL_CALL_PARSER, env = "FOX_TOOL_CALL_PARSER")]
+    pub tool_call_parser: String,
 
     /// [reserved — not yet implemented] Fraction of GPU memory for CPU↔GPU KV-cache
     /// swap space (0.0-1.0). Accepted for forward compatibility; currently a no-op.
@@ -273,12 +300,14 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         models_dir: models_dir.clone(),
         max_models: args.max_models.max(1),
         max_batch_size: args.max_batch_size,
+        max_queue_depth: args.max_queue_depth,
         max_prefill_chunk: args.max_prefill_chunk,
         context_shift: args.context_shift,
         context_keep: args.context_keep,
         speculative: args.speculative,
         spec_ngram: args.spec_ngram,
         spec_draft_len: args.spec_draft_len,
+        draft_model: args.draft_model,
         max_context_len: args.max_context_len,
         block_size: args.block_size,
         gpu_memory_bytes,
@@ -374,6 +403,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         models_dir,
         args.hf_token,
         args.api_key,
+        args.tool_call_parser,
     )
     .layer(tower_http::cors::CorsLayer::permissive());
 

@@ -164,6 +164,7 @@ async fn run_scenario(
             max_prefill_chunk: chunk, // the knob under test
             ..Default::default()
         },
+        None,
     ));
 
     let long_tokens = synth_long_prompt(&engine, args.long_prompt_tokens);
@@ -208,8 +209,12 @@ async fn run_scenario(
     );
 
     let t0 = Instant::now();
-    engine.submit_request(long_req);
-    engine.submit_request(short_req);
+    engine
+        .submit_request(long_req)
+        .expect("submit: single request against a freshly-sized queue should never be rejected");
+    engine
+        .submit_request(short_req)
+        .expect("submit: single request against a freshly-sized queue should never be rejected");
 
     // Drain the long request in the background; its first token marks the moment its
     // (chunked or single-shot) prefill finished — a useful reference number.
