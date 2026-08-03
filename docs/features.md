@@ -23,24 +23,36 @@ When KV cache memory runs out and a new request cannot be admitted, fox uses **L
 
 ---
 
-## Block-level prefix caching
+## Prompt reuse
 
-The KV (key-value) cache stores the attention keys and values computed during the forward pass. For autoregressive generation, these do not need to be recomputed if the same prefix has been seen before.
+Every sequence remembers the tokens resident in its KV cache, including the ones it
+generated. An arriving request is matched to the sequence sharing the longest prefix with
+it and skips the prefill for that overlap. Matching is token-exact rather than aligned to
+block boundaries, so a partial block at the end of the shared prefix still counts.
 
-fox implements **block-level prefix caching** using a chain hash scheme similar to vLLM's:
+In a chat, this means the second turn does not re-read the first, and neither does the
+tenth. The previous answer is part of the next prompt, and it is already resident.
 
-1. The KV cache is divided into fixed-size blocks (16 tokens by default, configurable with `--block-size`)
-2. Each block is identified by a **chain hash**: a hash of its token IDs combined with the hash of the preceding block
-3. When a new request arrives, fox walks its prompt block-by-block and looks up each block's hash in a cache table
-4. Blocks that hit the cache are reused without recomputation; only the novel suffix needs a forward pass
+**Copying from a live sequence.** Reuse of this kind normally only works against an
+*idle* sequence, which is exactly when it is least useful: when eight requests carrying
+the same system prompt arrive at once, none of them is idle and all eight prefill the same
+tokens. Fox copies the shared prefix out of a sibling that is already decoding. Under a
+unified KV cache the copy shares cells rather than duplicating the buffer, so it is
+metadata work rather than a memory copy. Measured against `llama-server` on the same
+llama.cpp: 4.0× faster time to first token at 8 concurrent clients behind a 1856-token
+system prompt, 5.75× at 16. See [Benchmarks](benchmarks.md).
 
-This means:
+**Paid for once.** Sequences sharing a prefix share the block budget for it instead of
+each reserving a copy, so the server admits as much concurrency as the hardware actually
+holds rather than as much as a duplicated count suggests.
 
-- **Multi-turn conversations** reuse KV cache from all previous turns. A 5-turn conversation where each reply is 200 tokens might reuse 80% of its prompt KV cache by turn 5.
-- **Shared system prompts** are computed once and reused across all requests with that system prompt.
-- **RAG pipelines** that prepend the same retrieved documents to every query benefit dramatically — the document KV cache is computed on the first request and reused on all subsequent ones.
+**Host-RAM cache.** `--cache-ram <MiB>` keeps reclaimed sequences in system memory instead
+of discarding them, so a conversation can stay warm without holding GPU blocks. Off by
+default.
 
-In production workloads with moderate prompt repetition, prefix cache hit rates of 60–75% are common. Each cache hit eliminates that block's contribution to time-to-first-token.
+`--kv-reuse false` disables all of it, which exists so the behaviour can be A/B'd.
+
+`GET /slots` shows what each sequence currently holds and the KV pool's real occupancy.
 
 ---
 
@@ -249,3 +261,60 @@ fox exposes metrics via the `GET /metrics` endpoint in Prometheus format:
 | `fox_active_requests` | Gauge | Number of sequences currently being decoded. |
 
 These metrics give you visibility into GPU utilisation (`kv_cache_usage`), the effectiveness of prefix caching (`prefix_cache_hit_ratio`), and throughput characteristics (tokens/s, TTFT distribution).
+
+---
+
+## Speculative decoding
+
+Fox proposes several tokens per step and verifies them in one pass, so accepted proposals
+cost a fraction of a normal decode. Two proposers:
+
+- **N-gram** (`--spec-ngram`) needs no second model. It looks for repeats of the current
+  suffix in the prompt and generated text, which fits code, structured output, and any
+  workload that quotes its input back.
+- **Draft model** (`--draft-model`) runs a small model to propose for a larger one.
+
+`fox bench-spec` reports the acceptance rate, which is what decides whether either is
+worth enabling for your workload.
+
+---
+
+## Vision
+
+Multimodal models run through llama.cpp's mtmd. Pass the projector with `--mmproj` and
+send images the OpenAI way, as `image_url` content parts. `fox pull gemma4-e2b` fetches a
+model and projector that work together.
+
+---
+
+## LoRA adapters
+
+Load adapters at startup with `--lora-modules name=path[:scale]`. A client selects one by
+naming it in the `model` field, the same way it selects a model.
+
+`GET /lora-adapters` lists what is loaded; `POST /lora-adapters` changes an adapter's
+scale at runtime, without a restart. In-flight generations keep the scale they were
+admitted with.
+
+---
+
+## Editor and retrieval endpoints
+
+- **`POST /infill`** — fill-in-the-middle completion, taking `input_prefix` and
+  `input_suffix`. This is what code-completion plugins call.
+- **`POST /rerank`** and **`/v1/rerank`** — score documents against a query. Requires
+  `--reranking`, because reranking needs RANK pooling and most reranker GGUFs do not
+  declare a pooling type in their metadata.
+- **`POST /tokenize`**, **`/detokenize`**, **`/apply-template`** — count tokens, inspect
+  what the tokenizer did, and see exactly what the chat template renders.
+
+---
+
+## Introspection
+
+`GET /props` reports the loaded model, its context size, chat template, special tokens,
+and the sampling defaults in effect for each API surface. `GET /slots` reports per-sequence
+state, resident token counts, and KV pool occupancy.
+
+Both exist so that when throughput looks wrong you can find out what the server actually
+believes, rather than inferring it from latency.

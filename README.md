@@ -1,14 +1,12 @@
 <div align="center">
 
-<img src="assets/fox-round.svg" alt="fox logo" width="120" height="120">
-
 # fox
 
-**The fastest local LLM server. Drop-in replacement for Ollama.**
+**A local LLM server built for concurrent work. Drop-in replacement for Ollama.**
 
 [![CI](https://github.com/ferrumox/fox/actions/workflows/ci.yml/badge.svg)](https://github.com/ferrumox/fox/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
-[![Version](https://img.shields.io/badge/version-0.19.0-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.19.1-green.svg)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://rustup.rs/)
 [![GitHub Stars](https://img.shields.io/github/stars/ferrumox/fox?style=social)](https://github.com/ferrumox/fox/stargazers)
 
@@ -16,7 +14,7 @@
 
 </div>
 
-**Fox is free forever.** No asterisks. No "free for now." No pivot to paid. Dual-licensed MIT OR Apache-2.0, always.
+Fox is dual-licensed MIT OR Apache-2.0 and stays that way. There is no paid tier and no plan for one.
 
 ---
 
@@ -45,29 +43,68 @@ curl http://localhost:8080/v1/chat/completions \
 
 ---
 
-## Performance vs Ollama
+## Performance
 
-RTX 4060 · Llama-3.2-3B-Instruct-Q4_K_M · 4 concurrent clients · 50 requests:
+Fox wraps llama.cpp, so a single request decoding on its own runs the same kernels
+`llama-server` runs. There is no room for fox to be dramatically faster at that, and it
+isn't. Where fox pulls ahead is when requests arrive together and share a prompt.
 
-<!-- BENCH_TABLE_START -->
-| Metric | fox | Ollama | Improvement |
-|--------|-----|--------|-------------|
-| First token (P50) | 87ms | 310ms | **+72%** |
-| First token (P95) | 134ms | 480ms | **+72%** |
-| Response time (P50) | 412ms | 890ms | **+54%** |
-| Response time (P95) | 823ms | 1740ms | **+53%** |
-| Throughput | 312 t/s | 148 t/s | **+111%** |
-<!-- BENCH_TABLE_END -->
+Radeon 890M, Vulkan, Llama-3.2-1B-Instruct-Q8_0, 1856-token shared system prompt.
+Both servers built from the same vendored llama.cpp, one running at a time, arms
+alternated across 3 rounds. All ranges below are disjoint.
 
-> Reproduce: `./scripts/benchmark.sh llama3.2 4 50`
+| Workload | fox | llama-server |
+|---|---|---|
+| 8 clients, shared prompt, cold — TTFT p50 | **1129 ms** | 4550 ms |
+| 16 clients, shared prompt, cold — TTFT p50 | **1402 ms** | 8064 ms |
+| 16 clients, whole burst wall clock | **3.8 s** | 16.2 s |
+| 4 clients, short unrelated prompts — throughput | 96% of llama-server | baseline |
+
+Doubling the clients costs fox 24% more time to first token and `llama-server` 79%.
+
+That last row is not a typo and it is not buried on purpose: on single-turn requests with
+short prompts, fox is about 4% behind. That workload cannot see any of the work fox does,
+because there is no prompt worth reusing. If your traffic looks like that, fox will not
+make it faster.
+
+Reproduce either one:
+
+```bash
+scripts/ab_shared_prefix.sh    # concurrent burst behind a shared prompt
+scripts/ab_bench.sh            # decode-bound throughput
+```
+
+Full methodology, including two ways these benchmarks produced convincing wrong answers
+before they produced right ones, is in `docs/design/rocm-benchmarking-2026-08.md`.
+
+Numbers against Ollama are pending re-measurement on current hardware. The figures that
+used to sit here were from an RTX 4060 with no recorded methodology, and this project's
+rule is that a before/after claim comes from `scripts/ab_bench.sh` or it does not get
+published.
 
 ---
 
-## Why is fox faster?
+## How it works
 
-**Conversations get faster over time.** Fox remembers the context it already processed — system prompts and previous messages aren't re-read from scratch on every turn. Ollama does. In a long conversation, fox skips up to 75% of that work from the second message onward, which is why the first token arrives much sooner.
+**Sequences remember what they hold.** Every sequence keeps the tokens resident in its
+KV cache, including the tokens it generated. A new request is matched to the sequence
+sharing the longest prefix with it and skips the prefill for that overlap. In a chat, the
+second turn does not re-read the first.
 
-**Multiple users don't block each other.** Fox processes several requests at the same time instead of waiting for one to finish before starting the next. A long generation for one user doesn't delay a quick question from another.
+**Requests can copy a prefix from a live sequence.** This is the part other llama.cpp
+servers do not do. Slot affinity normally reuses an idle sequence, so when eight requests
+carrying the same system prompt arrive at once, none of them can reuse anything and all
+eight prefill the same tokens. Fox copies the shared prefix out of a sibling that is
+already decoding. `llama-server` cannot: its slot selection skips busy slots in both its
+similarity pass and its LRU fallback.
+
+**A shared prefix is paid for once.** Sequences sharing a prefix share the block budget
+for it instead of each reserving a copy, so the server admits as much concurrency as the
+hardware actually holds.
+
+**Requests do not queue behind each other.** Continuous batching decodes concurrent
+requests in the same pass, so a long generation for one client does not delay a short
+question from another.
 
 ---
 
@@ -140,13 +177,16 @@ See [`examples/`](examples/) for more integration guides.
 
 Fox detects CUDA, ROCm, Metal, and Vulkan at runtime — **one binary runs on any hardware**.
 
-| Platform | GPU backends | Auto-detects |
-|----------|-------------|--------------|
-| Linux x86_64 | CUDA + ROCm + Vulkan | ✅ |
-| Windows x86_64 | CUDA + Vulkan | ✅ |
-| macOS Apple Silicon | Metal | ✅ |
-| macOS Intel | CPU only | — |
-| Linux ARM64 | CPU only | — |
+| Platform | GPU backends |
+|----------|--------------|
+| Linux x86_64 | CUDA, ROCm, Vulkan |
+| Windows x86_64 | CUDA, Vulkan |
+| macOS Apple Silicon | Metal |
+| macOS Intel | CPU only |
+| Linux ARM64 | CPU only |
+
+Backends are compiled as shared libraries and loaded at runtime, which is why one
+binary covers all of them rather than needing a build per vendor.
 
 Auto-detection priority: **CUDA → ROCm → Vulkan → Metal → CPU**.
 
@@ -269,6 +309,13 @@ fox bench-kv llama3.2 --types f16,q8_0,q4_0 --runs 3
 | POST | `/api/models/:name/load` | Load a model into memory on demand |
 | POST | `/api/models/:name/unload` | Evict a loaded model from memory |
 | GET | `/api/version` | Server version — for Ollama client detection |
+| POST | `/infill` | Fill-in-the-middle completion for editor plugins |
+| POST | `/rerank`, `/v1/rerank` | Score documents against a query (needs `--reranking`) |
+| POST | `/tokenize`, `/detokenize` | Convert between text and token ids |
+| POST | `/apply-template` | Render messages through the model's chat template |
+| GET | `/props` | Server and model introspection, sampling defaults |
+| GET | `/slots` | Per-sequence state, resident tokens, KV pool occupancy |
+| GET/POST | `/lora-adapters` | Inspect loaded LoRA adapters and re-scale them at runtime |
 | GET | `/health` | Health + KV cache metrics |
 | GET | `/metrics` | Prometheus scrape endpoint |
 
@@ -276,24 +323,41 @@ fox bench-kv llama3.2 --types f16,q8_0,q4_0 --runs 3
 
 ## Features
 
-- Runs any GGUF model (Llama, Mistral, Gemma, Qwen, DeepSeek, and more)
-- **OpenAI-compatible API** — works with any tool that supports OpenAI
-- **Ollama-compatible API** — works with any tool that supports Ollama
-- **Multi-model serving** — keep multiple models loaded, switch between them instantly
-- **Lazy loading** — no need to specify a model upfront; fox loads it on first request
-- **Prefix caching** — shared system prompts are processed once and reused across requests
-- **Continuous batching** — multiple concurrent users processed in parallel, not serialized
-- **Multi-GPU support** — automatic layer-split distribution across all GPUs; configurable via `--split-mode`, `--tensor-split`, `--main-gpu`
-- **MoE CPU offload** — run DeepSeek, Mixtral and other MoE models with expert layers in RAM via `--moe-cpu`
-- **Function calling** and **structured JSON output** (OpenAI spec)
-- **Request cancellation** — closing the connection immediately frees GPU memory
-- **KV cache quantization** — `f16`, `q8_0`, `q4_0`
-- **CORS** — permissive headers on all routes; web apps can call the API directly
-- **API key authentication** — optional `FOX_API_KEY` for access control
-- **Prometheus metrics** — latency, throughput, KV cache usage out of the box
-- **Config file** at `~/.config/ferrumox/config.toml`
-- **Aliases** — short names instead of full model filenames
-- **Docker** and **systemd** support included
+Runs any GGUF model: Llama, Mistral, Gemma, Qwen, DeepSeek and the rest.
+
+**Two APIs, no code changes.** OpenAI-compatible `/v1/*` and Ollama-compatible `/api/*`
+on the same port. Point an existing client at `localhost:8080` and it works.
+
+**Prompt reuse that survives concurrency.** Sequences keep the tokens they hold,
+including generated ones, and a new request skips the prefill for whatever prefix it
+shares. Requests arriving together can copy a shared prefix out of a sequence that is
+still decoding, and they share the block budget for it rather than each reserving a copy.
+
+**Continuous batching.** Concurrent requests decode in the same pass instead of queueing.
+
+**Speculative decoding.** N-gram proposal built in, or a draft model via `--draft-model`.
+
+**Multi-model serving** with lazy loading and LRU eviction. No model needs naming up
+front; fox loads it on first request and evicts by `--max-models` and `--keep-alive-secs`.
+
+**Structured output and function calling.** JSON Schema compiled to GBNF, raw GBNF
+grammars accepted directly, and tool-call parsers for Hermes, Mistral and Llama 3.
+
+**Vision** via llama.cpp mtmd (`--mmproj`), **embeddings**, and **reranking**.
+
+**LoRA adapters** loaded at startup and re-scaled at runtime without a restart.
+
+**Runs where the memory is.** Multi-GPU layer split (`--split-mode`, `--tensor-split`,
+`--main-gpu`), MoE expert offload to RAM (`--moe-cpu`), KV cache quantization (`f16`,
+`q8_0`, `q4_0`), and a host-RAM prompt cache (`--cache-ram`) for conversations that
+should stay warm without holding GPU blocks.
+
+**Survives real traffic.** Closing a connection frees its GPU memory immediately.
+Context rolling keeps a generation going when the window fills. Decode failures retry by
+batch bisection instead of dropping the request.
+
+**Operable.** Prometheus metrics, optional `FOX_API_KEY` auth, permissive CORS, a config
+file at `~/.config/ferrumox/config.toml`, model aliases, Docker and systemd units.
 
 ---
 
@@ -378,18 +442,18 @@ split_mode = "layer"   # none | layer | row
 ./scripts/benchmark.sh llama3.2 4 50
 ```
 
-Sample output:
+Output shape (run it for your own numbers):
 
 ```
 ┌─────────────────┬──────────────┬──────────────┬──────────┐
 │ Metric          │     fox      │    ollama    │ Δ        │
 ├─────────────────┼──────────────┼──────────────┼──────────┤
-│ TTFT P50        │          87ms│         310ms│ +72%     │
-│ TTFT P95        │         134ms│         480ms│ +72%     │
-│ Latency P50     │         412ms│         890ms│ +54%     │
-│ Latency P95     │         823ms│        1740ms│ +53%     │
-│ Latency P99     │        1204ms│        2600ms│ +54%     │
-│ Throughput      │    312.4 t/s │    148.1 t/s │ +111%    │
+│ TTFT P50        │           ...│           ...│ ...      │
+│ TTFT P95        │           ...│           ...│ ...      │
+│ Latency P50     │           ...│           ...│ ...      │
+│ Latency P95     │           ...│           ...│ ...      │
+│ Latency P99     │           ...│           ...│ ...      │
+│ Throughput      │           ...│           ...│ ...      │
 └─────────────────┴──────────────┴──────────────┴──────────┘
 ```
 
@@ -465,7 +529,9 @@ make download-model  Download default model (Llama-3.2-3B Q4_K_M)
 | Metal | macOS 13+, Apple Silicon |
 | Vulkan | Vulkan SDK 1.3+, Linux or Windows x86_64 |
 
-No runtime dependencies beyond GPU drivers — single static binary.
+No runtime dependencies beyond GPU drivers. The release bundle is the `fox` binary plus
+the ggml backend libraries next to it; those are loaded at runtime, which is what lets one
+build cover CPU, CUDA, ROCm, Vulkan and Metal.
 
 ---
 
@@ -486,23 +552,23 @@ FOX_SKIP_LLAMA=1 cargo test --all
 
 ## Support the project
 
-Fox is built and maintained by [Manuel S. Lemos](https://github.com/manuelslemos) in his spare time. It's free forever — no paid tiers, no feature gating, no VC money.
+Fox is built and maintained by [Manuel S. Lemos](https://github.com/manuelslemos) in his
+spare time. Every feature is in the free build and will stay there.
 
-If fox saves you time or replaces a paid API bill, consider sponsoring:
+If fox saves you time or replaces an API bill, sponsorship pays for the time that keeps it
+maintained.
 
-| | |
+| Tier | What you get |
 |---|---|
-| ☕ **$5 / month** | Coffee tier — eternal gratitude + sponsor badge |
-| 🐛 **$25 / month** | Bug priority — your issues move to the front of the queue + name in [SPONSORS.md](SPONSORS.md) |
-| 🏢 **$100 / month** | Team supporter — your logo in the README + shoutout in every release |
-| 🚀 **$500 / month** | Infrastructure partner — direct line + input on the roadmap |
+| $5 / month | Sponsor badge |
+| $25 / month | Your issues get looked at first, and your name in [SPONSORS.md](SPONSORS.md) |
+| $100 / month | Your logo in this README and a mention in each release |
+| $500 / month | A direct line, and a say in what gets built next |
 
-[**❤️ GitHub Sponsors**](https://github.com/sponsors/manuelslemos) · [**☕ Buy Me a Coffee**](https://buymeacoffee.com/manuelslemos)
-
-> 100% of sponsorships go toward keeping fox free and actively maintained.
+[GitHub Sponsors](https://github.com/sponsors/manuelslemos) · [Buy Me a Coffee](https://buymeacoffee.com/manuelslemos)
 
 ---
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE) — your choice.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE). Take either.

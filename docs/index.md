@@ -78,13 +78,12 @@ curl http://localhost:8080/v1/chat/completions \
 | Function calling | ✓ | ✓ |
 | Prometheus metrics | ✓ | — |
 | CORS | ✓ | — |
-| TTFT P50 (3B, 4 workers) | **87ms** | 310ms |
-| Throughput (3B, 4 workers) | **312 tok/s** | 148 tok/s |
 
 ---
 
 ## Changelog
 
-See [CHANGELOG.md](https://github.com/ferrumox/fox/blob/main/CHANGELOG.md) for the full release history.
+See [CHANGELOG.md](https://github.com/ferrumox/fox/blob/main/CHANGELOG.md) for the full release history,
+and [Benchmarks](benchmarks.md) for measured performance against `llama-server`.
 
-Current version: **v1.0.0**
+Current version: **v0.19.1**

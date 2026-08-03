@@ -128,6 +128,57 @@ Every `fox serve` option can be set via an environment variable. Environment var
 | `FOX_JSON_LOGS` | `--json-logs` | `false` |
 | `HF_TOKEN` | `--hf-token` | — |
 
+Prompt reuse and scheduling:
+
+| Variable | Corresponding flag | Default |
+|---|---|---|
+| `FOX_KV_REUSE` | `--kv-reuse` | `true` |
+| `FOX_SLOT_PROMPT_SIMILARITY` | `--slot-prompt-similarity` | `0.1` |
+| `FOX_CACHE_RAM` | `--cache-ram` | `0` (off) |
+| `FOX_MAX_QUEUE_DEPTH` | `--max-queue-depth` | see `--help` |
+| `FOX_MAX_PREFILL_CHUNK` | `--max-prefill-chunk` | see `--help` |
+| `FOX_CONTEXT_SHIFT` | `--context-shift` | see `--help` |
+| `FOX_CONTEXT_KEEP` | `--context-keep` | see `--help` |
+
+Sampling:
+
+| Variable | Corresponding flag | Default |
+|---|---|---|
+| `FOX_REPEAT_LAST_N` | `--repeat-last-n` | `-1` (whole history) |
+
+Model features:
+
+| Variable | Corresponding flag | Default |
+|---|---|---|
+| `FOX_MMPROJ` | `--mmproj` | — |
+| `FOX_LORA_MODULES` | `--lora-modules` | — |
+| `FOX_RERANKING` | `--reranking` | `false` |
+| `FOX_TOOL_CALL_PARSER` | `--tool-call-parser` | see `--help` |
+
+Speculative decoding:
+
+| Variable | Corresponding flag | Default |
+|---|---|---|
+| `FOX_SPECULATIVE` | `--speculative` | see `--help` |
+| `FOX_SPEC_NGRAM` | `--spec-ngram` | see `--help` |
+| `FOX_SPEC_DRAFT_LEN` | `--spec-draft-len` | see `--help` |
+| `FOX_DRAFT_MODEL` | `--draft-model` | — |
+
+Where a default says "see `--help`", `fox serve --help` is the authoritative answer.
+Defaults are not repeated here unless they have been checked, because a wrong default in
+documentation is worse than an absent one.
+
+What the less obvious ones do:
+
+- **`--kv-reuse`** turns prompt reuse on or off wholesale. It exists so a regression can
+  be A/B'd against a build with reuse disabled, and as an escape hatch.
+- **`--slot-prompt-similarity`** is the fraction of an incoming prompt that must match a
+  resident sequence before its KV is reused. Lower reuses more aggressively.
+- **`--cache-ram <MiB>`** keeps reclaimed sequences in host RAM instead of discarding
+  them, so a conversation stays warm without holding GPU blocks. Off by default.
+- **`--reranking`** is required by `/rerank`. Reranking needs RANK pooling, and most
+  reranker GGUFs carry no `pooling_type` in their metadata, so it cannot be inferred.
+
 Example:
 
 ```bash

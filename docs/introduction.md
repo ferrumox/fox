@@ -56,7 +56,7 @@ Quantization levels from Q2_K through Q8_0, F16, and F32 are all supported. When
 
 ## Versioning
 
-The current stable release is **v1.0.0**.
+The current release is **v0.19.1**.
 
 | Version | Highlight |
 |---------|-----------|
@@ -70,7 +70,8 @@ The current stable release is **v1.0.0**.
 | v0.8.0 | Embeddings API, `POST /api/pull`, release binaries |
 | v0.9.0 | Multi-model registry, LRU eviction, `GET /api/ps` |
 | v0.10.0 | Tool use, structured output, config file, request cancellation |
-| **v1.0.0** | HuggingFace search, benchmark comparison, API key auth, Vulkan, dynamic GPU backends |
+| v0.11.0 | HuggingFace search, benchmark comparison, API key auth, Vulkan, dynamic GPU backends |
+| **v0.19.1** | KV reuse rework, llama-server API parity, speculative decoding, LoRA, vision |
 
 ---
 

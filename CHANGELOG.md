@@ -11,6 +11,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.19.1] - 2026-08-03
+
+A correctness pass over everything a reader sees before they run anything, plus one
+build fix. No engine changes.
+
+### Fixed
+
+- **The ROCm FP8 guard patch is applied by the build instead of by hand.** The fix
+  existed only as an uncommitted edit inside the `vendor/llama.cpp` working tree.
+  Commit `79935f7` recorded the intent; the change itself was never tracked. A fresh
+  `git clone --recurse-submodules` did not get it, so the ROCm build failed for
+  everyone except the machine where someone had made the edit manually. `build.rs`
+  now applies it before configuring cmake, idempotently, and warns rather than fails
+  if upstream moves the code — silently building without the fix being the failure
+  mode worth avoiding. Verified by reverting the file to its upstream state and
+  rebuilding.
+
+- **Published performance figures that were never measured.** The same two numbers
+  (87 ms TTFT, 312 tok/s) appeared in four places — the README table, the README's
+  sample `fox-bench` output, `docs/index.md`, and `docs/benchmarks.md` — attributed
+  to an RTX 3090 in one and an RTX 4060 in another. The same figures cannot come from
+  both; they were placeholders that stayed and then corroborated each other. Replaced
+  with the measured `llama-server` comparison, including the workload where fox loses
+  by 4% and a sentence saying that workload will not get faster. Per-hardware tables
+  are relabelled as estimates nobody has run for this project.
+
+- **Five pages announced v1.0.0** while `Cargo.toml` said 0.19.0 and this project had
+  already retracted a premature 1.0.
+
+- **Two false claims in the README.** "The fastest local LLM server" — fox wraps
+  llama.cpp, runs the same kernels for a lone decoding request, and measures 96% of
+  `llama-server` there. And "single static binary" — the bundle is the binary plus the
+  ggml backend libraries beside it, loaded at runtime, which is exactly the mechanism
+  that lets one build cover CPU, CUDA, ROCm, Vulkan and Metal.
+
+- **The FAQ claimed production deployments** without naming one. Replaced with what can
+  be shown: pre-1.0 with a retraction in its history, a stable HTTP API, shipped Docker
+  and systemd units, and an end-to-end suite against a real model gating each release.
+
+- **`docs/features.md` documented a mechanism that no longer exists.** "Block-level
+  prefix caching" described block-aligned reuse keyed by hash; 0.19 replaced it with
+  per-sequence resident token lists and token-exact matching that also reuses generated
+  tokens. Documentation describing a removed design is worse than none, because a
+  reader tunes against it.
+
+### Added
+
+- **The 16 `fox serve` flags that were never documented** — `--speculative`,
+  `--spec-ngram`, `--spec-draft-len`, `--draft-model`, `--lora-modules`, `--mmproj`,
+  `--reranking`, `--kv-reuse`, `--slot-prompt-similarity`, `--cache-ram`,
+  `--repeat-last-n`, `--tool-call-parser`, `--max-queue-depth`, `--max-prefill-chunk`,
+  `--context-shift`, `--context-keep`. The page listed 23 of 39. Nothing documented was
+  wrong; the gap was omission. Defaults appear only where they were checked against the
+  binary, because a wrong default costs more than a missing one.
+
+- **The endpoints shipped in 0.19 in the README's API table** — `/infill`, `/rerank`,
+  `/tokenize`, `/detokenize`, `/apply-template`, `/props`, `/slots`, `/lora-adapters`.
+  A third of the release was invisible to anyone reading the README.
+
+- **A methodology section in `docs/benchmarks.md`** on how these benchmarks produced
+  confident wrong answers before they produced right ones: a binary predating the
+  feature under test, a metric that could not fall when sharing worked, and an
+  oversized prompt that fails differently on each server.
+
+---
+
 ## [0.19.0] - 2026-08-03
 
 ### Fixed

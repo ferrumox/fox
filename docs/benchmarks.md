@@ -1,30 +1,92 @@
 # Benchmarks
 
-fox is designed for high throughput and low latency. This page covers measured performance on reference hardware and explains how to run your own benchmarks.
+This page covers what has actually been measured, on what hardware, and how to
+reproduce it. It also says where fox loses, because a benchmark page that only reports
+wins is not useful for deciding whether to adopt something.
 
 ---
 
-## Reference results
+## What was measured
 
-**Hardware:** NVIDIA RTX 3090 (24 GB VRAM)
-**Model:** Llama-3.2-3B-Instruct Q4_K_M
-**Concurrency:** 4 workers
-**Requests:** 50
-**Max tokens per request:** 128
+**Hardware:** AMD Radeon 890M (integrated), Vulkan backend
+**Model:** Llama-3.2-1B-Instruct Q8_0
+**Reference:** `llama-server` built from the same vendored llama.cpp fox links against
 
-| Metric | fox | Ollama | Improvement |
-|--------|-----|--------|-------------|
-| TTFT P50 | 87 ms | 310 ms | −72% |
-| TTFT P95 | 134 ms | 480 ms | −72% |
-| Latency P50 | 412 ms | 890 ms | −54% |
-| Latency P95 | 823 ms | 1740 ms | −53% |
-| Throughput | 312 tok/s | 148 tok/s | +111% |
+Both servers come from the same llama.cpp checkout and the same toolchain, so the
+comparison is between the two serving layers rather than between two versions of an
+engine. Exactly one server runs at a time (ggml's thread pool spin-waits, so an idle
+second server still burns cores and skews the arm under test), arms alternate each round
+so thermal drift cannot systematically favour one, and every figure below comes from 3
+rounds with disjoint ranges.
 
-**TTFT** = Time to first token (from when the server receives the request to when it sends the first token).
-**Latency** = End-to-end time for the complete response.
-**Throughput** = Total tokens generated per second across all concurrent workers.
+### Concurrent requests behind a shared prompt
 
-The throughput improvement (2.1×) comes primarily from continuous batching — all 4 workers' requests are batched into the same forward pass rather than processed sequentially. The TTFT improvement comes from prefix caching: after the first few requests, the system prompt and initial context are already in the KV cache.
+Eight and sixteen clients arriving together, each carrying the same 1856-token system
+prompt and a different short question. This is the shape of agent and RAG traffic.
+
+| | fox | llama-server | |
+|---|---|---|---|
+| 8 clients, cold — TTFT p50 | **1129 ms** | 4550 ms | fox 4.0× |
+| 16 clients, cold — TTFT p50 | **1402 ms** | 8064 ms | fox 5.75× |
+| 16 clients — whole burst wall clock | **3.8 s** | 16.2 s | |
+| 8 clients, warm — TTFT p50 | **52 ms** | 193 ms | fox 3.7× |
+
+Doubling the clients costs fox 24% more cold TTFT and `llama-server` 79%. Fox adds one
+short suffix of prefill per extra client; `llama-server` adds a whole prompt.
+
+The reason is structural rather than tuning. Slot affinity reuses an *idle* sequence, so
+when requests sharing a prompt arrive together there is nothing idle to inherit and each
+prefills the same tokens. `llama-server` skips busy slots in both its similarity pass and
+its LRU fallback, and reports `cached_tokens` 0 on this workload. Fox copies the shared
+prefix out of a sibling that is already decoding.
+
+The warm row is the fair floor: once the earlier sequences go idle, both servers reuse
+the prefix, and both report the same `cached_tokens`.
+
+### Single requests with short prompts
+
+| | fox | llama-server |
+|---|---|---|
+| 4 clients, unrelated short prompts — throughput | 96% | baseline |
+
+Fox is about 4% behind here. Fox wraps llama.cpp, so a request decoding on its own runs
+the same kernels `llama-server` runs; the gap is fox's serving layer, not the model. This
+workload cannot see prompt reuse because there is no prompt worth reusing. If your traffic
+looks like this, fox will not make it faster.
+
+### Reproduce
+
+```bash
+scripts/ab_shared_prefix.sh    # concurrent burst behind a shared prompt
+scripts/ab_bench.sh            # decode-bound throughput
+```
+
+Comparisons against Ollama are pending re-measurement. Figures previously published here
+carried no round count or methodology and are not repeated.
+
+## How these benchmarks were wrong before they were right
+
+Kept here because both failures produced confident, plausible, wrong answers rather than
+obvious breakage.
+
+**A binary that predated the feature.** The first run of the shared-prompt benchmark
+reported `llama-server` ahead and fox reusing nothing. The fox arm was a prebuilt bundle
+from 31 minutes before the feature landed. What made it convincing was that the warm row
+still looked right, because the slot table it depends on predated that bundle. If an arm
+shows no effect at all, check the binary's timestamp against the commit.
+
+**A metric that could not move.** Pool usage was read as the sum of per-slot block counts.
+A shared block is counted once by every slot referencing it, so that sum cannot fall when
+sharing works. It read as "sharing changed nothing" across two measurements. `/slots` now
+reports `kv_blocks_used` and `kv_blocks_total`, which is the pool's own occupancy: 282 →
+72 blocks on 6 clients behind a 673-token prompt.
+
+**A prompt that did not fit.** An oversized prompt does not fail the same way on both
+servers. `llama-server` returns 400; fox rolls the context window, which disables prompt
+reuse. That would have read as "fox cannot reuse prompts". The driver now reports measured
+prompt tokens and warns when they exceed the per-sequence context.
+
+Full detail is in `docs/design/rocm-benchmarking-2026-08.md`.
 
 ---
 
@@ -79,11 +141,13 @@ Output:
 fox vs ollama  •  llama3.2  •  concurrency=4  •  50 requests
 
                 fox         ollama      improvement
-TTFT P50        87ms        310ms       +72%
-TTFT P95        134ms       480ms       +72%
-Latency P50     412ms       890ms       +54%
-Latency P95     823ms       1740ms      +53%
-Throughput      312 tok/s   148 tok/s   +111%
+TTFT P50        ...         ...         ...
+TTFT P95        ...         ...         ...
+Latency P50     ...         ...         ...
+Latency P95     ...         ...         ...
+Throughput      ...         ...         ...
+
+(shape of the output; run it to get your own numbers)
 ```
 
 ### JSON output (for CI)
@@ -99,6 +163,7 @@ fox-bench \
 
 ```json
 {
+  "_comment": "illustrative values, not measurements — run fox-bench for real ones",
   "url": "http://localhost:8080",
   "model": "llama3.2",
   "concurrency": 8,
@@ -204,7 +269,10 @@ Each loaded model occupies VRAM for its weights. With 4 models loaded simultaneo
 
 ## Expected performance by hardware
 
-These are rough guidelines based on typical GGUF model sizes and hardware capabilities.
+**These are estimates, not measurements.** Nobody has run these configurations for this
+project; they are order-of-magnitude figures to help size hardware, and they should not be
+quoted as fox benchmark results. The only measured numbers on this page are in
+[What was measured](#what-was-measured).
 
 ### Llama-3.2-3B Q4_K_M (2 GB model)
 

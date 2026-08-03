@@ -14,7 +14,7 @@
 //   No Cargo features needed; users just run `cargo build --release`.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Returns the absolute path to a command found in PATH, or None.
 /// Used to detect GPU toolchains (nvcc, hipcc, glslc) at build time.
@@ -26,6 +26,58 @@ fn which_cmd(cmd: &str) -> Option<String> {
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
+}
+
+/// Local corrections applied to the vendored llama.cpp before it is built.
+///
+/// This exists because the alternative was worse. The fix below used to live only as an
+/// uncommitted edit in the submodule's working tree, which meant a fresh
+/// `git clone --recurse-submodules` did not get it and the ROCm build broke for anyone
+/// but the person who had made the edit by hand. A vendored dependency whose build
+/// depends on an unrecorded local change is not vendored.
+///
+/// Each entry is applied in place and is idempotent: if the replacement is already
+/// present, nothing happens, so repeated builds and a dirty submodule are both fine.
+/// The submodule will show as modified afterwards. That is expected — the alternative is
+/// a fork, which this project deliberately dropped in order to track upstream.
+///
+/// Anything added here should also be sent upstream. This is a holding pen, not a home.
+fn patch_vendored_llama(llama_root: &Path) {
+    // ROCm: llama.cpp enables its FP8 path for HIP >= 6.2.0, but the __hip_fp8_e4m3
+    // types it needs are not usable there — the build fails on 6.2.x. Requiring 6.3.0
+    // makes the guard match reality. On 6.3+ nothing changes: FP8 is still enabled.
+    // See commit 79935f7, which recorded the intent while the change itself stayed
+    // untracked.
+    const PATCHES: &[(&str, &str, &str)] = &[(
+        "ggml/src/ggml-cuda/vendors/hip.h",
+        "HIP_VERSION >= 60200000",
+        "HIP_VERSION >= 60300000",
+    )];
+
+    for (rel, from, to) in PATCHES {
+        let path = llama_root.join(rel);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            // Not fatal: a backend the local build does not use may be absent, and
+            // failing the whole build over a file nobody compiles helps no one.
+            println!("cargo:warning=vendor patch skipped, cannot read {rel}");
+            continue;
+        };
+        if text.contains(to) {
+            continue; // already applied
+        }
+        if !text.contains(from) {
+            // Upstream moved. Say so loudly rather than silently building something
+            // that no longer carries the fix.
+            println!(
+                "cargo:warning=vendor patch for {rel} no longer applies — upstream may \
+                 have fixed or changed it; re-check build.rs::patch_vendored_llama"
+            );
+            continue;
+        }
+        if let Err(e) = std::fs::write(&path, text.replace(from, to)) {
+            println!("cargo:warning=could not apply vendor patch to {rel}: {e}");
+        }
+    }
 }
 
 fn main() {
@@ -70,6 +122,8 @@ fn main() {
             }
         }
     }
+
+    patch_vendored_llama(&llama_root);
 
     // ── cmake configuration ───────────────────────────────────────────────────
     let mut cmake_config = cmake::Config::new(&llama_root);

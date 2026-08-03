@@ -26,7 +26,7 @@ The `-v` mount preserves downloaded models between container restarts. Without i
 | Tag | Description |
 |-----|-------------|
 | `latest` | Latest stable release |
-| `1.0.0` | Pinned release version |
+| `0.19.1` | Pinned release version |
 
 > The image includes CUDA support and falls back to CPU automatically when no GPU is available. No separate CPU image is needed.
 

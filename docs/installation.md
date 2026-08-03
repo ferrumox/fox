@@ -165,7 +165,7 @@ cargo install --path .
 
 ```bash
 fox --version
-# fox 1.0.0
+# fox 0.19.1
 
 fox --help
 # Usage: fox <COMMAND>
