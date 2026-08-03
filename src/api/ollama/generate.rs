@@ -7,13 +7,18 @@ use crate::api::shared::extractor::LenientJson;
 use bytes::Bytes;
 use std::time::Instant;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+
 use crate::api::error::load_model_or_respond;
 use crate::api::router::AppState;
-use crate::api::shared::inference::{prepare_prompt, sampling_from_ollama, MessageForTemplate};
+use crate::api::shared::inference::{
+    prepare_multimodal_prompt, prepare_prompt, sampling_from_ollama, MessageForTemplate,
+};
 use crate::api::shared::streaming::{
     collect_tokens, ndjson_response, ndjson_stream, now_rfc3339, ollama_done_reason,
 };
 use crate::api::types::{OllamaGenerateChunk, OllamaGenerateRequest};
+use crate::engine::model::MEDIA_MARKER;
 use crate::scheduler::{InferenceRequest, Token};
 
 pub async fn ollama_generate(
@@ -26,7 +31,19 @@ pub async fn ollama_generate(
         Err(r) => return r,
     };
 
-    // Build MessageForTemplate list (system prompt + user prompt).
+    let has_images = req.images.as_ref().is_some_and(|v| !v.is_empty());
+    let use_vision = has_images && entry.engine.supports_vision();
+    if has_images && !use_vision {
+        tracing::warn!(
+            model = %req.model,
+            "dropped image content — model has no vision support (no mmproj loaded)"
+        );
+    }
+
+    // Build MessageForTemplate list (system prompt + user prompt). When
+    // `use_vision`, each base64 image is decoded and appended to the user
+    // prompt as a MEDIA_MARKER, mirroring the OpenAI/chat handlers.
+    let mut images: Vec<Vec<u8>> = Vec::new();
     let mut messages: Vec<MessageForTemplate> = Vec::new();
     if let Some(ref sys) = req.system {
         messages.push(MessageForTemplate {
@@ -36,9 +53,24 @@ pub async fn ollama_generate(
             tool_call_id: None,
         });
     }
+    let mut prompt = req.prompt.clone();
+    if use_vision {
+        for b64 in req.images.iter().flatten() {
+            match STANDARD.decode(b64) {
+                Ok(bytes) => {
+                    images.push(bytes);
+                    if !prompt.is_empty() {
+                        prompt.push(' ');
+                    }
+                    prompt.push_str(MEDIA_MARKER);
+                }
+                Err(e) => tracing::warn!("skipping malformed base64 image: {e}"),
+            }
+        }
+    }
     messages.push(MessageForTemplate {
         role: "user".to_string(),
-        content: Some(req.prompt.clone()),
+        content: Some(prompt),
         tool_calls: None,
         tool_call_id: None,
     });
@@ -73,28 +105,52 @@ pub async fn ollama_generate(
         }
     }
 
-    let (prompt_tokens, prompt_tokens_len) = prepare_prompt(
-        &entry,
-        messages,
-        state.system_prompt.as_deref(),
-        None, // no tools on /api/generate
-        false,
-        None,
-        response_format.as_ref(),
-        false, // show_thinking always false for /api/generate
-    );
+    let (prompt_tokens, prompt_tokens_len, multimodal) = if use_vision {
+        match prepare_multimodal_prompt(
+            &entry,
+            messages,
+            state.system_prompt.as_deref(),
+            None, // no tools on /api/generate
+            false,
+            None,
+            response_format.as_ref(),
+            false, // show_thinking always false for /api/generate
+            &images,
+        ) {
+            Ok(chunks) => {
+                let n = chunks.n_positions();
+                (Vec::new(), n, Some(chunks))
+            }
+            Err(e) => {
+                return crate::api::error::AppError::BadRequest(format!(
+                    "failed to encode image(s): {e}"
+                ))
+                .into_response()
+            }
+        }
+    } else {
+        let (tokens, len) = prepare_prompt(
+            &entry,
+            messages,
+            state.system_prompt.as_deref(),
+            None, // no tools on /api/generate
+            false,
+            None,
+            response_format.as_ref(),
+            false, // show_thinking always false for /api/generate
+        );
+        (tokens, len, None)
+    };
 
     let stream_mode = req.stream.unwrap_or(true);
 
     let req_id = entry.engine.next_request_id();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
-    if let Err(e) = entry.engine.submit_request(InferenceRequest::new(
-        req_id,
-        prompt_tokens,
-        max_tokens,
-        sampling,
-        tx,
-    )) {
+    let mut inference_req = InferenceRequest::new(req_id, prompt_tokens, max_tokens, sampling, tx);
+    if let Some(chunks) = multimodal {
+        inference_req = inference_req.with_multimodal(chunks);
+    }
+    if let Err(e) = entry.engine.submit_request(inference_req) {
         entry
             .engine
             .record_rejection(crate::api::error::rejection_reason_label(&e));

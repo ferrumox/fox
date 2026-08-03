@@ -200,6 +200,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         split_mode,
         &tensor_split_parsed,
         args.moe_cpu,
+        None, // mmproj_path — `fox run` has no --mmproj flag yet; use `fox serve` for vision
     )?;
     spinner.finish_and_clear();
     theme::print_success("Model loaded.");

@@ -43,6 +43,7 @@ pub async fn run_probe(args: ProbeArgs) -> Result<()> {
         0,     // split_mode = none
         &[],   // tensor_split
         false, // moe_offload_cpu
+        None,  // mmproj_path
     )?;
 
     let info = model.model_info();

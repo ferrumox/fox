@@ -5,7 +5,7 @@
 //   llama_cpp  — LlamaCppModel implementation (real + fox_stub variant)
 //   stub       — StubModel for tests / test-helpers feature
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 pub(crate) mod llama_cpp;
 pub(crate) mod model_info;
@@ -35,6 +35,84 @@ pub use stub::{StubModel, ThinkingStubModel};
 pub enum NativeToolFormat {
     Hermes,
     Mistral,
+}
+
+/// Literal spliced into a rendered chat prompt in place of an image content block,
+/// consumed by `mtmd_tokenize` to split the prompt into text/image chunks (mirrors
+/// llama.cpp server's own approach: flatten content parts to one marker-laced
+/// string *before* the chat template runs, rather than teaching every Jinja
+/// template about images). Fox-owned rather than `mtmd_default_marker()`'s
+/// `<__media__>` only so the constant lives next to the code that emits and
+/// consumes it instead of behind an FFI call.
+pub const MEDIA_MARKER: &str = "<__fox_media__>";
+
+/// Owned handle to a tokenized multimodal (text+image) prompt — mtmd's
+/// `mtmd_input_chunks`. Defined unconditionally (not `#[cfg(not(fox_stub))]`) so
+/// `Model::tokenize_multimodal`'s signature doesn't need a stub-only variant;
+/// only the real (non-stub) `LlamaCppModel` backend ever constructs one, via
+/// `from_raw` (private to that module). `Clone` is cheap (refcount bump) and
+/// safe to move across the scheduler/engine boundary — the underlying chunks
+/// are freed exactly once, when the last clone drops.
+#[derive(Debug)]
+pub struct MultimodalChunks {
+    inner: std::sync::Arc<RawChunksPtr>,
+}
+
+// The field is only read in `#[cfg(not(fox_stub))]` code (Drop, n_positions) —
+// a stub build never constructs one, so the field is legitimately unused there.
+#[derive(Debug)]
+#[cfg_attr(fox_stub, allow(dead_code))]
+struct RawChunksPtr(*mut std::ffi::c_void);
+unsafe impl Send for RawChunksPtr {}
+unsafe impl Sync for RawChunksPtr {}
+
+impl Drop for RawChunksPtr {
+    fn drop(&mut self) {
+        #[cfg(not(fox_stub))]
+        unsafe {
+            crate::engine::ffi::mtmd_input_chunks_free(self.0.cast());
+        }
+    }
+}
+
+impl Clone for MultimodalChunks {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl MultimodalChunks {
+    /// # Safety
+    /// `ptr` must be a valid, uniquely-owned `mtmd_input_chunks*` (e.g. freshly
+    /// returned by `mtmd_input_chunks_init` + a successful `mtmd_tokenize`).
+    #[cfg(not(fox_stub))]
+    pub(crate) unsafe fn from_raw(ptr: *mut std::ffi::c_void) -> Self {
+        Self {
+            inner: std::sync::Arc::new(RawChunksPtr(ptr)),
+        }
+    }
+
+    #[cfg(not(fox_stub))]
+    pub(crate) fn as_raw(&self) -> *mut std::ffi::c_void {
+        self.inner.0
+    }
+
+    /// Total KV positions this multimodal prompt will occupy (text + image
+    /// tokens combined; for M-RoPE architectures this can differ from the raw
+    /// token count) — used for scheduler block accounting exactly like
+    /// `prompt_tokens.len()` is for a plain text prompt.
+    pub fn n_positions(&self) -> usize {
+        #[cfg(not(fox_stub))]
+        {
+            unsafe { crate::engine::ffi::mtmd_helper_get_n_pos(self.inner.0.cast()) as usize }
+        }
+        #[cfg(fox_stub)]
+        {
+            0
+        }
+    }
 }
 
 /// Sampling parameters recommended by the model's GGUF metadata.
@@ -144,6 +222,11 @@ pub struct InferenceRequestForModel {
     pub min_tokens: usize,
     /// Additive per-token logit bias (OpenAI `logit_bias`).
     pub logit_bias: Option<std::sync::Arc<std::collections::HashMap<i32, f32>>>,
+    /// Tokenized multimodal (text+image) prompt, when this request carries images.
+    /// `prompt_tokens` is empty for such requests — `do_prefill` dispatches them to
+    /// an atomic `mtmd_helper_eval_chunks` call instead of the normal token batch
+    /// path (see `docs/design/vision-support.md`).
+    pub multimodal: Option<MultimodalChunks>,
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +390,28 @@ pub trait Model: Send + Sync {
     /// Models without native thinking always return `false`.
     fn supports_thinking(&self) -> bool {
         false
+    }
+
+    /// Returns `true` when a vision projector (mmproj) is loaded alongside this
+    /// model, i.e. image content in a request can actually be encoded. Models
+    /// loaded without a paired mmproj — the overwhelming majority — return `false`.
+    fn supports_vision(&self) -> bool {
+        false
+    }
+
+    /// Render the chat prompt (same inputs as `build_prompt_tokens`) and tokenize
+    /// it together with `images` via mtmd, splitting on `MEDIA_MARKER` occurrences
+    /// in the rendered text. Callers should check `supports_vision()` first — the
+    /// default errors, since only a model loaded with a paired mmproj can do this.
+    fn tokenize_multimodal(
+        &self,
+        messages: &[(String, String)],
+        enable_thinking: bool,
+        tools: Option<&serde_json::Value>,
+        images: &[Vec<u8>],
+    ) -> Result<MultimodalChunks> {
+        let _ = (messages, enable_thinking, tools, images);
+        Err(anyhow!("model has no vision support (no mmproj loaded)"))
     }
 
     /// Return sampling parameters recommended by the model's GGUF metadata, if any.

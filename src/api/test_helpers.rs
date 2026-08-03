@@ -47,6 +47,7 @@ pub fn make_test_registry(
         split_mode: 1,
         tensor_split: vec![],
         moe_offload_cpu: false,
+        mmproj: None,
     };
     let registry = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
     let entry = EngineEntry::for_test(name);
@@ -107,6 +108,7 @@ pub fn make_test_state_with_queue_depth(
         split_mode: 1,
         tensor_split: vec![],
         moe_offload_cpu: false,
+        mmproj: None,
     };
     let registry = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
     let entry = EngineEntry::for_test_with_queue_depth(name, max_queue_depth);
@@ -156,6 +158,7 @@ pub fn make_test_state_speculative(
         split_mode: 1,
         tensor_split: vec![],
         moe_offload_cpu: false,
+        mmproj: None,
     };
     let registry = Arc::new(ModelRegistry::new(cfg, HashMap::new()));
     let entry = EngineEntry::for_test_speculative(name);
@@ -203,6 +206,7 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         split_mode: 1,
         tensor_split: vec![],
         moe_offload_cpu: false,
+        mmproj: None,
     };
     let registry = Arc::new(crate::model_registry::ModelRegistry::new(
         cfg,

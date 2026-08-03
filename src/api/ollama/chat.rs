@@ -8,11 +8,13 @@ use crate::api::shared::extractor::LenientJson;
 use bytes::Bytes;
 use std::time::Instant;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+
 use crate::api::error::load_model_or_respond;
 use crate::api::router::AppState;
 use crate::api::shared::inference::{
-    extract_thinking, parse_tool_call, prepare_prompt, resolve_tool_call_parser,
-    resolve_tool_choice, sampling_from_ollama, MessageForTemplate,
+    extract_thinking, parse_tool_call, prepare_multimodal_prompt, prepare_prompt,
+    resolve_tool_call_parser, resolve_tool_choice, sampling_from_ollama, MessageForTemplate,
 };
 use crate::api::shared::streaming::{
     collect_tokens, ndjson_response, ndjson_stream, now_rfc3339, ollama_done_reason,
@@ -21,6 +23,7 @@ use crate::api::types::{
     OllamaChatChunk, OllamaChatMessage, OllamaChatRequest, OllamaToolCall, OllamaToolCallFunction,
     ToolCall, ToolCallFunction,
 };
+use crate::engine::model::MEDIA_MARKER;
 use crate::scheduler::{InferenceRequest, Token};
 
 pub async fn ollama_chat(
@@ -33,7 +36,22 @@ pub async fn ollama_chat(
         Err(r) => return r,
     };
 
-    // Convert Ollama messages → MessageForTemplate (handles tool history).
+    let has_images = req
+        .messages
+        .iter()
+        .any(|m| m.images.as_ref().is_some_and(|v| !v.is_empty()));
+    let use_vision = has_images && entry.engine.supports_vision();
+    if has_images && !use_vision {
+        tracing::warn!(
+            model = %req.model,
+            "dropped image content — model has no vision support (no mmproj loaded)"
+        );
+    }
+
+    // Convert Ollama messages → MessageForTemplate (handles tool history). When
+    // `use_vision`, each base64 image is decoded and appended as a MEDIA_MARKER
+    // in the content string, mirroring the OpenAI handler's approach.
+    let mut images: Vec<Vec<u8>> = Vec::new();
     let messages: Vec<MessageForTemplate> = req
         .messages
         .iter()
@@ -50,13 +68,29 @@ pub async fn ollama_chat(
                     })
                     .collect::<Vec<_>>()
             });
+            let mut content = if m.content.is_empty() {
+                None
+            } else {
+                Some(m.content.clone())
+            };
+            if use_vision {
+                for b64 in m.images.iter().flatten() {
+                    match STANDARD.decode(b64) {
+                        Ok(bytes) => {
+                            images.push(bytes);
+                            let c = content.get_or_insert_with(String::new);
+                            if !c.is_empty() {
+                                c.push(' ');
+                            }
+                            c.push_str(MEDIA_MARKER);
+                        }
+                        Err(e) => tracing::warn!("skipping malformed base64 image: {e}"),
+                    }
+                }
+            }
             MessageForTemplate {
                 role: m.role.clone(),
-                content: if m.content.is_empty() {
-                    None
-                } else {
-                    Some(m.content.clone())
-                },
+                content,
                 tool_calls,
                 tool_call_id: m.tool_call_id.clone(),
             }
@@ -111,26 +145,50 @@ pub async fn ollama_chat(
         }
     }
 
-    let (prompt_tokens, prompt_tokens_len) = prepare_prompt(
-        &entry,
-        messages,
-        state.system_prompt.as_deref(),
-        eff_tools,
-        false, // tool_required (Ollama uses auto only)
-        None,  // specific_tool
-        response_format.as_ref(),
-        show_thinking_in_output,
-    );
+    let (prompt_tokens, prompt_tokens_len, multimodal) = if use_vision {
+        match prepare_multimodal_prompt(
+            &entry,
+            messages,
+            state.system_prompt.as_deref(),
+            eff_tools,
+            false, // tool_required (Ollama uses auto only)
+            None,  // specific_tool
+            response_format.as_ref(),
+            show_thinking_in_output,
+            &images,
+        ) {
+            Ok(chunks) => {
+                let n = chunks.n_positions();
+                (Vec::new(), n, Some(chunks))
+            }
+            Err(e) => {
+                return crate::api::error::AppError::BadRequest(format!(
+                    "failed to encode image(s): {e}"
+                ))
+                .into_response()
+            }
+        }
+    } else {
+        let (tokens, len) = prepare_prompt(
+            &entry,
+            messages,
+            state.system_prompt.as_deref(),
+            eff_tools,
+            false, // tool_required (Ollama uses auto only)
+            None,  // specific_tool
+            response_format.as_ref(),
+            show_thinking_in_output,
+        );
+        (tokens, len, None)
+    };
 
     let req_id = entry.engine.next_request_id();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
-    if let Err(e) = entry.engine.submit_request(InferenceRequest::new(
-        req_id,
-        prompt_tokens,
-        max_tokens,
-        sampling,
-        tx,
-    )) {
+    let mut inference_req = InferenceRequest::new(req_id, prompt_tokens, max_tokens, sampling, tx);
+    if let Some(chunks) = multimodal {
+        inference_req = inference_req.with_multimodal(chunks);
+    }
+    if let Err(e) = entry.engine.submit_request(inference_req) {
         entry
             .engine
             .record_rejection(crate::api::error::rejection_reason_label(&e));

@@ -47,6 +47,7 @@ async fn load_draft_model(
             split_mode,
             &tensor_split,
             moe_offload_cpu,
+            None, // mmproj_path — draft models are text-only speculation proposers
         )
     })
     .await
@@ -69,6 +70,7 @@ pub(super) async fn load_model(
     path: &Path,
     cfg: &RegistryConfig,
     draft: Option<(String, PathBuf)>,
+    mmproj: Option<PathBuf>,
 ) -> Result<EngineEntry> {
     let path = path.to_path_buf();
     let name = name.to_string();
@@ -123,6 +125,7 @@ pub(super) async fn load_model(
             split_mode,
             &tensor_split,
             moe_offload_cpu,
+            mmproj.as_deref(),
         )
     })
     .await

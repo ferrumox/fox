@@ -56,7 +56,7 @@ The primary inference endpoint. Accepts a conversation history and returns a mod
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `model` | `string` | (required) | Model name. Resolved using aliases and filename matching. See [Configuration](../configuration.md). |
-| `messages` | `array` | (required) | Conversation history. Each item has `role` (`system`, `user`, `assistant`, or `tool`) and `content`. |
+| `messages` | `array` | (required) | Conversation history. Each item has `role` (`system`, `user`, `assistant`, or `tool`) and `content`. `content` can be a plain string or an array of content blocks — `{"type":"text","text":"..."}` and `{"type":"image_url","image_url":{"url":"data:<mime>;base64,<data>"}}`. Images require the loaded model to have a paired `--mmproj` (see [Configuration](../configuration.md) and `docs/design/vision-support.md`); otherwise they're dropped with a server-side warning. Only base64 `data:` URIs are accepted — a remote `http(s)://` URL is rejected with `400`. |
 | `max_tokens` | `integer` | `256` | Maximum number of tokens to generate. |
 | `temperature` | `float` | `0.8` | Sampling temperature. `0.0` = greedy, higher = more random. |
 | `top_p` | `float` | `0.9` | Nucleus sampling probability. `1.0` = disabled. |

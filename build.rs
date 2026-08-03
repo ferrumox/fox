@@ -87,6 +87,10 @@ fn main() {
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
         .define("LLAMA_BUILD_SERVER", "OFF")
         .define("LLAMA_BUILD_COMMON", "OFF")
+        // Standalone libmtmd (vision/multimodal) build, independent of the tools/
+        // tree: it only links against ggml + llama (see tools/mtmd/CMakeLists.txt),
+        // so it builds cleanly with LLAMA_BUILD_TOOLS/LLAMA_BUILD_COMMON both OFF.
+        .define("LLAMA_BUILD_MTMD", "ON")
         // Upstream (post-2026-04) additions: the unified `app/` binary builds by default and
         // needs common/build-info headers we don't generate → turn it off. The web UI was
         // renamed LLAMA_BUILD_WEBUI → LLAMA_BUILD_UI (and can fetch a prebuilt bundle).
@@ -240,6 +244,7 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=llama");
     println!("cargo:rustc-link-lib=dylib=ggml-base"); // shared: core ggml types
     println!("cargo:rustc-link-lib=dylib=ggml"); // shared: backend dlopen registry
+    println!("cargo:rustc-link-lib=dylib=mtmd"); // shared: vision/multimodal (LLAMA_BUILD_MTMD)
                                                  // NOTE: do NOT link ggml-cpu / ggml-metal / ggml-cuda explicitly.
                                                  // With GGML_BACKEND_DL=ON they are MODULE libraries loaded at runtime via
                                                  // dlopen. On macOS, cmake MODULEs use .so which the macOS linker rejects.
@@ -278,6 +283,7 @@ fn main() {
                     let is_backend = fname.contains(&format!(".{so_ext}"))
                         && (fname.starts_with("libggml")
                             || fname.starts_with("libllama.")
+                            || fname.starts_with("libmtmd")
                             || fname == format!("llama.{so_ext}"));
                     if is_backend {
                         let dst = dest.join(p.file_name().unwrap());
@@ -317,9 +323,15 @@ fn main() {
     }
 
     // ── bindgen ───────────────────────────────────────────────────────────────
+    // llama.h and mtmd.h/mtmd-helper.h are parsed together in ONE bindgen pass:
+    // mtmd.h #includes llama.h/ggml.h itself, so parsing it in a SEPARATE pass
+    // would re-emit llama_*/ggml_* type definitions a second time, conflicting
+    // with the ones below (duplicate `struct llama_batch` etc.). A single pass
+    // parses one shared AST, so every type is defined exactly once.
     let llama_include = llama_root.join("include");
     let ggml_include = llama_root.join("ggml").join("include");
     let ggml_build_include = build_dir.join("ggml").join("include");
+    let mtmd_include = llama_root.join("tools").join("mtmd");
 
     let mut include_paths = vec![llama_include.clone(), ggml_include];
     if ggml_build_include.exists() {
@@ -333,11 +345,16 @@ fn main() {
 
     let bindings = bindgen::Builder::default()
         .header(llama_include.join("llama.h").to_string_lossy())
-        .clang_args(clang_args)
+        .header(mtmd_include.join("mtmd.h").to_string_lossy())
+        .header(mtmd_include.join("mtmd-helper.h").to_string_lossy())
+        .clang_args(&clang_args)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .allowlist_function("llama_.*")
         .allowlist_type("llama_.*")
         .allowlist_var("LLAMA_.*")
+        .allowlist_function("mtmd_.*")
+        .allowlist_type("mtmd_.*")
+        .allowlist_var("MTMD_.*")
         .size_t_is_usize(true)
         .generate()
         .expect("Unable to generate bindings");

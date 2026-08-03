@@ -163,6 +163,23 @@ impl InferenceEngine {
             .build_prompt_tokens(messages, enable_thinking, tools)
     }
 
+    /// Returns `true` when this model was loaded with a paired mmproj (vision
+    /// projector), i.e. `tokenize_multimodal` can actually encode images.
+    pub fn supports_vision(&self) -> bool {
+        self.model.supports_vision()
+    }
+
+    pub fn tokenize_multimodal(
+        &self,
+        messages: &[(String, String)],
+        enable_thinking: bool,
+        tools: Option<&serde_json::Value>,
+        images: &[Vec<u8>],
+    ) -> anyhow::Result<crate::engine::model::MultimodalChunks> {
+        self.model
+            .tokenize_multimodal(messages, enable_thinking, tools, images)
+    }
+
     /// Which tool-call wire format the loaded model's own chat template natively
     /// speaks, if any (see [`crate::engine::model::NativeToolFormat`]), as opposed to
     /// needing fox's generic prompt-injected tool listing.

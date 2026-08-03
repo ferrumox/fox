@@ -199,6 +199,11 @@ pub struct InferenceRequest {
     /// Subtracted from the raw token count in [`Self::context_len`] so decode positions
     /// track the shifted KV. Reset to 0 on preemption (the KV — and any rolls — are gone).
     pub rolled_tokens: usize,
+    /// Tokenized multimodal (text+image) prompt, set via `with_multimodal` when the
+    /// request carries images. `prompt_tokens` stays empty for such requests —
+    /// every place that sizes KV/blocks from prompt length must read
+    /// [`Self::n_positions`] instead so it accounts for image tokens too.
+    pub multimodal: Option<crate::engine::model::MultimodalChunks>,
 }
 
 impl InferenceRequest {
@@ -228,7 +233,26 @@ impl InferenceRequest {
             prefilled_tokens: 0,
             prefill_pos: 0,
             rolled_tokens: 0,
+            multimodal: None,
         }
+    }
+
+    /// Attach a tokenized multimodal prompt (image content already encoded by
+    /// `mtmd_tokenize`). `prompt_tokens` should be left empty by the caller — the
+    /// position count comes from the chunks via [`Self::n_positions`] instead.
+    pub fn with_multimodal(mut self, chunks: crate::engine::model::MultimodalChunks) -> Self {
+        self.multimodal = Some(chunks);
+        self
+    }
+
+    /// Total KV positions this request's prompt occupies — `prompt_tokens.len()`
+    /// for a plain text prompt, or the multimodal chunk count (image tokens can
+    /// outnumber `prompt_tokens.len()`, which is always 0 for such a request).
+    pub fn n_positions(&self) -> usize {
+        self.multimodal
+            .as_ref()
+            .map(|m| m.n_positions())
+            .unwrap_or(self.prompt_tokens.len())
     }
 
     /// Total tokens currently in the KV cache (prefilled + generated).
@@ -240,7 +264,7 @@ impl InferenceRequest {
             self.prefilled_tokens + self.generated_tokens
         } else {
             // Fallback before prefill completes (prefilled_tokens not yet set).
-            self.prompt_tokens.len() + self.generated_tokens
+            self.n_positions() + self.generated_tokens
         };
         // Context rolling discards the oldest KV window; the live sequence length — and
         // thus the next decode position — is reduced by everything rolled out so far.

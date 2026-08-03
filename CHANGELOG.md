@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0]
+
+fox gets **vision/multimodal input** — the top feature-gap item for the LatAm
+go-to-market push (`STATUS.md`, `vllm-gap-analysis.md`). Wraps llama.cpp's `mtmd`
+library rather than building a vision pipeline from scratch: it already handles
+image decoding and per-architecture position bookkeeping (causal vs M-RoPE)
+internally, so the real work was fitting a paired-projector model into a scheduler
+built around `prompt_tokens: Vec<i32>` as the single source of prompt content *and*
+position count. Verified end-to-end against a real, mainstream model — Google's
+Gemma 4 E2B — with 24/24 e2e checks passing, including two different images
+back-to-back not cross-contaminating output (the exact failure mode the design
+exists to prevent). See `docs/design/vision-support.md` for the full rationale.
+
+### Added
+
+- **Vision / multimodal input** (`--mmproj <name>` / `FOX_MMPROJ`) — loads a paired
+  vision-projector GGUF alongside the target model (mirrors `--draft-model`: one
+  global pairing, resolved the same way). OpenAI `image_url` (base64 `data:` URI
+  only — a remote `http(s)://` URL is rejected with `400`, not fetched, to avoid an
+  SSRF surface) and Ollama `images` are both supported on every chat/generate
+  endpoint. Image content is spliced into the rendered prompt as a marker literal
+  before the chat template runs, then `mtmd_tokenize` splits on it — mirrors
+  llama.cpp server's own approach rather than teaching every Jinja template about
+  images. A multimodal request's prefill is a single atomic
+  `mtmd_helper_eval_chunks` call — it never joins the shared per-step token batch,
+  and (by design, not a bolted-on flag) never touches the prefix cache, since
+  `prompt_tokens` stays empty for such requests and every prefix-cache path already
+  keys off it directly. v1 scope: one global mmproj pairing, no multimodal prefix
+  caching, no OOM bisection-retry on this path — see `docs/design/vision-support.md`
+  for why each was cut.
+- **`gemma4-e2b` in the model registry** — Google Gemma 4 E2B (natively multimodal,
+  131K context) + its mmproj, verified end-to-end (24/24 smoke checks, exact
+  one-word-correct answers to test images). Recommended vision model; `moondream2`
+  is also available as a smaller edge-friendly option (2048 context).
+
+### Fixed
+
+- **A model's `chat_template` metadata that's a bare legacy name (e.g. literally
+  `"vicuna"`) instead of real Jinja source no longer silently collapses every
+  prompt to that one word.** Some GGUF conversions store a pre-Jinja template-name
+  hint in `tokenizer.chat_template` (meant for llama.cpp's own name-based
+  classifier), and `render_chat_jinja` trusted it as Jinja unconditionally —
+  minijinja renders a string with no `{{`/`{%` tags as itself, so the *entire*
+  chat prompt became `"vicuna"` for any model shaped this way, with no error.
+  Found via real e2e testing against `ggml-org/moondream2-20250414-GGUF` while
+  validating vision support (a pre-existing bug, unrelated to vision itself — it
+  affects any request to an affected model). Now requires actual Jinja syntax
+  before committing to that path, falling through to the legacy name-based
+  classifier (which already handles this convention correctly) otherwise.
+
 ## [0.16.0]
 
 fox gets **production hardening + native tool calling**: a request now fails fast

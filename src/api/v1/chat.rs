@@ -14,8 +14,8 @@ use uuid::Uuid;
 use crate::api::error::{load_model_or_respond, AppError};
 use crate::api::router::AppState;
 use crate::api::shared::inference::{
-    parse_tool_call, prepare_prompt, resolve_tool_call_parser, resolve_tool_choice,
-    MessageForTemplate,
+    parse_tool_call, prepare_multimodal_prompt, prepare_prompt, resolve_tool_call_parser,
+    resolve_tool_choice, MessageForTemplate,
 };
 use crate::api::shared::sampling_defaults as defaults;
 use crate::api::shared::streaming::finish_reason_str;
@@ -24,6 +24,7 @@ use crate::api::types::{
     ChatCompletionResponse, ChatLogprobEntry, ChatLogprobs, ChatMessageDelta, ChatMessageResponse,
     ToolCallDelta, ToolCallFunctionDelta, Usage,
 };
+use crate::engine::model::MEDIA_MARKER;
 use crate::scheduler::{InferenceRequest, SamplingParams, Token};
 
 pub async fn chat_completions(
@@ -45,8 +46,9 @@ pub async fn chat_completions(
         .unwrap_or_default()
         .as_secs();
 
-    // fox has no vision/audio support: warn loudly instead of silently dropping
-    // image/audio content blocks.
+    // fox has no audio support: warn loudly instead of silently dropping
+    // input_audio (and similar) content blocks. Image blocks are handled below —
+    // dropped only when the model has no vision support.
     let dropped_blocks: usize = req
         .messages
         .iter()
@@ -56,25 +58,21 @@ pub async fn chat_completions(
     if dropped_blocks > 0 {
         tracing::warn!(
             blocks = dropped_blocks,
-            "dropped {dropped_blocks} non-text content block(s) — fox has no vision/audio support"
+            "dropped {dropped_blocks} non-text content block(s) — fox has no audio support"
         );
     }
 
-    // Build MessageForTemplate, extracting text from MessageContent (multimodal → text).
-    let messages: Vec<MessageForTemplate> = req
+    let has_images = req
         .messages
         .iter()
-        .map(|m| MessageForTemplate {
-            role: m.role.clone(),
-            content: m
-                .content
-                .as_ref()
-                .map(|c| c.as_text())
-                .filter(|s| !s.is_empty()),
-            tool_calls: m.tool_calls.clone(),
-            tool_call_id: m.tool_call_id.clone(),
-        })
-        .collect();
+        .any(|m| m.content.as_ref().is_some_and(|c| c.has_images()));
+    let use_vision = has_images && entry.engine.supports_vision();
+    if has_images && !use_vision {
+        tracing::warn!(
+            model = %req.model,
+            "dropped image content block(s) — model has no vision support (no mmproj loaded)"
+        );
+    }
 
     // Resolve tool_choice: filters tools and determines required/specific constraints.
     let tc = resolve_tool_choice(req.tools.as_deref(), req.tool_choice.as_ref());
@@ -86,16 +84,78 @@ pub async fn chat_completions(
     // actually supports it. Default off (no reasoning latency unless requested).
     let enable_thinking = req.think.unwrap_or(false) && entry.engine.supports_thinking();
 
-    let (prompt_tokens, prompt_tokens_len) = prepare_prompt(
-        &entry,
-        messages,
-        state.system_prompt.as_deref(),
-        eff_tools,
-        tool_required,
-        specific_tool,
-        req.response_format.as_ref(),
-        enable_thinking,
-    );
+    let (prompt_tokens, prompt_tokens_len, multimodal) = if use_vision {
+        // Keep image blocks: each becomes a MEDIA_MARKER in the flattened text,
+        // with its decoded bytes collected alongside for mtmd_tokenize.
+        let mut images = Vec::new();
+        let mut messages = Vec::with_capacity(req.messages.len());
+        for m in &req.messages {
+            let content = match m.content.as_ref() {
+                Some(c) => match c.as_text_with_media_marker(MEDIA_MARKER) {
+                    Ok((text, imgs)) => {
+                        images.extend(imgs);
+                        (!text.is_empty()).then_some(text)
+                    }
+                    Err(e) => return AppError::BadRequest(e).into_response(),
+                },
+                None => None,
+            };
+            messages.push(MessageForTemplate {
+                role: m.role.clone(),
+                content,
+                tool_calls: m.tool_calls.clone(),
+                tool_call_id: m.tool_call_id.clone(),
+            });
+        }
+        match prepare_multimodal_prompt(
+            &entry,
+            messages,
+            state.system_prompt.as_deref(),
+            eff_tools,
+            tool_required,
+            specific_tool,
+            req.response_format.as_ref(),
+            enable_thinking,
+            &images,
+        ) {
+            Ok(chunks) => {
+                let n = chunks.n_positions();
+                (Vec::new(), n, Some(chunks))
+            }
+            Err(e) => {
+                return AppError::BadRequest(format!("failed to encode image(s): {e}"))
+                    .into_response()
+            }
+        }
+    } else {
+        // Build MessageForTemplate, extracting text from MessageContent (image
+        // blocks dropped — either unsupported by this model, or none present).
+        let messages: Vec<MessageForTemplate> = req
+            .messages
+            .iter()
+            .map(|m| MessageForTemplate {
+                role: m.role.clone(),
+                content: m
+                    .content
+                    .as_ref()
+                    .map(|c| c.as_text())
+                    .filter(|s| !s.is_empty()),
+                tool_calls: m.tool_calls.clone(),
+                tool_call_id: m.tool_call_id.clone(),
+            })
+            .collect();
+        let (tokens, len) = prepare_prompt(
+            &entry,
+            messages,
+            state.system_prompt.as_deref(),
+            eff_tools,
+            tool_required,
+            specific_tool,
+            req.response_format.as_ref(),
+            enable_thinking,
+        );
+        (tokens, len, None)
+    };
 
     let max_tokens = req
         .max_tokens
@@ -161,13 +221,11 @@ pub async fn chat_completions(
 
     let req_id = entry.engine.next_request_id();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Token>();
-    if let Err(e) = entry.engine.submit_request(InferenceRequest::new(
-        req_id,
-        prompt_tokens,
-        max_tokens,
-        sampling,
-        tx,
-    )) {
+    let mut inference_req = InferenceRequest::new(req_id, prompt_tokens, max_tokens, sampling, tx);
+    if let Some(chunks) = multimodal {
+        inference_req = inference_req.with_multimodal(chunks);
+    }
+    if let Err(e) = entry.engine.submit_request(inference_req) {
         entry
             .engine
             .record_rejection(crate::api::error::rejection_reason_label(&e));

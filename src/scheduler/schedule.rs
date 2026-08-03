@@ -12,7 +12,7 @@ use super::Scheduler;
 impl Scheduler {
     /// Number of blocks needed for a request (prompt + max_new_tokens, in blocks).
     pub(super) fn blocks_needed(&self, req: &batch::InferenceRequest) -> usize {
-        let total_tokens = req.prompt_tokens.len() + req.max_new_tokens;
+        let total_tokens = req.n_positions() + req.max_new_tokens;
         let block_size = self.kv_cache.block_size();
         total_tokens.div_ceil(block_size)
     }

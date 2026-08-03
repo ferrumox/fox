@@ -4,11 +4,11 @@ A living inventory of **everything fox does** and an honest assessment of **what
 and what doesn't**. Use it to decide what to fix, in what order, and to track progress
 per release.
 
-- **Tracks through:** 0.16 (feature branch, in progress); `main`/`develop` are at 0.13.0
-  as of this writing — 0.14, 0.15 and 0.15.1 are done and closed but not yet merged up
+- **Tracks through:** 0.17 (feature branch, in progress); `main`/`develop` are at 0.13.0
+  as of this writing — 0.14 through 0.17 are done and closed but not yet merged up
   (deliberate, releases are being cut gradually). This file describes the code, not
   what's tagged.
-- **Last updated:** 2026-07-21
+- **Last updated:** 2026-08-01
 - **Companion:** [Model-architecture correctness rework](docs/design/model-architecture-rework.md)
   — the design that resolved most of the ❌/⚠️ items below (see "Known issues" for what's
   still open). [`docs/design/vllm-gap-analysis.md`](docs/design/vllm-gap-analysis.md) is the
@@ -81,7 +81,7 @@ to confirm are marked ❓.
 |---|---------|-------|
 | ✅ | OpenAI: `/v1/chat/completions` (SSE + non-stream), `/v1/completions`, `/v1/models`, `/v1/embeddings`, `/health`, `/metrics` | |
 | ✅ | Ollama: `/api/chat`, `/api/generate`, `/api/embed`, `/api/tags`, `/api/show`, `/api/ps`, `/api/pull`, `/api/delete`, `/api/copy`, `/api/create`, `/api/version`, load/unload | |
-| ✅ | GGUF chat template rendered via real Jinja (`minijinja`) | **fixed (0.11, `cc12851`)** — was llama.cpp's legacy C engine, which doesn't run Jinja (see "Finding" below, kept as historical record); `render_chat_jinja`/`build_prompt_tokens_impl` (`engine/model/llama_cpp/vocab.rs`) render the model's actual embedded template, threading `enable_thinking`; environment compiled once per model, not per request (0.13). Falls back to the legacy built-in format only when a model has no embedded template or rendering fails |
+| ✅ | GGUF chat template rendered via real Jinja (`minijinja`) | **fixed (0.11, `cc12851`)** — was llama.cpp's legacy C engine, which doesn't run Jinja (see "Finding" below, kept as historical record); `render_chat_jinja`/`build_prompt_tokens_impl` (`engine/model/llama_cpp/vocab.rs`) render the model's actual embedded template, threading `enable_thinking`; environment compiled once per model, not per request (0.13). Falls back to the legacy built-in format only when a model has no embedded template or rendering fails. **Hardened (0.17)**: some GGUF conversions store a legacy template *name* (e.g. literally `"vicuna"`) in `tokenizer.chat_template` instead of real Jinja source — minijinja happily "renders" a no-tag string as itself, so the entire prompt silently collapsed to that one word (found via real e2e testing against `ggml-org/moondream2-20250414-GGUF` while validating vision support). `render_chat_jinja` now requires the template to contain `{{`/`{%` before trusting it as Jinja, falling through to `apply_chat_template_impl`'s name-based classifier otherwise |
 | ⚠️ | Fallback template `"{role}: {content}"` when none present | may not match what the model expects |
 | ✅ | Sampling defaults diverge between APIs | **intentional, documented (0.11 P4)** — centralized in `api/shared/sampling_defaults.rs`: `/v1/*` mirrors OpenAI (no `top_k`, no repeat penalty), `/api/*` mirrors Ollama (`top_k=40, repeat_penalty=1.1`); a unit test locks the divergence so it can't be "unified" by accident. Was previously undocumented duplicated literals, not a difference in behavior |
 | ✅ | Optional Bearer auth (`FOX_API_KEY`), permissive CORS, OpenAI-style error mapping | |
@@ -93,7 +93,7 @@ to confirm are marked ❓.
 | ✅ | Tool/function calling | **Hermes + Mistral + Llama3 parsers (0.16)** — `tools` is threaded into the Jinja render context, so a model whose real template natively formats tool calls (Hermes/Qwen `<tool_call>{...}</tool_call>`, Mistral `[TOOL_CALLS]`) renders and parses its own format instead of fox's generic listing; auto-detected from the model's own template (`--tool-call-parser auto\|generic\|hermes\|mistral\|llama3` to override). The Mistral parser handles both real-world wire formats (classic JSON array and the newer per-call `name[ARGS]{...}`). Llama3 (`{"name":..,"parameters":..}`, optional `<|python_tag|>`) is explicit-opt-in only — most GGUF chat templates for Llama3 models strip the tool-calling block entirely (verified against a cached `llama-3.2-1b-instruct` GGUF), so there's no reliable template signal to auto-detect it by. Models without a detected/selected native format keep the original generic prompt-based JSON parsing (`{"name","arguments"}` / `{"tool_calls":[…]}`) as the fallback |
 | ✅ | JSON mode / structured output | **fixed (0.14)** — GBNF-constrained via `response_format`/`format`, JSON-schema→grammar in Rust, golden-verified; was prompt-instruction-only, no enforcement. Regex/choice-based grammar still absent |
 | ✅ | Thinking / `--show-thinking` | **improved (0.11)** — `enable_thinking` is threaded through the real Jinja render, and detection uses the template's own `enable_thinking` marker before falling back to a literal-`<think>` tokenize check; the reasoning-delimiter registry (`REASONING_FORMATS`) knows Gemma/GPT-OSS's `<\|channel\|>` framing. Still whack-a-mole for any *other* model family whose real marker isn't `<think>` and isn't yet in the registry |
-| ❌ | Vision / multimodal | image blocks no longer dropped silently — the OpenAI handler warns when a request carries non-text content (0.11) — but there is still no actual vision support (no image encoder wired) |
+| ⚠️ | Vision / multimodal | **shipped (0.17)** — `--mmproj <file>` loads a paired vision projector via llama.cpp's `mtmd` library; OpenAI `image_url` (base64 `data:` URI only — no remote fetch) and Ollama `images` are encoded and answered. v1 scope: one global mmproj pairing (like `--draft-model`), no fox-level chunked-prefill/prefix-caching for the image turn (atomic `mtmd_helper_eval_chunks` call — a documented tradeoff, not a bug), no OOM bisection-retry on this path. Verified end-to-end on a real model (Gemma 4 E2B, 24/24 e2e checks). See `docs/design/vision-support.md` |
 | ✅ | Embeddings | **fixed**: correct length (`n_embd`), mean-pooled + L2-normalized, non-degenerate (was all-zeros due to `pooling_type=NONE`) |
 
 ## Scheduler / KV / performance
@@ -234,10 +234,11 @@ caching, UTF-8/stop handling, multi-GPU, both APIs, CLI, ops) is solid, and the 
 rework (items 1-7) closed most of the architecture-facts-scattered-across-layers class of
 defect — real Jinja execution, centralized sampling defaults, fixed embeddings, a leak-free
 prefix cache. Items 8-10 (backpressure, tool calling, draft-model speculation) are
-0.16's feature work, now landed. What's left clusters into genuine remaining correctness
+0.16's feature work, now landed, plus vision/multimodal (0.17, see
+`docs/design/vision-support.md`). What's left clusters into genuine remaining correctness
 debt with no work scheduled (MLA/recurrent KV sizing, the `REASONING_FORMATS` registry's
 narrow coverage) and the feature gaps `docs/design/vllm-gap-analysis.md` still lists open
-(reactive context-rolling on top of bisection retry, vision, LoRA).
+(reactive context-rolling on top of bisection retry, LoRA).
 
 ---
 
@@ -258,12 +259,12 @@ parallel are explicit non-goals — see that doc's "What NOT to chase").
 via GBNF (0.14), logprobs/top_logprobs (0.14), min_p/logit_bias/min_tokens (0.14),
 speculative decoding — n-gram (0.15) and draft-model (0.16), chunked prefill (0.13),
 context rolling (0.13), backpressure/max-queue + fail-fast (0.16), Hermes/Mistral/Llama3
-tool-call parsers (0.16), OOM recovery via batch-size-bisection retry (0.16).
+tool-call parsers (0.16), OOM recovery via batch-size-bisection retry (0.16),
+vision/multimodal via `mtmd` (0.17, see `docs/design/vision-support.md`).
 
 **Still open, in priority order** (per `vllm-gap-analysis.md`'s "Prioritized shortlist"):
 
 1. Reactive context-rolling as a further OOM mitigation once a batch is already
    bisected to a single request and still fails (0.16 only retries by shrinking the
    batch, not by rolling context).
-2. Vision/multimodal, MLA/recurrent correct KV sizing, LoRA — real gaps, no work
-   scheduled yet.
+2. MLA/recurrent correct KV sizing, LoRA — real gaps, no work scheduled yet.

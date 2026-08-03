@@ -6,23 +6,30 @@
 # guided decoding, logprobs, sampling controls, Ollama surface, speculation).
 #
 # Usage:
-#   ./scripts/e2e_smoke.sh --bin <path/to/fox> --model-path <model.gguf> [--port N]
+#   ./scripts/e2e_smoke.sh --bin <path/to/fox> --model-path <model.gguf> [--port N] \
+#       [--mmproj-path <mmproj.gguf>]
 #
 #   make e2e E2E_MODEL=/path/to/model.gguf     # builds target/debug/fox first
+#   make e2e E2E_MODEL=... E2E_MMPROJ=/path/to/mmproj.gguf   # + vision check 14
 #
 # The server is started with --speculative true (check 7 needs it) and a small
-# context; it is killed on exit regardless of outcome.
+# context; it is killed on exit regardless of outcome. Pass --mmproj-path (a
+# vision-capable MODEL_PATH + its paired mmproj GGUF, e.g. registry.json's
+# "moondream2" entry) to also exercise check 14 (image input); omitted by
+# default since most models have no paired mmproj.
 
 set -euo pipefail
 
 FOX_BIN=""
 MODEL_PATH=""
+MMPROJ_PATH=""
 PORT="8199"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --bin)        FOX_BIN="$2"; shift 2 ;;
         --model-path) MODEL_PATH="$2"; shift 2 ;;
+        --mmproj-path) MMPROJ_PATH="$2"; shift 2 ;;
         --port)       PORT="$2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -34,6 +41,9 @@ done
 }
 [[ -x "$FOX_BIN" ]] || { echo "fox binary not executable: $FOX_BIN"; exit 1; }
 [[ -f "$MODEL_PATH" ]] || { echo "model not found: $MODEL_PATH"; exit 1; }
+if [[ -n "$MMPROJ_PATH" ]]; then
+    [[ -f "$MMPROJ_PATH" ]] || { echo "mmproj not found: $MMPROJ_PATH"; exit 1; }
+fi
 
 # The ggml/llama shared libs live next to the binary (build.rs copies them there).
 export LD_LIBRARY_PATH="$(cd "$(dirname "$FOX_BIN")" && pwd)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -48,11 +58,16 @@ cleanup() {
 trap cleanup EXIT
 
 echo "── starting fox serve (port $PORT, speculative on) ──"
-"$FOX_BIN" serve \
-    --model-path "$MODEL_PATH" \
-    --host 127.0.0.1 --port "$PORT" \
-    --max-context-len 2048 \
-    --speculative true &
+SERVE_ARGS=(
+    --model-path "$MODEL_PATH"
+    --host 127.0.0.1 --port "$PORT"
+    --max-context-len 2048
+    --speculative true
+)
+if [[ -n "$MMPROJ_PATH" ]]; then
+    SERVE_ARGS+=(--mmproj "$MMPROJ_PATH")
+fi
+"$FOX_BIN" serve "${SERVE_ARGS[@]}" &
 FOX_PID=$!
 
 # Wait for /health (model load can take a while on CI CPU).
@@ -72,4 +87,8 @@ curl -sf -m 2 "http://127.0.0.1:$PORT/health" >/dev/null || {
 }
 
 echo "── running smoke checks ──"
-python3 "$(dirname "$0")/e2e_smoke.py" "http://127.0.0.1:$PORT"
+if [[ -n "$MMPROJ_PATH" ]]; then
+    FOX_E2E_VISION=1 python3 "$(dirname "$0")/e2e_smoke.py" "http://127.0.0.1:$PORT"
+else
+    python3 "$(dirname "$0")/e2e_smoke.py" "http://127.0.0.1:$PORT"
+fi

@@ -119,6 +119,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         split_mode,
         &tensor_split_parsed,
         args.moe_cpu,
+        None, // mmproj_path
     )?;
     let model_config = model.model_config();
     let load_elapsed = load_start.elapsed();

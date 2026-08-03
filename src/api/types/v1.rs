@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::shared::{default_max_tokens, deserialize_stop, Usage};
@@ -6,6 +7,12 @@ use super::tools::{ResponseFormat, StreamOptions, Tool, ToolCall, ToolCallDelta}
 // ---------------------------------------------------------------------------
 // Message content (string or array of content blocks — OpenAI multimodal spec)
 // ---------------------------------------------------------------------------
+
+/// OpenAI `image_url` content block payload.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ImageUrl {
+    pub url: String,
+}
 
 /// A single content block inside a message content array.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -16,7 +23,33 @@ pub struct ContentBlock {
     /// Present when type == "text".
     #[serde(default)]
     pub text: Option<String>,
-    // image_url/audio blocks are accepted but not processed (no vision support).
+    /// Present when type == "image_url". Only `data:` base64 URIs are supported —
+    /// fox has no outbound HTTP fetch path for remote image URLs (avoids an SSRF
+    /// surface and matches fox's local-first posture).
+    #[serde(default)]
+    pub image_url: Option<ImageUrl>,
+    // input_audio and other block types are accepted but not processed.
+}
+
+/// Decode an OpenAI `image_url.url` data URI (`data:image/png;base64,...`) into raw
+/// image bytes. Returns a human-readable error for anything else (remote
+/// `http(s)://` URLs, malformed/non-base64 data URIs) so the caller can reject the
+/// request with a clear `400` instead of silently dropping the image.
+fn decode_data_uri_image(url: &str) -> Result<Vec<u8>, String> {
+    let rest = url.strip_prefix("data:").ok_or_else(|| {
+        "image_url must be a base64 data URI (data:<mime>;base64,<data>) — fox does not fetch \
+         remote image URLs"
+            .to_string()
+    })?;
+    let (meta, b64) = rest
+        .split_once(',')
+        .ok_or_else(|| "malformed data URI: missing ','".to_string())?;
+    if !meta.contains("base64") {
+        return Err("data URI must be base64-encoded (;base64,...)".to_string());
+    }
+    STANDARD
+        .decode(b64)
+        .map_err(|e| format!("invalid base64 image data: {e}"))
 }
 
 /// OpenAI-compatible message content: either a plain string or an array of blocks.
@@ -27,15 +60,26 @@ pub enum MessageContent {
 }
 
 impl MessageContent {
-    /// Number of non-text blocks (`image_url`, `input_audio`, …) that `as_text`
-    /// drops. fox has no vision/audio support, so callers can warn on these
-    /// instead of dropping them silently.
+    /// Number of non-text, non-image blocks (`input_audio`, …) that `as_text`
+    /// drops. fox has no audio support, so callers can warn on these instead of
+    /// dropping them silently. `image_url` is excluded — whether it's dropped
+    /// depends on the model's vision support, checked separately via
+    /// [`Self::has_images`].
     pub fn non_text_blocks(&self) -> usize {
         match self {
             MessageContent::Text(_) => 0,
-            MessageContent::Array(blocks) => {
-                blocks.iter().filter(|b| b.block_type != "text").count()
-            }
+            MessageContent::Array(blocks) => blocks
+                .iter()
+                .filter(|b| b.block_type != "text" && b.block_type != "image_url")
+                .count(),
+        }
+    }
+
+    /// Whether this content carries any `image_url` block.
+    pub fn has_images(&self) -> bool {
+        match self {
+            MessageContent::Text(_) => false,
+            MessageContent::Array(blocks) => blocks.iter().any(|b| b.block_type == "image_url"),
         }
     }
 
@@ -54,6 +98,45 @@ impl MessageContent {
                 })
                 .collect::<Vec<_>>()
                 .join(""),
+        }
+    }
+
+    /// Like `as_text`, but keeps image content: each `image_url` block is replaced
+    /// with `marker` (in place, preserving block order) and its decoded bytes are
+    /// returned alongside. Mirrors llama.cpp server's own approach of flattening
+    /// content parts into one marker-laced string *before* the chat template runs,
+    /// rather than teaching every Jinja template about images.
+    ///
+    /// Errors if an `image_url` block can't be decoded (remote URL, malformed data
+    /// URI) — the caller should reject the request rather than silently drop it.
+    pub fn as_text_with_media_marker(
+        &self,
+        marker: &str,
+    ) -> Result<(String, Vec<Vec<u8>>), String> {
+        match self {
+            MessageContent::Text(s) => Ok((s.clone(), Vec::new())),
+            MessageContent::Array(blocks) => {
+                let mut text = String::new();
+                let mut images = Vec::new();
+                for b in blocks {
+                    match b.block_type.as_str() {
+                        "text" => {
+                            if let Some(t) = b.text.as_deref() {
+                                text.push_str(t);
+                            }
+                        }
+                        "image_url" => {
+                            let url = b.image_url.as_ref().ok_or_else(|| {
+                                "image_url block missing image_url field".to_string()
+                            })?;
+                            images.push(decode_data_uri_image(&url.url)?);
+                            text.push_str(marker);
+                        }
+                        _ => {} // input_audio and other block types: still dropped
+                    }
+                }
+                Ok((text, images))
+            }
         }
     }
 }
@@ -347,4 +430,94 @@ pub struct ModelInfo {
     pub object: String,
     pub created: u64,
     pub owned_by: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_block(s: &str) -> ContentBlock {
+        ContentBlock {
+            block_type: "text".to_string(),
+            text: Some(s.to_string()),
+            image_url: None,
+        }
+    }
+
+    fn image_block(data_uri: &str) -> ContentBlock {
+        ContentBlock {
+            block_type: "image_url".to_string(),
+            text: None,
+            image_url: Some(ImageUrl {
+                url: data_uri.to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn has_images_detects_image_url_blocks() {
+        let none = MessageContent::Array(vec![text_block("hi")]);
+        assert!(!none.has_images());
+        let one = MessageContent::Array(vec![
+            text_block("hi"),
+            image_block("data:image/png;base64,AAAA"),
+        ]);
+        assert!(one.has_images());
+        assert!(!MessageContent::Text("hi".to_string()).has_images());
+    }
+
+    #[test]
+    fn non_text_blocks_excludes_images_but_counts_audio() {
+        let content = MessageContent::Array(vec![
+            text_block("hi"),
+            image_block("data:image/png;base64,AAAA"),
+            ContentBlock {
+                block_type: "input_audio".to_string(),
+                text: None,
+                image_url: None,
+            },
+        ]);
+        // image_url is not "dropped" the way audio is — has_images() is the
+        // signal callers should use for it instead.
+        assert_eq!(content.non_text_blocks(), 1);
+    }
+
+    #[test]
+    fn as_text_with_media_marker_preserves_order_and_collects_images() {
+        // 1x1 fully-transparent PNG, a real (tiny) base64 payload — decode must succeed.
+        let png_b64 =
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let content = MessageContent::Array(vec![
+            text_block("Look at this: "),
+            image_block(&format!("data:image/png;base64,{png_b64}")),
+            text_block(" what is it?"),
+        ]);
+        let (text, images) = content.as_text_with_media_marker("<MARK>").unwrap();
+        assert_eq!(text, "Look at this: <MARK> what is it?");
+        assert_eq!(images.len(), 1);
+        assert!(!images[0].is_empty());
+    }
+
+    #[test]
+    fn as_text_with_media_marker_rejects_remote_url() {
+        let content = MessageContent::Array(vec![image_block("https://example.com/cat.png")]);
+        let err = content
+            .as_text_with_media_marker("<MARK>")
+            .expect_err("remote URLs must be rejected, not silently dropped");
+        assert!(err.contains("data URI"), "unexpected error message: {err}");
+    }
+
+    #[test]
+    fn as_text_with_media_marker_rejects_malformed_data_uri() {
+        let content = MessageContent::Array(vec![image_block("data:image/png;base64")]);
+        assert!(content.as_text_with_media_marker("<MARK>").is_err());
+    }
+
+    #[test]
+    fn as_text_with_media_marker_plain_text_has_no_images() {
+        let content = MessageContent::Text("just text".to_string());
+        let (text, images) = content.as_text_with_media_marker("<MARK>").unwrap();
+        assert_eq!(text, "just text");
+        assert!(images.is_empty());
+    }
 }

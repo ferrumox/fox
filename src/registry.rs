@@ -14,6 +14,13 @@ pub struct RegistryModel {
     pub aliases: Vec<String>,
     pub repo: String,
     pub recommended: String,
+    /// Filename of the paired mmproj (vision projector) GGUF, for vision models —
+    /// same repo as `recommended`. `fox pull` doesn't auto-fetch it (it resolves
+    /// repos by live HF search, not from this catalog); pull it explicitly with
+    /// `fox pull <repo> --filename <mmproj>` and pass `--mmproj <name>` to `fox
+    /// serve`. Absent for all non-vision entries.
+    #[serde(default)]
+    pub mmproj: Option<String>,
     pub description: String,
     pub size_gb: f32,
     pub tags: Vec<String>,

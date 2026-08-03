@@ -351,6 +351,7 @@ pub async fn run_bench_prefill(args: BenchPrefillArgs) -> Result<()> {
         split_mode,
         &tensor_split,
         args.moe_cpu,
+        None, // mmproj_path
     )?;
 
     spinner.finish_and_clear();

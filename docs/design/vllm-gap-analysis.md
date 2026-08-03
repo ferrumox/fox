@@ -72,7 +72,7 @@ this is **achievable** at medium effort.
 | Dense / GQA | ✅ | ✅ solid |
 | MoE (Mixtral, DeepSeek-MoE, Qwen-MoE) | ✅ optimized | ⚠️ loads + CPU offload, approximate sizing |
 | MLA / latent KV (DeepSeek V2/V3) | ✅ | ❌ positional sizing wrong |
-| Vision / multimodal (LLaVA, Qwen-VL) | ✅ | ❌ image blocks silently dropped |
+| Vision / multimodal (LLaVA, Qwen-VL) | ✅ | ✅ (0.17) via `mtmd` + `--mmproj`; base64 images only, see `vision-support.md` |
 | Embeddings (BERT, nomic) | ✅ | ✅ dim + pooling fixed (0.11); mean-pool only, CLS not auto-detected |
 | Encoder-decoder (T5) | ✅ | ❌ |
 | Recurrent / hybrid (Mamba, RWKV) | ✅ | ⚠️ detected, prefix-cache off |
@@ -158,6 +158,12 @@ Shipped since this analysis was written:
   compatibility is a hard load-time check, golden-verified exact via self-speculation.
   Loaded eagerly, no eviction pairing/VRAM budgeting (simple-scope decision, see
   `docs/design/speculative-roadmap.md` Level 2).
+- ✅ **Vision / multimodal** (0.17) — `--mmproj <file>` loads a paired vision
+  projector via llama.cpp's `mtmd` library; OpenAI `image_url` (base64 `data:` URI
+  only) and Ollama `images` are encoded and answered. One global mmproj pairing
+  (mirrors `--draft-model`); the image turn is prefilled atomically (no fox-level
+  chunking, no prefix caching, no OOM bisection-retry on this path) — see
+  `docs/design/vision-support.md` for why that scope was chosen.
 
 Still open, in priority order:
 

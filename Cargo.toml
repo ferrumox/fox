@@ -1,6 +1,6 @@
 [package]
 name = "ferrumox"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2021"
 description = "fox — a fast local LLM inference server, drop-in compatible with the Ollama and OpenAI APIs"
 license = "MIT OR Apache-2.0"
@@ -49,6 +49,7 @@ bytes = "1"
 dirs = "5"
 minijinja = "2"
 minijinja-contrib = { version = "2", features = ["pycompat"] }
+base64 = "0.22"
 
 # Optional (enabled via test-helpers feature)
 tower = { version = "0.4", features = ["util"], optional = true }

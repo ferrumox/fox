@@ -17,11 +17,15 @@ Requirements on the server side (the runner script handles this):
 Exit code 0 = all checks passed; 1 = at least one failed. stdlib only.
 """
 
+import base64
 import json
 import math
+import os
+import struct
 import sys
 import urllib.error
 import urllib.request
+import zlib
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8199"
 TIMEOUT = 300  # generous: CI runners decode a 0.5B on CPU
@@ -46,6 +50,25 @@ def post(path, body):
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=30) as r:
         return r.read().decode()
+
+
+def make_test_png(width=4, height=4, color=(255, 0, 0)):
+    """Build a tiny valid PNG in-memory (8-bit RGB, no filter/interlace) — no
+    external image library needed, and no large base64 blob checked into the repo."""
+
+    def chunk(tag, data):
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)  # 8-bit depth, RGB
+    row = b"\x00" + bytes(color) * width  # leading byte = filter type "none"
+    idat = zlib.compress(row * height)
+    return sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
 
 
 def check(name, cond, detail=""):
@@ -443,6 +466,117 @@ check(
     st == 200 and n >= 12 and fin == "length",
     f"tokens={n} finish={fin}",
 )
+
+# ── 14) vision: image input (only when the server was started with --mmproj) ──
+# Exercises the full multimodal path: image_url data-URI decode → MEDIA_MARKER
+# splice → mtmd_tokenize → atomic do_prefill_multimodal. The third request
+# reuses a DIFFERENT image right after the first — the exact scenario the
+# per-request skip-prefix-cache design (empty prompt_tokens on multimodal
+# requests) exists to prevent cross-contaminating (see
+# docs/design/vision-support.md); a hang, error, or garbage response here would
+# indicate that design failed, not just an accuracy miss.
+if os.environ.get("FOX_E2E_VISION") == "1":
+    print("14) vision: image input")
+    red_b64 = base64.b64encode(make_test_png(color=(255, 0, 0))).decode()
+    blue_b64 = base64.b64encode(make_test_png(color=(0, 0, 255))).decode()
+
+    st, r = post(
+        "/v1/chat/completions",
+        {
+            "model": MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What color is this image? One word."},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{red_b64}"},
+                        },
+                    ],
+                }
+            ],
+            "max_tokens": 20,
+        },
+    )
+    content = r["choices"][0]["message"]["content"] if st == 200 else ""
+    check(
+        "/v1/chat/completions accepts image_url and generates a response",
+        st == 200 and len(content.strip()) > 0,
+        f"status={st} content={content[:80]!r}",
+    )
+
+    st, r = post(
+        "/api/chat",
+        {
+            "model": MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "What color is this image? One word.",
+                    "images": [red_b64],
+                }
+            ],
+            "stream": False,
+        },
+    )
+    content = r.get("message", {}).get("content", "") if st == 200 else ""
+    check(
+        "/api/chat accepts images field and generates a response",
+        st == 200 and len(content.strip()) > 0,
+        f"status={st} content={content[:80]!r}",
+    )
+
+    st, r = post(
+        "/v1/chat/completions",
+        {
+            "model": MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What color is this image? One word."},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{blue_b64}"},
+                        },
+                    ],
+                }
+            ],
+            "max_tokens": 20,
+        },
+    )
+    content = r["choices"][0]["message"]["content"] if st == 200 else ""
+    check(
+        "a different image right after the first doesn't error/hang (prefix-cache isolation)",
+        st == 200 and len(content.strip()) > 0,
+        f"status={st} content={content[:80]!r}",
+    )
+
+    st, r = post(
+        "/v1/chat/completions",
+        {
+            "model": MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/cat.png"},
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    check(
+        "remote image_url is rejected with 400, not fetched",
+        st == 400,
+        f"status={st}",
+    )
+else:
+    print("14) vision: image input — SKIPPED (run with --mmproj-path / E2E_MMPROJ to enable)")
 
 print(f"\n{'=' * 50}\nRESULT: {ok_count} passed, {fail_count} failed")
 sys.exit(1 if fail_count else 0)

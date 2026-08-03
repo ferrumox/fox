@@ -536,12 +536,12 @@ fn json_mode_instruction(response_format: Option<&ResponseFormat>) -> Option<Str
     }
 }
 
-/// Inject system messages, apply the chat template, and tokenise the result.
-///
-/// * `tools` — already filtered by [`resolve_tool_choice`] (None = no tools).
-/// * `tool_required` / `specific_tool` — from [`ToolChoiceResult`].
+/// Inject server-level system prompt, tool listing, and JSON-mode instruction,
+/// then flatten to `(role, content)` pairs — shared by the text-only
+/// (`prepare_prompt`) and multimodal (`prepare_multimodal_prompt`) paths so both
+/// apply the same message transformations before diverging at tokenization.
 #[allow(clippy::too_many_arguments)]
-pub fn prepare_prompt(
+fn prepare_messages(
     entry: &EngineEntry,
     mut messages: Vec<MessageForTemplate>,
     system_prompt: Option<&str>,
@@ -549,8 +549,7 @@ pub fn prepare_prompt(
     tool_required: bool,
     specific_tool: Option<&str>,
     response_format: Option<&ResponseFormat>,
-    show_thinking: bool,
-) -> (Vec<i32>, usize) {
+) -> (Vec<(String, String)>, Option<serde_json::Value>) {
     // Inject server-level system prompt when none is already present.
     if let Some(sp) = system_prompt {
         if messages.first().map(|m| m.role.as_str()) != Some("system") {
@@ -618,6 +617,34 @@ pub fn prepare_prompt(
     // matches what native tool-use templates expect — no transform needed).
     let tools_json = tools.map(|t| serde_json::to_value(t).unwrap_or_default());
 
+    (flat, tools_json)
+}
+
+/// Inject system messages, apply the chat template, and tokenise the result.
+///
+/// * `tools` — already filtered by [`resolve_tool_choice`] (None = no tools).
+/// * `tool_required` / `specific_tool` — from [`ToolChoiceResult`].
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_prompt(
+    entry: &EngineEntry,
+    messages: Vec<MessageForTemplate>,
+    system_prompt: Option<&str>,
+    tools: Option<&[Tool]>,
+    tool_required: bool,
+    specific_tool: Option<&str>,
+    response_format: Option<&ResponseFormat>,
+    show_thinking: bool,
+) -> (Vec<i32>, usize) {
+    let (flat, tools_json) = prepare_messages(
+        entry,
+        messages,
+        system_prompt,
+        tools,
+        tool_required,
+        specific_tool,
+        response_format,
+    );
+
     // Build the prompt tokens via the model's chat template (real Jinja when the
     // model has one, threading `enable_thinking` and `tools`; built-in format
     // otherwise).
@@ -640,6 +667,37 @@ pub fn prepare_prompt(
 
     let len = tokens.len();
     (tokens, len)
+}
+
+/// Multimodal counterpart of [`prepare_prompt`]: same message preparation
+/// (system prompt / tool listing / JSON-mode injection), but tokenizes via
+/// `mtmd_tokenize` (through [`crate::engine::InferenceEngine::tokenize_multimodal`])
+/// instead of the plain tokenizer, so `images` actually get encoded. Callers must
+/// check `entry.engine.supports_vision()` first — this errors otherwise.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_multimodal_prompt(
+    entry: &EngineEntry,
+    messages: Vec<MessageForTemplate>,
+    system_prompt: Option<&str>,
+    tools: Option<&[Tool]>,
+    tool_required: bool,
+    specific_tool: Option<&str>,
+    response_format: Option<&ResponseFormat>,
+    show_thinking: bool,
+    images: &[Vec<u8>],
+) -> anyhow::Result<crate::engine::model::MultimodalChunks> {
+    let (flat, tools_json) = prepare_messages(
+        entry,
+        messages,
+        system_prompt,
+        tools,
+        tool_required,
+        specific_tool,
+        response_format,
+    );
+    entry
+        .engine
+        .tokenize_multimodal(&flat, show_thinking, tools_json.as_ref(), images)
 }
 
 // ---------------------------------------------------------------------------

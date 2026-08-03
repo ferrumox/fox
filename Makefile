@@ -102,12 +102,15 @@ golden:
 # prefix-cache lifecycle, guided decoding, logprobs, sampling controls, Ollama
 # surface, speculation). This is the release-closing gate.
 #   Usage: make e2e E2E_MODEL=~/.cache/ferrumox/models/llama-3.2-1b-instruct-q8_0.gguf
+#   Add E2E_MMPROJ=/path/to/mmproj.gguf to also run check 14 (vision/image input).
 E2E_MODEL ?=
+E2E_MMPROJ ?=
 e2e:
 	@test -n "$(E2E_MODEL)" || \
 		(echo "Set E2E_MODEL=/path/to/model.gguf" && exit 1)
 	cargo build --bin fox
-	./scripts/e2e_smoke.sh --bin target/debug/fox --model-path "$(E2E_MODEL)"
+	./scripts/e2e_smoke.sh --bin target/debug/fox --model-path "$(E2E_MODEL)" \
+		$(if $(E2E_MMPROJ),--mmproj-path "$(E2E_MMPROJ)",)
 
 # Build a Vulkan-enabled fox bundle in Docker and extract it to ./fox-vulkan/ so you
 # can run it natively on any host with a Vulkan driver (AMD/Intel iGPU, etc.) — no

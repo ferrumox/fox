@@ -342,11 +342,21 @@ pub struct LlamaCppModel {
     /// via `Model::bisection_retry_count()` and diffed into a Prometheus counter in
     /// `run_loop`, same pattern as `spec_proposed`/`spec_accepted`.
     pub(super) decode_bisection_retries: std::sync::atomic::AtomicU64,
+    /// Vision/multimodal context (`mtmd`), present only when this model was loaded
+    /// with a paired mmproj GGUF. `None` for the overwhelming majority of models —
+    /// every multimodal code path is gated on this being `Some`.
+    pub(super) mtmd_ctx: Option<NonNull<ffi::mtmd_context>>,
 }
 
 #[cfg(not(fox_stub))]
 impl Drop for LlamaCppModel {
     fn drop(&mut self) {
+        // mtmd holds no ownership over the llama model/context (it only borrows a
+        // `llama_model*` at init and a `llama_context*` per eval call), but free it
+        // first regardless, before either of the resources it borrowed goes away.
+        if let Some(mtmd_ctx) = self.mtmd_ctx {
+            unsafe { ffi::mtmd_free(mtmd_ctx.as_ptr()) };
+        }
         // Free the context first (must happen before model is freed).
         if let Ok(ctx) = self._ctx.lock() {
             unsafe { ffi::llama_free(ctx.as_ptr()) };
@@ -373,6 +383,7 @@ impl LlamaCppModel {
         split_mode: u32,
         tensor_split: &[f32],
         moe_offload_cpu: bool,
+        mmproj_path: Option<&std::path::Path>,
     ) -> Result<Self> {
         // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
         // Fox shows its own clean progress spinner instead.
@@ -537,6 +548,35 @@ impl LlamaCppModel {
             anyhow!("llama_init_from_model failed")
         })?;
 
+        // Vision/multimodal: load the paired mmproj GGUF via mtmd, if given. A bad
+        // pairing (wrong architecture, corrupt file) fails loudly here rather than
+        // producing garbage output at inference time.
+        let mtmd_ctx = match mmproj_path {
+            Some(p) => {
+                let mmproj_cstr = CString::new(
+                    p.to_str()
+                        .ok_or_else(|| anyhow!("mmproj path not valid UTF-8"))?,
+                )?;
+                let mut mtmd_params = unsafe { ffi::mtmd_context_params_default() };
+                let marker_cstr = CString::new(crate::engine::model::MEDIA_MARKER)
+                    .expect("MEDIA_MARKER is a valid C string");
+                mtmd_params.media_marker = marker_cstr.as_ptr();
+                let raw = unsafe {
+                    ffi::mtmd_init_from_file(mmproj_cstr.as_ptr(), model.as_ptr(), mtmd_params)
+                };
+                // marker_cstr/mmproj_cstr only need to outlive the call above — mtmd
+                // copies both into its own storage during init.
+                Some(NonNull::new(raw).ok_or_else(|| {
+                    unsafe { ffi::llama_free(ctx.as_ptr()) };
+                    unsafe { ffi::llama_model_free(model.as_ptr()) };
+                    anyhow!(
+                        "mtmd_init_from_file failed for {p:?} — check the mmproj matches this model's architecture"
+                    )
+                })?)
+            }
+            None => None,
+        };
+
         // SAFETY: We manually implement Send + Sync for LlamaCppModel below.
         // The Arc<Mutex<NonNull<...>>> is intentionally used here for shared ownership
         // across clone (e.g. future multi-backend); the unsafe impls guarantee thread safety.
@@ -558,6 +598,7 @@ impl LlamaCppModel {
             chat_env: std::sync::OnceLock::new(),
             grammars: dashmap::DashMap::new(),
             decode_bisection_retries: std::sync::atomic::AtomicU64::new(0),
+            mtmd_ctx,
         })
     }
 
@@ -633,6 +674,9 @@ impl LlamaCppModel {
             chat_env: std::sync::OnceLock::new(),
             grammars: dashmap::DashMap::new(),
             decode_bisection_retries: std::sync::atomic::AtomicU64::new(0),
+            // bench-kv compares KV cache types, not vision; the original instance
+            // (if any) keeps ownership of its mtmd context.
+            mtmd_ctx: None,
         })
     }
 }
@@ -763,6 +807,20 @@ impl Model for LlamaCppModel {
         self.tokenize_impl("<think>")
             .map(|t| t.len() <= 2)
             .unwrap_or(false)
+    }
+
+    fn supports_vision(&self) -> bool {
+        self.mtmd_ctx.is_some()
+    }
+
+    fn tokenize_multimodal(
+        &self,
+        messages: &[(String, String)],
+        enable_thinking: bool,
+        tools: Option<&serde_json::Value>,
+        images: &[Vec<u8>],
+    ) -> Result<crate::engine::model::MultimodalChunks> {
+        self.tokenize_multimodal_impl(messages, enable_thinking, tools, images)
     }
 
     fn recommended_sampling(&self) -> Option<crate::engine::model::RecommendedSampling> {

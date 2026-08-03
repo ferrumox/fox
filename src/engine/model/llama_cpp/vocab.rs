@@ -107,6 +107,17 @@ impl LlamaCppModel {
             .chat_env
             .get_or_init(|| {
                 let template = self.raw_chat_template()?;
+                // Some GGUF conversions store a legacy template NAME (e.g. "vicuna",
+                // "chatml") in `tokenizer.chat_template` instead of real Jinja source —
+                // a pre-Jinja convention meant for llama.cpp's own name-based classifier
+                // (see `apply_chat_template_impl` below, which correctly handles it).
+                // Trusting a bare name as Jinja doesn't error — minijinja renders any
+                // string with no `{{`/`{%` tags as literal text — so the entire prompt
+                // silently becomes that one word. Require actual template syntax before
+                // committing to the Jinja path.
+                if !template.contains("{{") && !template.contains("{%") {
+                    return None;
+                }
                 let mut env = Environment::new();
                 // Chat templates lean on Python string methods (.strip(), .split(), …).
                 env.set_unknown_method_callback(
@@ -170,6 +181,95 @@ impl LlamaCppModel {
             prompt.push_str("<think>\n");
         }
         self.tokenize_impl(&prompt)
+    }
+
+    /// Render the chat prompt exactly like `build_prompt_tokens_impl`, but hand it
+    /// to `mtmd_tokenize` (splitting on `MEDIA_MARKER` occurrences) instead of the
+    /// plain tokenizer — the multimodal counterpart of that method.
+    pub(super) fn tokenize_multimodal_impl(
+        &self,
+        messages: &[(String, String)],
+        enable_thinking: bool,
+        tools: Option<&serde_json::Value>,
+        images: &[Vec<u8>],
+    ) -> Result<crate::engine::model::MultimodalChunks> {
+        let mtmd_ctx = self
+            .mtmd_ctx
+            .ok_or_else(|| anyhow!("model has no vision support (no mmproj loaded)"))?;
+
+        // Same add_special/parse_special split as build_prompt_tokens_impl: a real
+        // Jinja render already carries its own control tokens (tokenize_prompt_impl
+        // flags), the built-in fallback needs BOS added instead (tokenize_impl flags).
+        let (rendered, add_special, parse_special) =
+            if let Some(rendered) = self.render_chat_jinja(messages, enable_thinking, tools) {
+                (rendered, false, true)
+            } else {
+                let mut prompt = self.apply_chat_template_impl(messages)?;
+                if enable_thinking {
+                    prompt.push_str("<think>\n");
+                }
+                (prompt, true, false)
+            };
+
+        let text_cstr =
+            CString::new(rendered).map_err(|_| anyhow!("rendered prompt contains a NUL byte"))?;
+        let input_text = ffi::mtmd_input_text {
+            text: text_cstr.as_ptr(),
+            add_special,
+            parse_special,
+        };
+
+        // mtmd_helper_bitmap_init_from_buf decodes the raw image bytes (bundled
+        // stb_image). We own the resulting bitmaps until mtmd_tokenize returns —
+        // it only borrows the pointers to compute chunks, never takes ownership
+        // (mirrors mtmd-cli.cpp's own usage: bitmaps are freed right after tokenize).
+        let free_bitmap = |w: &ffi::mtmd_helper_bitmap_wrapper| {
+            if !w.bitmap.is_null() {
+                unsafe { ffi::mtmd_bitmap_free(w.bitmap) };
+            }
+        };
+        let mut wrappers = Vec::with_capacity(images.len());
+        for img in images {
+            let wrapper = unsafe {
+                ffi::mtmd_helper_bitmap_init_from_buf(
+                    mtmd_ctx.as_ptr(),
+                    img.as_ptr(),
+                    img.len(),
+                    false, // placeholder
+                )
+            };
+            if wrapper.bitmap.is_null() {
+                wrappers.iter().for_each(free_bitmap);
+                anyhow::bail!(
+                    "failed to decode image ({} bytes) — unsupported or corrupt format",
+                    img.len()
+                );
+            }
+            wrappers.push(wrapper);
+        }
+        let mut bitmap_ptrs: Vec<*const ffi::mtmd_bitmap> =
+            wrappers.iter().map(|w| w.bitmap as *const _).collect();
+
+        let chunks_ptr = unsafe { ffi::mtmd_input_chunks_init() };
+        let ret = unsafe {
+            ffi::mtmd_tokenize(
+                mtmd_ctx.as_ptr(),
+                chunks_ptr,
+                &input_text,
+                bitmap_ptrs.as_mut_ptr(),
+                bitmap_ptrs.len(),
+            )
+        };
+        wrappers.iter().for_each(free_bitmap);
+
+        if ret != 0 {
+            unsafe { ffi::mtmd_input_chunks_free(chunks_ptr) };
+            anyhow::bail!("mtmd_tokenize failed (code {ret})");
+        }
+
+        Ok(unsafe {
+            crate::engine::model::MultimodalChunks::from_raw(chunks_ptr as *mut std::ffi::c_void)
+        })
     }
 
     pub(super) fn token_to_piece_impl(&self, token: i32) -> Result<String> {

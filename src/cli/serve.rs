@@ -93,6 +93,13 @@ pub struct ServeArgs {
     #[arg(long, env = "FOX_DRAFT_MODEL")]
     pub draft_model: Option<String>,
 
+    /// Name/path of the mmproj (vision projector) GGUF paired with the main model,
+    /// enabling image input (OpenAI `image_url` / Ollama `images`) via llama.cpp's
+    /// `mtmd` library. Like `--draft-model`, this is a single global pairing — one
+    /// mmproj active at a time, matched against whatever model is currently loaded.
+    #[arg(long, env = "FOX_MMPROJ")]
+    pub mmproj: Option<String>,
+
     /// Tokens per KV block
     #[arg(long, default_value = DEFAULT_BLOCK_SIZE, env = "FOX_BLOCK_SIZE")]
     pub block_size: usize,
@@ -308,6 +315,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         spec_ngram: args.spec_ngram,
         spec_draft_len: args.spec_draft_len,
         draft_model: args.draft_model,
+        mmproj: args.mmproj,
         max_context_len: args.max_context_len,
         block_size: args.block_size,
         gpu_memory_bytes,

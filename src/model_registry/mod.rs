@@ -106,8 +106,15 @@ impl ModelRegistry {
             None => None,
         };
 
+        // Resolve the paired mmproj (vision projector), if configured — same
+        // resolver as the main model and draft, just against `models_dir`.
+        let mmproj = match &self.config.mmproj {
+            Some(name) => Some(self.resolve_model_name(name)?.1),
+            None => None,
+        };
+
         // Load the model (FFI is blocking, so we use spawn_blocking inside).
-        let entry = Arc::new(load_model(&stem, &path, &self.config, draft).await?);
+        let entry = Arc::new(load_model(&stem, &path, &self.config, draft, mmproj).await?);
         self.engines.insert(stem.clone(), entry.clone());
         self.last_used.insert(stem.clone(), Instant::now());
         if let Ok(mut lru) = self.lru.lock() {
@@ -299,6 +306,7 @@ mod tests {
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
+            mmproj: None,
         }
     }
 

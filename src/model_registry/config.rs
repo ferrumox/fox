@@ -40,6 +40,12 @@ pub struct RegistryConfig {
     /// subject to LRU eviction/VRAM budgeting in 0.16 (see
     /// `docs/design/speculative-roadmap.md`).
     pub draft_model: Option<String>,
+    /// Name/path of the mmproj (vision projector) GGUF paired with the main model,
+    /// enabling image input via llama.cpp's `mtmd` library. Like `draft_model`, this
+    /// is a single global setting — one mmproj active at a time, matched against
+    /// whatever model is currently loaded. A mismatched pairing (mmproj for a
+    /// different architecture) fails at load time rather than corrupting output.
+    pub mmproj: Option<String>,
     /// Per-sequence context length. `None` = auto-detect from the model's trained context.
     pub max_context_len: Option<u32>,
     pub block_size: usize,

@@ -36,6 +36,28 @@ impl LlamaCppModel {
             return Ok(vec![]);
         }
 
+        // Multimodal requests are prefilled atomically via mtmd_helper_eval_chunks
+        // (its own internal llama_decode calls) — they never join the shared token
+        // batch below, so split them out first. No fox-level chunking or bisection
+        // retry for this path in v1 (see docs/design/vision-support.md).
+        let mut mm_results = Vec::new();
+        for (&req_id, req) in req_ids.iter().zip(requests.iter()) {
+            if req.multimodal.is_some() {
+                mm_results.push(self.do_prefill_multimodal(req_id, req)?);
+            }
+        }
+        if mm_results.len() == requests.len() {
+            return Ok(mm_results);
+        }
+        let (req_ids, requests): (Vec<u64>, Vec<InferenceRequestForModel>) = req_ids
+            .iter()
+            .zip(requests.iter())
+            .filter(|(_, r)| r.multimodal.is_none())
+            .map(|(&id, r)| (id, r.clone()))
+            .unzip();
+        let req_ids = &req_ids[..];
+        let requests = &requests[..];
+
         // Effective start of a request's FIRST prefill chunk: one token before
         // skip_prefix_tokens so the prefix-cache boundary position is always freshly
         // computed (see seq_cp comment below). For a non-hit request this is 0.
@@ -99,16 +121,13 @@ impl LlamaCppModel {
         // Nothing left to submit (all requests already fully prefilled) — report
         // completion without decoding. Defensive; the scheduler shouldn't emit these.
         if total_tokens == 0 {
-            return Ok(req_ids
-                .iter()
-                .enumerate()
-                .map(|(i, &req_id)| PrefillStep {
-                    req_id,
-                    prefill_pos: requests.get(i).map(|r| r.prompt_tokens.len()).unwrap_or(0),
-                    logits: None,
-                    tokens_in_kv: 0,
-                })
-                .collect());
+            mm_results.extend(req_ids.iter().enumerate().map(|(i, &req_id)| PrefillStep {
+                req_id,
+                prefill_pos: requests.get(i).map(|r| r.prompt_tokens.len()).unwrap_or(0),
+                logits: None,
+                tokens_in_kv: 0,
+            }));
+            return Ok(mm_results);
         }
 
         let n_seq_max = requests.len().max(1) as i32;
@@ -177,7 +196,8 @@ impl LlamaCppModel {
                 let (req_a, req_b) = requests.split_at(split);
                 let mut results = self.do_prefill(ids_a, req_a, max_prefill_chunk)?;
                 results.extend(self.do_prefill(ids_b, req_b, max_prefill_chunk)?);
-                return Ok(results);
+                mm_results.extend(results);
+                return Ok(mm_results);
             }
             return Err(anyhow!(
                 "llama_decode failed: {} (batch size {})",
@@ -240,7 +260,74 @@ impl LlamaCppModel {
         }
 
         unsafe { ffi::llama_batch_free(batch) };
-        Ok(results)
+        mm_results.extend(results);
+        Ok(mm_results)
+    }
+
+    /// Prefill a single multimodal request atomically via `mtmd_helper_eval_chunks`,
+    /// which runs mtmd's own internal `llama_decode` calls for whatever mix of
+    /// text/image chunks the prompt contains. Never joins the shared token batch in
+    /// `do_prefill` above — mtmd owns `_ctx` for the duration of the call, so no
+    /// other request's decode/prefill step interleaves with it (a documented v1
+    /// tradeoff; see `docs/design/vision-support.md`). Also unlike `do_prefill`,
+    /// there is no fox-level chunking (the whole prompt is one atomic call) and no
+    /// bisection retry on OOM — a failure here surfaces as a normal `EngineError`.
+    fn do_prefill_multimodal(
+        &self,
+        req_id: u64,
+        req: &InferenceRequestForModel,
+    ) -> Result<PrefillStep> {
+        let mtmd_ctx = self
+            .mtmd_ctx
+            .ok_or_else(|| anyhow!("multimodal request but model has no mmproj loaded"))?;
+        let chunks = req
+            .multimodal
+            .as_ref()
+            .ok_or_else(|| anyhow!("do_prefill_multimodal called without multimodal chunks"))?;
+
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+        let ctx = ctx_guard.as_ptr();
+
+        // n_past is always 0: multimodal requests skip fox's chunked-prefill and
+        // prefix-cache machinery entirely (see prompt_tokens being left empty for
+        // them), so this is always a fresh sequence's first and only prefill call.
+        let mut new_n_past: i32 = 0;
+        let ret = unsafe {
+            ffi::mtmd_helper_eval_chunks(
+                mtmd_ctx.as_ptr(),
+                ctx,
+                chunks.as_raw() as *const ffi::mtmd_input_chunks,
+                0,
+                req.kv_seq_id,
+                self.effective_ctx as i32,
+                true, // logits_last
+                &mut new_n_past,
+            )
+        };
+        if ret != 0 {
+            return Err(anyhow!("mtmd_helper_eval_chunks failed (code {ret})"));
+        }
+
+        let n_vocab = self.config.vocab_size as i32;
+        let logits_ptr = unsafe { ffi::llama_get_logits_ith(ctx, -1) };
+        let logits = if logits_ptr.is_null() {
+            Logits::new(vec![], self.eos_token)
+        } else {
+            let logits_slice: &[f32] =
+                unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
+            let sampled = self.sample_constrained(req, logits_slice);
+            Logits::new(logits_slice.to_vec(), sampled)
+        };
+
+        Ok(PrefillStep {
+            req_id,
+            prefill_pos: new_n_past as usize,
+            logits: Some(logits),
+            tokens_in_kv: new_n_past as usize,
+        })
     }
 
     pub(super) fn do_decode(

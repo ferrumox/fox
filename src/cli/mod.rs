@@ -38,7 +38,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     /// Start the OpenAI-compatible HTTP inference server
-    Serve(serve::ServeArgs),
+    Serve(Box<serve::ServeArgs>),
     /// Run single-shot inference and stream output to stdout
     Run(run::RunArgs),
     /// Benchmark model load time and inference throughput
@@ -108,7 +108,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     let cli = Cli::parse_from(effective);
     match cli.command {
-        Command::Serve(args) => serve::run_serve(args).await,
+        Command::Serve(args) => serve::run_serve(*args).await,
         Command::Run(args) => run::run_run(args).await,
         Command::Bench(args) => bench::run_bench(args).await,
         Command::BenchKv(args) => bench_kv::run_bench_kv(args).await,

@@ -38,6 +38,7 @@ fn golden_model() -> Option<LlamaCppModel> {
         0,
         &[],
         false,
+        None, // mmproj_path
     )
     .expect("FOX_GOLDEN_MODEL failed to load");
     Some(model)
@@ -184,6 +185,7 @@ fn golden_chunked_prefill_matches_single_shot() {
         min_p: 0.0,
         min_tokens: 0,
         logit_bias: None,
+        multimodal: None,
     };
 
     // argmax of the final-position logits — robust to tiny fp reduction-order diffs.
@@ -263,6 +265,7 @@ fn golden_context_shift_continues_past_n_ctx() {
         min_p: 0.0,
         min_tokens: 0,
         logit_bias: None,
+        multimodal: None,
     };
 
     // Prefill the prompt on seq 0.
@@ -332,6 +335,7 @@ fn golden_grammar_constrains_output() {
         min_p: 0.0,
         min_tokens: 0,
         logit_bias: None,
+        multimodal: None,
     };
 
     // Prefill seeds the grammar sampler and yields the first constrained token.
@@ -415,6 +419,7 @@ fn golden_json_schema_constrains_to_valid_json() {
         min_p: 0.0,
         min_tokens: 0,
         logit_bias: None,
+        multimodal: None,
     };
 
     let pre = m.do_prefill(&[1], &[mk_req(None, 0)], 0).unwrap();
@@ -489,6 +494,7 @@ fn golden_min_tokens_suppresses_eog() {
         min_p: 0.0,
         min_tokens: floor,
         logit_bias: None,
+        multimodal: None,
     };
 
     // Prefill must also respect min_tokens (generated_tokens == 0 < floor).
@@ -551,6 +557,7 @@ fn golden_speculative_matches_greedy() {
             min_p: 0.0,
             min_tokens: 0,
             logit_bias: None,
+            multimodal: None,
         }
     };
 
@@ -623,6 +630,7 @@ fn golden_draft_model_speculative_matches_greedy() {
         0,
         &[],
         false,
+        None, // mmproj_path
     )
     .expect("draft (self-speculation) load failed");
 
@@ -665,6 +673,7 @@ fn golden_draft_model_speculative_matches_greedy() {
             min_p: 0.0,
             min_tokens: 0,
             logit_bias: None,
+            multimodal: None,
         }
     };
 
@@ -764,6 +773,7 @@ fn golden_prefix_reuse_after_trim() {
                 min_p: 0.0,
                 min_tokens: 0,
                 logit_bias: None,
+                multimodal: None,
             }
         };
 

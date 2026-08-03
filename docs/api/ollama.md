@@ -438,6 +438,6 @@ fox aims for full API-level compatibility with Ollama. The following features ar
 | `/api/pull` with progress | ✓ |
 | `/api/version` | ✓ |
 | Function calling (via `/v1/chat/completions`) | ✓ |
-| Image/multimodal input | — (text models only) |
+| Image/multimodal input (`images` field) | ✓ (requires the loaded model to have a paired `--mmproj`; see `docs/design/vision-support.md`) |
 | Model creation (`/api/create`) | — |
 | Blob endpoints (`/api/blobs`) | — |
