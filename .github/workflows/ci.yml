@@ -150,3 +150,10 @@ jobs:
         # `make golden` builds for real, copies the ggml backend .so next to the test
         # binary so dlopen finds them, then runs the suite against the model.
         run: make golden GOLDEN_MODEL="$PWD/golden-model.gguf"
+
+      - name: E2E smoke (real server, real model, HTTP)
+        # The layer no unit/golden/stub test covers: multiple requests against a live
+        # server — cross-request prefix-cache lifecycle, guided decoding, logprobs,
+        # sampling controls, the Ollama surface, and speculation. This exact gap hid
+        # two prefix-cache lifecycle bugs (CHANGELOG [0.15.0] Fixed).
+        run: make e2e E2E_MODEL="$PWD/golden-model.gguf"

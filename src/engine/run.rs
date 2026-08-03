@@ -89,6 +89,13 @@ impl InferenceEngine {
                             e,
                             prefill_ids.len()
                         );
+                        // Clear KV before the seq_id returns to the pool — a failed
+                        // llama_decode leaves partial cells that poison the next occupant.
+                        for req in engine.scheduler.get_running(&prefill_ids) {
+                            if req.kv_seq_id >= 0 {
+                                engine.model.clear_sequence(req.kv_seq_id);
+                            }
+                        }
                         for req_id in &prefill_ids {
                             engine.scheduler.mark_finished(*req_id, StopReason::Length);
                             engine.model.free_grammar(*req_id);
@@ -113,6 +120,12 @@ impl InferenceEngine {
                             e,
                             decode_ids.len()
                         );
+                        // Same poisoned-sequence guard as the prefill error path.
+                        for req in engine.scheduler.get_running(&decode_ids) {
+                            if req.kv_seq_id >= 0 {
+                                engine.model.clear_sequence(req.kv_seq_id);
+                            }
+                        }
                         for req_id in &decode_ids {
                             engine.scheduler.mark_finished(*req_id, StopReason::Length);
                             engine.model.free_grammar(*req_id);
@@ -144,9 +157,14 @@ impl InferenceEngine {
         if n_ctx == 0 {
             return;
         }
+        // Roll with headroom for the largest possible next step (a speculative verify
+        // batch writes up to draft_len + 1 cells): triggering exactly AT n_ctx is too
+        // late — the boundary-crossing step fails before the roll can fire.
+        let reserve = self.speculative.map(|(_, d)| d + 1).unwrap_or(1);
+        let threshold = n_ctx.saturating_sub(reserve);
         for req in self.scheduler.get_running(decode_ids) {
             let ctx_len = req.context_len();
-            if ctx_len < n_ctx || req.kv_seq_id < 0 {
+            if ctx_len < threshold || req.kv_seq_id < 0 {
                 continue;
             }
             // Preserve the head; discard half of what remains (at least one token). Keep

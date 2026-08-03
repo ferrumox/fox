@@ -37,6 +37,7 @@ help:
 	@echo "  make test            Run unit tests"
 	@echo "  make check           Fast type-check without producing a binary"
 	@echo "  make ci              Run the full CI suite locally (fmt + clippy + tests)"
+	@echo "  make e2e             E2E smoke: real server + real model over HTTP (E2E_MODEL=...)"
 	@echo "  make setup           Install git pre-push hook (run once after cloning)"
 	@echo "  make bench           Run the integrated benchmark against a running server"
 	@echo "  make docker          Build the Docker image"
@@ -91,6 +92,18 @@ golden:
 	cargo test --lib --no-run
 	find target \( -name 'libggml*.so*' -o -name 'libllama*.so*' \) -exec cp {} . \;
 	FOX_GOLDEN_MODEL="$(GOLDEN_MODEL)" cargo test --lib golden -- --nocapture
+
+# End-to-end smoke — a REAL server with a REAL model over HTTP, across multiple
+# requests. Covers the layer no unit/golden/stub test reaches (cross-request
+# prefix-cache lifecycle, guided decoding, logprobs, sampling controls, Ollama
+# surface, speculation). This is the release-closing gate.
+#   Usage: make e2e E2E_MODEL=~/.cache/ferrumox/models/llama-3.2-1b-instruct-q8_0.gguf
+E2E_MODEL ?=
+e2e:
+	@test -n "$(E2E_MODEL)" || \
+		(echo "Set E2E_MODEL=/path/to/model.gguf" && exit 1)
+	cargo build --bin fox
+	./scripts/e2e_smoke.sh --bin target/debug/fox --model-path "$(E2E_MODEL)"
 
 # Build a Vulkan-enabled fox bundle in Docker and extract it to ./fox-vulkan/ so you
 # can run it natively on any host with a Vulkan driver (AMD/Intel iGPU, etc.) — no

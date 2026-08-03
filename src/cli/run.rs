@@ -15,7 +15,7 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::engine::model::{LlamaCppModel, Model};
-use crate::engine::InferenceEngine;
+use crate::engine::{EngineOptions, InferenceEngine};
 use crate::kv_cache::KVCacheManager;
 use crate::scheduler::{InferenceRequest, SamplingParams};
 
@@ -219,9 +219,12 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         kv_cache,
         model_name,
         None,
-        0,       // single-shot prefill (single interactive request)
-        Some(0), // roll context on full so long single-shot generations don't stop early
-        if args.speculative { Some((2, 4)) } else { None },
+        EngineOptions {
+            // Roll context on full so long single-shot generations don't stop early.
+            context_shift: Some(0),
+            speculative: args.speculative.then_some((2, 4)),
+            ..Default::default()
+        },
     ));
 
     match args.prompt.clone() {

@@ -9,6 +9,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1]
+
+The bug-hunt release. Exercising a **real server end-to-end on the target machine**
+(and then code-hunting the subsystem boundaries that pattern pointed at) surfaced six
+pre-existing bugs that 173 unit + 39 integration + 11 golden tests all structurally
+missed — every one living at a crossing between subsystems (prefix cache × request
+lifecycle, rolling × speculation × KV capacity, embeddings × sequence pool). All six
+are fixed, and the layer that found them is now permanent: a strict end-to-end smoke
+suite (`make e2e`) that runs in CI on every push and gates every release.
+
+### Fixed
+
+- **Prefix-cache reuse no longer breaks the server** (pre-existing, found by
+  exercising a real server end-to-end on the target machine). Three related bugs in
+  the same subsystem: (1) a finished request that donated its prompt prefix to the
+  cache left its *whole* KV (prompt + generated tokens) in the sequence, so the next
+  cache hit re-submitted tokens at occupied positions and `llama_decode` failed;
+  (2) the decode/prefill error paths recycled the sequence id without clearing its
+  KV, permanently poisoning it — every later request assigned that sequence failed
+  too; and (3) after a cache hit, `prefilled_tokens` recorded only the *submitted*
+  token count instead of the KV's true length, so the hit request's first decode
+  landed `skip` positions short — inside occupied cells — and died after one token.
+  Donated sequences are now trimmed to exactly the cached prefix, failed requests
+  clear their sequence before the id returns to the pool, and the decode position is
+  derived from the KV's total length. Guarded by a new golden
+  (`golden_prefix_reuse_after_trim`) and the new end-to-end smoke suite.
+- **Context rolling now fires with headroom** — the roll triggered exactly *at*
+  `n_ctx`, but the step that would cross the boundary (up to `draft_len + 1` cells
+  for a speculative verify batch) failed with "no KV slot" *before* the roll ever got
+  its chance, killing long generations right at the context boundary. The roll
+  threshold now reserves the largest possible next step, so the window slides just
+  before the boundary instead of the request dying on it. Found by the new
+  context-fill e2e check on real hardware.
+- **Rolled generations no longer donate to the prefix cache** (silent-corruption
+  class, found by code-hunting subsystem boundaries). Rolling removes the oldest KV
+  cells and shifts the survivors down, so a rolled request's cells at positions
+  `[0, cached)` are mid-generation tokens — NOT the prompt prefix the cache key
+  promises. Donating them would make the next cache hit condition its generation on
+  garbage, with no visible error. Requests with `rolled_tokens > 0` now skip donation.
+- **Embeddings no longer share a KV sequence with generation.** `do_get_embeddings`
+  hardcoded sequence 0 and wiped it after every call — but the scheduler's pool hands
+  out ids 0..max_batch, so under full concurrency an embedding request would clobber
+  (then erase) a live generation's KV. Embeddings now use a dedicated slot allocated
+  beyond the pool (`n_seq + 1`).
+- **Admission no longer preempts running requests** (two bugs, one root). LIFO
+  preemption on admission could (a) resume a preempted request from the bare prompt
+  while its position counter still included the tokens already streamed to the client
+  — a positional gap in the KV producing a silently corrupted continuation — and
+  (b) **livelock**: when a newcomer and a running request couldn't fit together, the
+  newcomer evicted the runner *within the same scheduling step it was re-admitted*,
+  so neither ever reached the engine again (total starvation, reproduced by unit
+  test). Since fox fully reserves a request's blocks at admission (prompt +
+  max_new_tokens), running requests never grow and admission preemption was
+  unnecessary to begin with: a request that doesn't fit now simply waits (FIFO), and
+  a request larger than the entire pool is rejected instead of blocking the queue
+  head forever.
+- **Concurrent requests for a cold model no longer load it twice.** Two simultaneous
+  requests for an unloaded model both passed the "already loaded?" check and each
+  loaded the full GGUF (transient double VRAM — an OOM risk on iGPUs), and the second
+  registry insert dropped the first entry, aborting its in-flight generations. Loads
+  are now single-flight (serialized with a re-check).
+- **Eviction no longer kills models with requests in flight.** `last_used` marks
+  request *start*, so a long generation looked idle and the keep-alive sweep (default
+  300s) would evict — and thereby abort — it mid-generation; LRU eviction at capacity
+  had the same flaw. Both eviction paths now skip busy models (active or queued
+  requests).
+
+### Changed
+
+- **`InferenceEngine::new` takes an `EngineOptions` struct** (prefill chunking,
+  context shift, speculation) instead of a growing tail of positional
+  `Option` arguments; oversized war-story comments trimmed to their load-bearing
+  constraint; shared sampler-parameter construction deduplicated.
+
+### Added
+
+- **`make e2e` smoke suite** (`scripts/e2e_smoke.sh`) — starts a real server with
+  a real model and drives it over HTTP across multiple requests: the prefix-cache
+  donate→hit lifecycle, guided decoding, logprobs, sampling controls, the Ollama
+  surface, speculation, streaming (SSE + NDJSON), four concurrent clients, a
+  context-window fill that forces rolling mid-generation, a re-request after a rolled
+  generation, a mid-stream client disconnect, and embeddings alongside chat. Runs in
+  CI's golden job on every push; it covers the cross-request layer that
+  unit/golden/stub tests structurally cannot reach (which is exactly where all six
+  bugs above were hiding).
+
 ## [0.15.0]
 
 fox gets **speculative decoding**. On single-request decode steps it guesses the next

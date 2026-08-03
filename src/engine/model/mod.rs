@@ -257,6 +257,14 @@ pub trait Model: Send + Sync {
     /// will inherit stale positions from the previous occupant and llama_decode will fail.
     fn clear_sequence(&self, seq_id: i32);
 
+    /// Remove the KV cells of `seq_id` from position `from_pos` (inclusive) onward,
+    /// keeping `[0, from_pos)`. Used when a finished request donates its prompt prefix
+    /// to the prefix cache: the donated sequence must hold EXACTLY the cached prefix —
+    /// leaving the old tail (rest of prompt + generated tokens) in place makes the next
+    /// occupant re-submit tokens at positions that already have cells, which
+    /// llama_decode rejects. Default: no-op (stubs have no real KV).
+    fn trim_sequence(&self, _seq_id: i32, _from_pos: usize) {}
+
     /// Copy `token_count` tokens worth of KV cache from `src_seq_id` to `dst_seq_id`
     /// (positions 0..token_count). Used by prefix caching: before prefilling a request whose
     /// prompt matches a completed one, we copy the KV data so only the non-cached suffix

@@ -20,9 +20,12 @@ impl Scheduler {
     /// One scheduling step. Returns prefill and decode batches.
     ///
     /// 1. Evict Finished requests, free their KV blocks, return seq IDs to pool
-    /// 2. Admit from waiting_queue — check prefix cache first, then normal allocation
-    /// 3. If no blocks, LIFO preempt last admitted
-    /// 4. Return prefill and decode id lists
+    /// 2. Admit from waiting_queue — check prefix cache first, then normal allocation.
+    ///    Admission NEVER preempts: blocks are fully reserved at admission (prompt +
+    ///    max_new_tokens), so running requests never grow — evicting an older running
+    ///    request for a newer waiting one is both unfair and livelock-prone (the pair
+    ///    can evict each other forever). A request that doesn't fit waits (FIFO).
+    /// 3. Return prefill and decode id lists
     pub fn schedule_step(&self) -> ScheduledBatch {
         // Lock ordering (must be consistent across ALL callers to avoid deadlock):
         //   running_batch → waiting_queue → seq_id_pool → prefix_cache
@@ -80,13 +83,27 @@ impl Scheduler {
         // 2. Admit from waiting_queue
         let mut prefill = Vec::new();
         let mut decode = Vec::new();
-        let mut preempted_seq_ids = Vec::new();
+        // Always empty since admission stopped preempting; retained so future
+        // preemption sources (priority, growth) can reuse the engine-side clearing.
+        let preempted_seq_ids = Vec::new();
         let block_size = self.kv_cache.block_size();
 
         'admit: while let Some(mut req) = waiting.pop_front() {
             if pool.is_empty() {
                 waiting.push_front(req);
                 break;
+            }
+
+            // Could never fit, even into an empty pool: drop it (channel closes)
+            // instead of blocking the queue head forever. API-side limits are 0.16.
+            if self.blocks_needed(&req) > self.kv_cache.total_blocks() {
+                tracing::error!(
+                    request_id = req.id,
+                    needed = self.blocks_needed(&req),
+                    total = self.kv_cache.total_blocks(),
+                    "request larger than the entire KV pool — rejecting"
+                );
+                continue 'admit;
             }
 
             // --- Block-level prefix cache lookup ---
@@ -119,7 +136,7 @@ impl Scheduler {
                         match self.kv_cache.allocate(new_blocks) {
                             Ok(ids) => ids,
                             Err(_) => {
-                                // Allocation failed — restore entry and fall through to preemption
+                                // Allocation failed — restore the entry and wait.
                                 pcache.put(block_hashes[matched_blocks - 1], hit);
                                 waiting.push_front(req);
                                 break 'admit;
@@ -151,10 +168,11 @@ impl Scheduler {
                     running.push(req);
                     continue 'admit;
                 } else {
-                    // No room for new blocks — restore entry and fall through to preemption.
+                    // No room yet — restore the entry and wait for capacity (FIFO
+                    // head-of-line). Running requests keep their reservations.
                     pcache.put(block_hashes[matched_blocks - 1], hit);
                     waiting.push_front(req);
-                    // Fall through to LIFO preemption below.
+                    break 'admit;
                 }
             } else {
                 // --- Normal admission path (no prefix match) ---
@@ -173,8 +191,8 @@ impl Scheduler {
                             req.page_table = PageTable::new(ids);
                             req.kv_seq_id = seq_id;
                             // Fresh (non-hit) admission: prefill from the start with no
-                            // cached prefix. Reset in case this is a re-admission after
-                            // preemption (stale prefix state would corrupt positions).
+                            // cached prefix. Reset defensively so stale prefix state can
+                            // never corrupt positions.
                             req.prefill_pos = 0;
                             req.skip_prefix_tokens = 0;
                             req.prefix_seq_id = None;
@@ -190,42 +208,15 @@ impl Scheduler {
                         }
                         Err(_) => {
                             waiting.push_front(req);
-                            // Fall through to LIFO preemption.
+                            break 'admit;
                         }
                     }
                 } else {
+                    // Not enough free blocks yet — wait for capacity (FIFO head-of-line).
                     waiting.push_front(req);
-                    // Fall through to LIFO preemption.
+                    break 'admit;
                 }
             }
-
-            // 3. No blocks available: LIFO preempt last admitted running request.
-            if let Some(mut evicted) = running.pop() {
-                evicted.state = batch::RequestState::Waiting;
-                evicted.stop_reason = Some(batch::StopReason::Preempt);
-                if !evicted.page_table.is_empty() {
-                    self.kv_cache.free_blocks(evicted.page_table.block_ids());
-                    evicted.page_table.clear();
-                }
-                if evicted.kv_seq_id >= 0 {
-                    preempted_seq_ids.push(evicted.kv_seq_id);
-                    pool.push(evicted.kv_seq_id);
-                    evicted.kv_seq_id = -1;
-                }
-                // Its KV is gone, so any partial prefill progress and prefix state is
-                // stale — reset so re-admission re-prefills the prompt from scratch.
-                evicted.prefill_pos = 0;
-                evicted.prefilled_tokens = 0;
-                evicted.skip_prefix_tokens = 0;
-                evicted.prefix_seq_id = None;
-                evicted.rolled_tokens = 0;
-                info!(
-                    request_id = evicted.id,
-                    "LIFO preemption: evicted from batch"
-                );
-                waiting.push_front(evicted);
-            }
-            break;
         }
 
         // 4. Build the prefill and decode lists from the running batch. A request stays
@@ -345,24 +336,25 @@ impl Scheduler {
     /// and all generation blocks are freed immediately.  The cache key is the chain hash
     /// of the last complete block, which encodes the full block prefix transitively.
     ///
-    /// Returns `true` if an entry was inserted, `false` if the prompt has no complete
-    /// blocks or the cache is at capacity.
+    /// Returns `Some(cached_tokens)` if an entry was inserted (so the engine can trim
+    /// the donated sequence's KV to exactly that prefix), `None` if the prompt has no
+    /// complete blocks or the cache is at capacity.
     ///
     /// Lock ordering: running_batch → prefix_cache (matches schedule_step order).
-    pub fn try_insert_prefix(&self, req_id: u64) -> bool {
+    pub fn try_insert_prefix(&self, req_id: u64) -> Option<usize> {
         let block_size = self.kv_cache.block_size();
 
         let mut running = match self.running_batch.lock() {
             Ok(g) => g,
-            Err(_) => return false,
+            Err(_) => return None,
         };
         let mut pcache = match self.prefix_cache.lock() {
             Ok(g) => g,
-            Err(_) => return false,
+            Err(_) => return None,
         };
 
         if pcache.len() >= self.prefix_cache_max {
-            return false;
+            return None;
         }
 
         // Do not cache if the inference seq_id pool is currently empty.
@@ -372,10 +364,10 @@ impl Scheduler {
         {
             let pool = match self.seq_id_pool.lock() {
                 Ok(g) => g,
-                Err(_) => return false,
+                Err(_) => return None,
             };
             if pool.is_empty() {
-                return false;
+                return None;
             }
         }
 
@@ -384,9 +376,15 @@ impl Scheduler {
                 continue;
             }
 
+            // A rolled request's low KV positions no longer hold the prompt prefix
+            // the cache key promises — donating them would silently corrupt hits.
+            if req.rolled_tokens > 0 {
+                return None;
+            }
+
             let full_blocks = req.prompt_tokens.len() / block_size;
             if full_blocks == 0 {
-                return false; // prompt too short to cache even one block
+                return None; // prompt too short to cache even one block
             }
 
             // Compute the chain hash for the full-block prefix.
@@ -406,7 +404,7 @@ impl Scheduler {
             } else {
                 // Fewer blocks than expected — free all and skip caching.
                 self.kv_cache.free_blocks(&all_blocks);
-                return false;
+                return None;
             };
 
             if !excess.is_empty() {
@@ -429,9 +427,9 @@ impl Scheduler {
                 cached_tokens = full_blocks * block_size,
                 "cached block prefix KV state"
             );
-            return true;
+            return Some(full_blocks * block_size);
         }
-        false
+        None
     }
 
     /// Return a prefix seq_id back to the pool after the engine has copied and cleared it.

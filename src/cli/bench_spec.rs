@@ -20,7 +20,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::cli::{get_gpu_memory_bytes, get_total_gpu_memory_bytes, resolve_model_path, theme};
 use crate::engine::model::{LlamaCppModel, Model};
-use crate::engine::InferenceEngine;
+use crate::engine::{EngineOptions, InferenceEngine};
 use crate::kv_cache::KVCacheManager;
 use crate::model_registry::kv_type;
 use crate::scheduler::{InferenceRequest, SamplingParams};
@@ -120,9 +120,10 @@ async fn run_one(
         kv_cache,
         model_name.to_string(),
         None,
-        0,    // single-shot prefill
-        None, // no context rolling
-        speculative,
+        EngineOptions {
+            speculative, // the knob under test
+            ..Default::default()
+        },
     ));
 
     let messages = vec![

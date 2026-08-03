@@ -181,10 +181,9 @@ pub struct InferenceRequest {
     pub prefix_seq_id: Option<i32>,
     /// Timestamp when the request was submitted (for latency metrics).
     pub submitted_at: std::time::Instant,
-    /// Number of prompt tokens actually submitted to llama.cpp during prefill.
-    /// May be less than `prompt_tokens.len()` when `effective_skip > 0` (prefix cache hit with
-    /// boundary re-submission).  The decode position is based on this value, not
-    /// `prompt_tokens.len()`, to avoid position gaps in recurrent/hybrid models.
+    /// Total prompt tokens in the sequence's KV once prefill completes (donated
+    /// prefix + submitted = `prompt_tokens.len()`). The decode position derives from
+    /// this, so it must equal the KV's true length — never the submitted count.
     pub prefilled_tokens: usize,
     /// Absolute prompt position already placed in the KV cache while this request is
     /// still `Prefilling`. Prefill submits up to `max_prefill_chunk` tokens per step

@@ -205,7 +205,17 @@ impl InferenceEngine {
                                 | Some(StopReason::Length)
                                 | Some(StopReason::StopSequence)
                         ) {
-                        !self.scheduler.try_insert_prefix(*req_id)
+                        match self.scheduler.try_insert_prefix(*req_id) {
+                            Some(cached_tokens) => {
+                                // Keep exactly [0, cached-1): the boundary token is
+                                // re-submitted on a hit, and any stale tail would
+                                // collide with the next occupant's positions.
+                                self.model
+                                    .trim_sequence(req.kv_seq_id, cached_tokens.saturating_sub(1));
+                                false
+                            }
+                            None => true,
+                        }
                     } else {
                         true
                     };

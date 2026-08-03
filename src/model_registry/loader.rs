@@ -91,9 +91,11 @@ pub(super) async fn load_model(
         kv_cache,
         name,
         metrics,
-        max_prefill_chunk,
-        context_shift,
-        speculative,
+        crate::engine::EngineOptions {
+            max_prefill_chunk,
+            context_shift,
+            speculative,
+        },
     ));
 
     let loop_handle = {

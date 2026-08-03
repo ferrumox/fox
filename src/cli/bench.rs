@@ -14,7 +14,7 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::engine::model::{LlamaCppModel, Model};
-use crate::engine::InferenceEngine;
+use crate::engine::{EngineOptions, InferenceEngine};
 use crate::kv_cache::KVCacheManager;
 use crate::scheduler::{InferenceRequest, SamplingParams};
 
@@ -143,9 +143,7 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         kv_cache,
         model_name.clone(),
         None,
-        0,    // single-shot prefill (benchmark)
-        None, // no context rolling (benchmark)
-        None, // no speculative decoding (benchmark)
+        EngineOptions::default(),
     ));
 
     // ── Tokenize prompt ──────────────────────────────────────────────────────
