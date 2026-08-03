@@ -67,6 +67,24 @@ gaps = []          # (timestamp, gap_seconds) for every interactive token gap
 long_result = {}
 
 
+def delta_text(chunk):
+    """Text produced by this chunk, whichever field the server put it in.
+
+    `llama-server` routes a reasoning model's output through its reasoning parser and
+    streams it as `reasoning_content`, not `content`. A driver that only reads
+    `content` sees an empty stream and reports the *total* request time as TTFT, with
+    zero inter-token gaps — which is exactly what happened on Qwen3.5-9B: 13214 ms
+    "TTFT" and `ITL p50 0.0`, published as a fox loss before the zeros were noticed.
+    Counting both fields is what makes engines with different reasoning handling
+    comparable at all.
+    """
+    ch = chunk.get("choices") or [{}]
+    if not ch:
+        return None
+    d = ch[0].get("delta") or {}
+    return d.get("content") or d.get("reasoning_content")
+
+
 def stream(prompt, maxtok, collect):
     """Stream one request. When collect is true, timestamp every inter-token gap."""
     body = json.dumps({
@@ -99,8 +117,7 @@ def stream(prompt, maxtok, collect):
                 continue
             if d.get("usage"):
                 ptok = d["usage"].get("prompt_tokens", 0) or 0
-            ch = d.get("choices") or [{}]
-            if not (ch and ch[0].get("delta", {}).get("content")):
+            if not delta_text(d):
                 continue
             now = time.perf_counter()
             if ttft is None:

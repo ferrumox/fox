@@ -59,6 +59,24 @@ PROMPTS = [
 ]
 
 
+def delta_text(chunk):
+    """Text produced by this chunk, whichever field the server put it in.
+
+    `llama-server` routes a reasoning model's output through its reasoning parser and
+    streams it as `reasoning_content`, not `content`. A driver that only reads
+    `content` sees an empty stream and reports the *total* request time as TTFT, with
+    zero inter-token gaps — which is exactly what happened on Qwen3.5-9B: 13214 ms
+    "TTFT" and `ITL p50 0.0`, published as a fox loss before the zeros were noticed.
+    Counting both fields is what makes engines with different reasoning handling
+    comparable at all.
+    """
+    ch = chunk.get("choices") or [{}]
+    if not ch:
+        return None
+    d = ch[0].get("delta") or {}
+    return d.get("content") or d.get("reasoning_content")
+
+
 def one(i):
     # The index goes FIRST so that two clients never share a prefix. With 16 base
     # prompts and `i % 16`, concurrency 32 handed two clients byte-identical prompts —
@@ -97,8 +115,7 @@ def one(i):
                 d = json.loads(payload)
             except json.JSONDecodeError:
                 continue
-            ch = d.get("choices") or [{}]
-            if ch and ch[0].get("delta", {}).get("content"):
+            if delta_text(d):
                 chunks += 1
                 stamps.append(time.perf_counter())
                 if ttft is None:

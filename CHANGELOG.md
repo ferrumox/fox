@@ -11,6 +11,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.1] - 2026-08-03
+
+Benchmark harness and design notes only. **No engine changes** — the binary behaves
+exactly as 0.20.0. Cut separately because the measurements it records retract four
+published numbers, and a retraction is worth a version people can point at.
+
+### Fixed
+
+- **The benchmark drivers could not see a reasoning model's output.** `llama-server`
+  streams a reasoning model's tokens as `reasoning_content`; the drivers read only
+  `delta.content`, saw an empty stream, and reported the *total* request time as
+  time-to-first-token. Everything measured on Qwen3.5-9B against `llama-server` was
+  therefore wrong in both directions: "`llama-server` loses the warm burst 3×" and "fox
+  wins multi-turn 7.9×" are both **retracted**. Its real prefill rate is 67 tok/s, the
+  same as fox's. The tell was printed in the same table — `ITL p50 0.0 / p99 0.0`, no
+  inter-token gaps at all — and was read as an oddity rather than as a broken
+  instrument.
+- **A stale binary could be benchmarked with the evidence on screen.** The harness
+  printed the bundle's timestamp and the commit next to each other and left the reader
+  to compare them; a bundle 14 minutes older than the commit that changed a default was
+  measured and the result read as a finding until `strings` settled it. It now compares
+  them and says so loudly.
+- **A shell variable collision ran one engine out of three and printed a table anyway.**
+  The multi-turn read loop used a variable named `n`, which the arm-rotation logic also
+  used; after the first engine the rotation divided by zero. It did not abort — it
+  produced a well-formatted single-column table with correct numbers, which is exactly
+  what a result looks like.
+
+### Added
+
+- **`scripts/bench_multiturn.py`** — the workload behind "conversations get faster over
+  time", which had no number under it until now. Real conversations: each turn carries
+  the previous prompt plus the model's *actual* reply plus a new message. Written to be
+  able to disappoint, and it did: fox goes 372 → 53 ms per turn but `llama-server` goes
+  383 → 87, because between turns the sequence is idle and inheriting an idle slot is
+  what it does well. **The honest figures for multi-turn are 1.64× over `llama-server`
+  and 4.9× over Ollama — not the 3.9× the concurrent burst produces.** Two different
+  claims; the docs blur them.
+- **TTFT decomposition** (`docs/design/benchmark-plan-2026-08.md`). fox looked 2.7×
+  faster than `llama-server` on hybrid multi-turn while reusing *nothing*, which is an
+  advantage with no mechanism. Fitting TTFT against prompt length (R² > 0.995) shows
+  prefill per token is a wash — `llama-server` is 10% *faster* — and the whole
+  difference is fixed cost per request: **110 ms against 540 ms**. Crossover around
+  **1900 tokens**: fox wins short prompts, `llama-server` wins long ones. This also
+  refutes the "fox interleaves chunked prefill better" explanation offered earlier —
+  going from 1 to 4 clients multiplies the slope by 4.04 for fox and 4.25 for
+  `llama-server`, so neither overlaps prefill across requests.
+
+---
+
 ## [0.20.0] - 2026-08-03
 
 Prompt reuse now works on hybrid and recurrent models, where it had been silently off.

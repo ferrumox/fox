@@ -28,6 +28,13 @@ concurrent arrivals cannot inherit from each other. Measured, 3 rounds, disjoint
 
 That is the paper's thesis, and it is the only headline that holds up.
 
+**Multi-turn is a second, weaker claim and must not borrow the first one's number.**
+Measured at last (`scripts/bench_multiturn.py`): within a conversation fox goes 372 → 53
+ms per turn, but `llama-server` goes 383 → 87 — it reuses here too, because between turns
+the sequence is idle and inheriting an idle slot is the thing it does well. So multi-turn
+is **1.64× over `llama-server`** and **4.9× over Ollama**, not 3.9×. Two different
+workloads, two different numbers; the docs currently blur them.
+
 ### Three claims did not survive
 
 | claim | what it actually was |
@@ -35,6 +42,7 @@ That is the paper's thesis, and it is the only headline that holds up.
 | "fox degrades 5.5× under a noisy neighbour, `llama-server` 44×" | **a default.** `--max-prefill-chunk 512` against `n_batch 2048`. With `-b 512` the reference stalls 263 ms against fox's 273. |
 | "fox is within ~10% of `llama-server` on throughput" | **true only to 16 clients.** The gap is 15% at 32, 22% at 64 and 103% at 128. |
 | "the sweep gains at 32 clients" | **a contaminated control.** Duplicate prompts above 16 clients handed fox its own prefix cache; retracted. |
+| "`llama-server` loses the 9B warm burst 3×" and "fox wins 9B multi-turn 7.9×" | **a broken instrument.** The drivers ignored `reasoning_content`, so a reasoning model's whole stream was invisible and the total request time was reported as TTFT. Both retracted; re-measured below. |
 
 ### The finding that matters most is a trade, not a win
 
@@ -53,6 +61,15 @@ matching `llama-server` at 64 clients and passing it at 128.
 
 **fox's real advantage and its worst weakness are the same design decision.** That is a
 more interesting paper than "fox is 4× faster", but it only works if told whole.
+
+### On hybrid models, nothing is settled
+
+The Qwen3.5 family is where fox's prompt reuse was off entirely until 0.20.0, and where
+it is still off at the shipped `--rs-rollback 4`: measured, 20 slot hits and 20 refused
+trims, `cached_tokens` 0, because the conversation is not a token-exact prefix chain on
+this template. fox is nonetheless ~2.7× ahead of `llama-server` on short-prompt
+multi-turn there — but for the fixed-cost reason below, not for any reuse. Treat every
+hybrid number in this document as provisional.
 
 ### Where fox is behind, plainly
 
@@ -206,13 +223,49 @@ Against `llama-server` — which has no model management, no pull, no catalogue 
 Ollama API — it is 1.64×. Quoting the larger number against the weaker competitor is fine
 if the comparison is named; leaving it unnamed is not.
 
+### What TTFT is actually made of
+
+Prompted by fox looking 2.7× faster than `llama-server` on hybrid multi-turn while
+reusing *nothing* — an advantage with no mechanism is a result waiting to be retracted.
+
+Measured without parsing either engine's logs, because only one of them publishes
+timings and comparing a published number against an estimate is the asymmetry that has
+spoiled half the measurements here. TTFT against prompt length at fixed concurrency,
+then a linear fit: the slope is prefill per token, the intercept everything that does not
+depend on the prompt. Qwen3.5-9B, R² > 0.995 on all four fits.
+
+| | prefill per token | fixed cost per request |
+|---|---|---|
+| fox, conc 1 | 2.63 ms | **110 ms** |
+| `llama-server`, conc 1 | **2.40 ms** | 540 ms |
+| fox, conc 4 | 10.65 ms | **439 ms** |
+| `llama-server`, conc 4 | **10.17 ms** | 1739 ms |
+
+**fox's advantage is entirely the fixed per-request cost — 4.9× lower — and
+`llama-server` prefills 10% faster per token.** So fox wins short prompts, where the
+constant dominates, and loses long ones. The crossover is around **1900 tokens**
+(110 + 2.63n = 540 + 2.40n). Multi-turn sits at 150-320 tokens, deep in fox's half,
+which is the whole of the 2.7×.
+
+Two things this kills:
+
+- **"fox interleaves chunked prefill across concurrent requests better."** That was my
+  explanation and it is wrong: going from 1 to 4 clients multiplies the slope by 4.04 for
+  fox and 4.25 for `llama-server`. Neither overlaps prefill across requests.
+- Any claim that fox is faster on this model family in general. It is faster on *short*
+  prompts on it.
+
+What those 540 ms and 110 ms *are* is still unknown. One decode pass on this model is
+~71 ms, so neither figure is "the first token"; there is 40-470 ms of something else in
+each engine. Going further needs instrumentation inside both, symmetrically.
+
 ### What has not been done
 
 The whole comparison is **Llama-3.2-1B-Q8_0 on one iGPU**, i.e. one size and one
 architecture (dense GQA). The Qwen3.5-9B attempt above is not a size comparison — it
 changed architecture at the same time, and the architecture dominated the result.
 
-Still unmeasured: multi-turn, RAG and agentic workloads, sliding-window attention, and
+Still unmeasured: RAG and agentic workloads, sliding-window attention, and
 MoE. (The dense 7B size axis is now measured — see above.) Nothing here should be published as a
 general claim about fox.
 
@@ -452,6 +505,17 @@ where fox's cache cannot help), batch embedding, and offline bulk processing.
   store living on disk and the script deleting it, not a printed reminder: a cleanup rule
   that depends on remembering is not a rule. (Re-measured with RAM free, fox's 7B cold
   TTFT moved 5130 → 5062 ms, so the affected runs stand — but that was luck, not design.)
+- **Read every field an engine might put the output in.** `llama-server` streams a
+  reasoning model's tokens as `reasoning_content`, not `content`. Drivers reading only
+  `content` saw an empty stream and reported the *total* request time as TTFT — which is
+  how "`llama-server` loses the 9B warm burst 3×" and "fox wins 9B multi-turn 7.9×" both
+  got published before being retracted. The tell was in the same table: `ITL p50 0.0 /
+  p99 0.0`, i.e. no inter-token gaps at all, read as an oddity instead of as a broken
+  instrument.
+- **When a result is surprising, suspect the instrument first.** Three times in one day a
+  striking number was a measurement fault: a bundle 14 minutes older than the commit, a
+  shell variable collision that silently ran one engine of three, and the field above.
+  None of them failed loudly; all three produced well-formatted, plausible tables.
 - **Prefer absolute latencies to ratios against each engine's own baseline.** The
   noisy-neighbour "factor" rewarded whichever engine had rougher idle streams: at a
   matched chunk `llama-server` scored a worse factor while stalling less.
