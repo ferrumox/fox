@@ -22,6 +22,10 @@ pub(super) async fn load_model(
     let max_prefill_chunk = cfg.max_prefill_chunk;
     // None disables context rolling; Some(n_keep) enables it, preserving n_keep head tokens.
     let context_shift = cfg.context_shift.then_some(cfg.context_keep);
+    // None disables speculation; Some((ngram, draft_len)) enables n-gram lookup.
+    let speculative = cfg
+        .speculative
+        .then_some((cfg.spec_ngram, cfg.spec_draft_len));
     let max_context_len = cfg.max_context_len;
     let gpu_memory_bytes = cfg.gpu_memory_bytes;
     let gpu_memory_fraction = cfg.gpu_memory_fraction;
@@ -89,6 +93,7 @@ pub(super) async fn load_model(
         metrics,
         max_prefill_chunk,
         context_shift,
+        speculative,
     ));
 
     let loop_handle = {

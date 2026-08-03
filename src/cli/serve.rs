@@ -61,6 +61,20 @@ pub struct ServeArgs {
     #[arg(long, default_value = "0", env = "FOX_CONTEXT_KEEP")]
     pub context_keep: usize,
 
+    /// Enable n-gram / prompt-lookup speculative decoding — verify several guessed tokens
+    /// per forward pass for single-request decode steps. Output is unchanged; only speed.
+    /// Off by default. Automatically skipped while a request uses guided decoding.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set, env = "FOX_SPECULATIVE")]
+    pub speculative: bool,
+
+    /// Suffix length matched against the request's history when speculating.
+    #[arg(long, default_value = "2", env = "FOX_SPEC_NGRAM")]
+    pub spec_ngram: usize,
+
+    /// Maximum draft tokens proposed per speculative step.
+    #[arg(long, default_value = "4", env = "FOX_SPEC_DRAFT_LEN")]
+    pub spec_draft_len: usize,
+
     /// Tokens per KV block
     #[arg(long, default_value = DEFAULT_BLOCK_SIZE, env = "FOX_BLOCK_SIZE")]
     pub block_size: usize,
@@ -262,6 +276,9 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         max_prefill_chunk: args.max_prefill_chunk,
         context_shift: args.context_shift,
         context_keep: args.context_keep,
+        speculative: args.speculative,
+        spec_ngram: args.spec_ngram,
+        spec_draft_len: args.spec_draft_len,
         max_context_len: args.max_context_len,
         block_size: args.block_size,
         gpu_memory_bytes,

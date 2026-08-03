@@ -162,6 +162,7 @@ async fn run_scenario(
         None,
         chunk, // the knob under test
         None,  // no context rolling (benchmark)
+        None,  // no speculative decoding (benchmark)
     ));
 
     let long_tokens = synth_long_prompt(&engine, args.long_prompt_tokens);

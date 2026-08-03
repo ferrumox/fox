@@ -20,7 +20,14 @@ impl EngineEntry {
     /// Must be called inside a Tokio runtime (i.e. inside `#[tokio::test]`).
     pub fn for_test(name: &str) -> Arc<Self> {
         use crate::engine::model::StubModel;
-        Self::for_test_with_model(name, Arc::new(StubModel))
+        Self::for_test_with_model(name, Arc::new(StubModel), None)
+    }
+
+    /// Build a test `EngineEntry` with speculative decoding enabled (StubModel emits two
+    /// tokens per speculative step, exercising the engine's multi-token commit path).
+    pub fn for_test_speculative(name: &str) -> Arc<Self> {
+        use crate::engine::model::StubModel;
+        Self::for_test_with_model(name, Arc::new(StubModel), Some((2, 4)))
     }
 
     /// Build a test `EngineEntry` backed by `ThinkingStubModel` (no FFI).
@@ -28,10 +35,14 @@ impl EngineEntry {
     /// "thought" → "</think>" → "answer" → EOS.
     pub fn for_test_thinking(name: &str) -> Arc<Self> {
         use crate::engine::model::ThinkingStubModel;
-        Self::for_test_with_model(name, Arc::new(ThinkingStubModel::new()))
+        Self::for_test_with_model(name, Arc::new(ThinkingStubModel::new()), None)
     }
 
-    fn for_test_with_model(name: &str, model: Arc<dyn crate::engine::model::Model>) -> Arc<Self> {
+    fn for_test_with_model(
+        name: &str,
+        model: Arc<dyn crate::engine::model::Model>,
+        speculative: Option<(usize, usize)>,
+    ) -> Arc<Self> {
         use crate::kv_cache::KVCacheManager;
         use crate::scheduler::Scheduler;
 
@@ -47,6 +58,7 @@ impl EngineEntry {
             None,
             0,    // single-shot prefill in tests
             None, // no context rolling in tests
+            speculative,
         ));
         let loop_handle = {
             let e = engine.clone();

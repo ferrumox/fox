@@ -22,6 +22,9 @@ struct ConfigFile {
     max_prefill_chunk: Option<usize>,
     context_shift: Option<bool>,
     context_keep: Option<usize>,
+    speculative: Option<bool>,
+    spec_ngram: Option<usize>,
+    spec_draft_len: Option<usize>,
     block_size: Option<usize>,
     hf_token: Option<String>,
     alias_file: Option<String>,
@@ -88,6 +91,12 @@ pub fn load_config_into_env() {
         cfg.context_shift.map(|v| v.to_string()),
     );
     set_if_unset("FOX_CONTEXT_KEEP", cfg.context_keep.map(|v| v.to_string()));
+    set_if_unset("FOX_SPECULATIVE", cfg.speculative.map(|v| v.to_string()));
+    set_if_unset("FOX_SPEC_NGRAM", cfg.spec_ngram.map(|v| v.to_string()));
+    set_if_unset(
+        "FOX_SPEC_DRAFT_LEN",
+        cfg.spec_draft_len.map(|v| v.to_string()),
+    );
     set_if_unset("FOX_BLOCK_SIZE", cfg.block_size.map(|v| v.to_string()));
     set_if_unset("HF_TOKEN", cfg.hf_token);
     set_if_unset("FOX_ALIAS_FILE", cfg.alias_file);

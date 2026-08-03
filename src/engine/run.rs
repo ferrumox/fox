@@ -15,6 +15,8 @@ impl InferenceEngine {
         // We increment the Prometheus IntCounters by the step delta each loop iteration.
         let mut last_prefix_hits: u64 = 0;
         let mut last_prefix_misses: u64 = 0;
+        let mut last_spec_proposed: u64 = 0;
+        let mut last_spec_accepted: u64 = 0;
 
         loop {
             let batch = engine.scheduler.schedule_step();
@@ -40,6 +42,22 @@ impl InferenceEngine {
                 }
                 last_prefix_hits = cur_hits;
                 last_prefix_misses = cur_misses;
+
+                let (cur_proposed, cur_accepted) = engine.spec_stats();
+                let dp = cur_proposed.saturating_sub(last_spec_proposed);
+                let da = cur_accepted.saturating_sub(last_spec_accepted);
+                if dp > 0 {
+                    m.spec_tokens_proposed_total.inc_by(dp);
+                }
+                if da > 0 {
+                    m.spec_tokens_accepted_total.inc_by(da);
+                }
+                if cur_proposed > 0 {
+                    m.spec_acceptance_ratio
+                        .set(cur_accepted as f64 / cur_proposed as f64);
+                }
+                last_spec_proposed = cur_proposed;
+                last_spec_accepted = cur_accepted;
             }
 
             for seq_id in &batch.preempted_seq_ids {
@@ -57,7 +75,13 @@ impl InferenceEngine {
             if !prefill_ids.is_empty() {
                 match engine.run_prefill(&prefill_ids).await {
                     Ok(prefill_results) => {
-                        engine.handle_logits(&prefill_results, true).await?;
+                        // Prefill yields one token per request; wrap each so handle_logits
+                        // sees the same per-request token-list shape as decode.
+                        let wrapped: Vec<(u64, Vec<Logits>)> = prefill_results
+                            .into_iter()
+                            .map(|(id, l)| (id, vec![l]))
+                            .collect();
+                        engine.handle_logits(&wrapped, true).await?;
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -228,7 +252,7 @@ impl InferenceEngine {
         Ok(result)
     }
 
-    pub(super) async fn run_decode(&self, req_ids: &[u64]) -> Result<Vec<(u64, Logits)>> {
+    pub(super) async fn run_decode(&self, req_ids: &[u64]) -> Result<Vec<(u64, Vec<Logits>)>> {
         // Copy-on-write: if any block in a decoding request is shared (ref_count > 1),
         // allocate a new exclusive copy before llama.cpp writes to it.
         //
@@ -288,8 +312,37 @@ impl InferenceEngine {
             .collect();
         let model = self.model.clone();
         let req_ids_vec = req_ids.to_vec();
-        tokio::task::spawn_blocking(move || model.decode_sync(&req_ids_vec, &model_requests))
-            .await
-            .map_err(|e| anyhow::anyhow!("decode spawn_blocking: {}", e))?
+
+        // Speculative fast path: a single decoding request with no grammar, when enabled.
+        // Speculation helps most at low concurrency; multi-request batches decode normally.
+        if let (Some((ngram, draft_len)), [only_id]) = (self.speculative, req_ids) {
+            let no_grammar = model_requests
+                .first()
+                .map(|r| r.grammar.is_none())
+                .unwrap_or(false);
+            if no_grammar {
+                let only_id = *only_id;
+                let request = model_requests.into_iter().next().unwrap();
+                let (committed, proposed) = tokio::task::spawn_blocking(move || {
+                    model.speculative_decode_sync(only_id, &request, ngram, draft_len)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("speculative decode spawn_blocking: {}", e))??;
+                // Acceptance accounting: committed = accepted drafts + 1 bonus token.
+                use std::sync::atomic::Ordering;
+                self.spec_proposed
+                    .fetch_add(proposed as u64, Ordering::Relaxed);
+                self.spec_accepted
+                    .fetch_add((committed.len() - 1) as u64, Ordering::Relaxed);
+                return Ok(vec![(only_id, committed)]);
+            }
+        }
+
+        // Normal batched decode: one token per request.
+        let out =
+            tokio::task::spawn_blocking(move || model.decode_sync(&req_ids_vec, &model_requests))
+                .await
+                .map_err(|e| anyhow::anyhow!("decode spawn_blocking: {}", e))??;
+        Ok(out.into_iter().map(|(id, l)| (id, vec![l])).collect())
     }
 }

@@ -5,6 +5,7 @@ mod logits;
 pub mod model;
 mod output_filter;
 mod run;
+mod speculative;
 
 use output_filter::PerRequestState;
 
@@ -48,9 +49,20 @@ pub struct InferenceEngine {
     /// `None` disables it; `Some(n_keep)` enables it, preserving the first `n_keep`
     /// tokens (BOS + system prompt). Only applied to shiftable (non-recurrent) caches.
     context_shift: Option<usize>,
+    /// Speculative decoding: `Some((ngram, draft_len))` enables n-gram / prompt-lookup
+    /// speculation for single-request decode steps (no grammar); `None` disables it.
+    speculative: Option<(usize, usize)>,
+    /// Lifetime draft tokens proposed by speculation (for the acceptance metrics).
+    spec_proposed: AtomicU64,
+    /// Lifetime draft tokens the target model accepted.
+    spec_accepted: AtomicU64,
 }
 
 impl InferenceEngine {
+    // Three trailing engine knobs (prefill chunking, context shift, speculation) push
+    // this over clippy's argument limit; call sites annotate each one. If another knob
+    // lands, fold them into an options struct.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         model: Arc<dyn Model>,
         scheduler: Arc<crate::scheduler::Scheduler>,
@@ -59,6 +71,7 @@ impl InferenceEngine {
         metrics: Option<Arc<Metrics>>,
         max_prefill_chunk: usize,
         context_shift: Option<usize>,
+        speculative: Option<(usize, usize)>,
     ) -> Self {
         let supports_prefix_cache = model.supports_seq_copy();
         if supports_prefix_cache {
@@ -84,6 +97,9 @@ impl InferenceEngine {
             model_stop_tokens,
             max_prefill_chunk,
             context_shift,
+            speculative,
+            spec_proposed: AtomicU64::new(0),
+            spec_accepted: AtomicU64::new(0),
         }
     }
 
@@ -168,5 +184,14 @@ impl InferenceEngine {
 
     pub fn prefix_cache_misses(&self) -> u64 {
         self.scheduler.prefix_misses.load(Ordering::Relaxed)
+    }
+
+    /// Lifetime speculative-decoding stats: `(drafts proposed, drafts accepted)`.
+    /// Both zero when speculation is disabled or never triggered.
+    pub fn spec_stats(&self) -> (u64, u64) {
+        (
+            self.spec_proposed.load(Ordering::Relaxed),
+            self.spec_accepted.load(Ordering::Relaxed),
+        )
     }
 }

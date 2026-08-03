@@ -40,6 +40,19 @@ impl Model for StubModel {
             .collect())
     }
 
+    fn speculative_decode_sync(
+        &self,
+        _req_id: u64,
+        _request: &InferenceRequestForModel,
+        _ngram: usize,
+        _draft_len: usize,
+    ) -> Result<(Vec<Logits>, usize)> {
+        // Two non-EOS text tokens per step (1 proposed draft, accepted), so the engine's
+        // multi-token commit path and acceptance accounting are exercised, and generation
+        // stops on max_tokens rather than immediate EOS.
+        Ok((vec![Logits::new(vec![], 65), Logits::new(vec![], 65)], 1))
+    }
+
     fn model_config(&self) -> ModelConfig {
         ModelConfig {
             num_layers: 2,

@@ -528,6 +528,50 @@ async fn test_v1_chat_accepts_min_p_logit_bias_min_tokens() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Speculative decoding – multi-token commit path (0.15)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_speculative_engine_commits_multiple_tokens_and_respects_max() {
+    let dir = tempfile::tempdir().unwrap();
+    // Speculative stub: every decode step commits TWO tokens instead of one.
+    let (state, _) = make_test_state_speculative("stub", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": false,
+            "max_tokens": 6,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    let content = v["choices"][0]["message"]["content"].as_str().unwrap();
+    assert!(
+        !content.is_empty(),
+        "speculative path must still produce text"
+    );
+    // max_tokens must bound the output even when steps commit 2 tokens at a time:
+    // the usage counter reflects at most max_tokens completions.
+    let completion_tokens = v["usage"]["completion_tokens"].as_u64().unwrap();
+    assert!(
+        completion_tokens <= 6,
+        "multi-token commits must respect max_tokens (got {completion_tokens})"
+    );
+    assert_eq!(
+        v["choices"][0]["finish_reason"].as_str().unwrap(),
+        "length",
+        "the stub never emits EOS under speculation, so the request must stop at max_tokens"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // NDJSON streaming – POST /api/chat  (stream: true)
 // ─────────────────────────────────────────────────────────────────────────────
 
