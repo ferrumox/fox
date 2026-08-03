@@ -30,7 +30,9 @@ impl LlamaCppModel {
         mmproj_path: Option<&std::path::Path>,
         lora_modules: &[(String, std::path::PathBuf, f32)],
         reranking: bool,
+        rs_rollback: u32,
     ) -> Result<Self> {
+        let _ = rs_rollback;
         let _ = (
             model_path,
             max_batch_size,
@@ -67,7 +69,9 @@ impl LlamaCppModel {
         gpu_memory_fraction: f32,
         type_k: u32,
         type_v: u32,
+        rs_rollback: u32,
     ) -> Result<Self> {
+        let _ = rs_rollback;
         let _ = (
             max_batch_size,
             max_context_len,

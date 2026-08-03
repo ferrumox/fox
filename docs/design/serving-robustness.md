@@ -89,7 +89,9 @@ with `Length`.
 - **Bookkeeping**: the request accumulates `rolled_tokens`; `context_len()` subtracts
   it so the next decode position lines up with the shifted KV. `rolled_tokens` resets
   on preemption (the KV, and any rolls, are gone).
-- **Recurrent/hybrid caches** (not shiftable — `supports_seq_copy()` is false) are
+- **Recurrent/hybrid caches** (not shiftable — `supports_seq_copy()` is false; note that
+  since 0.20.0 `supports_slot_reuse()` is a separate, weaker capability that *is* true
+  for them) are
   skipped and keep the "stop with `Length`" behavior.
 - **Config**: `--context-shift` / `FOX_CONTEXT_SHIFT` (default on) and `--context-keep`
   / `FOX_CONTEXT_KEEP` (default 0, the preserved head). Off in single-shot benches; on

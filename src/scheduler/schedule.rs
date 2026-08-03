@@ -123,8 +123,13 @@ impl Scheduler {
                         // so the copy boundary and the resubmission boundary would not
                         // agree. LoRA too — a branch must not inherit KV computed under
                         // a different adapter.
-                        let forkable =
-                            req.multimodal.is_none() && !req.skip_prefix_cache && self.kv_reuse;
+                        // Same precondition as the affinity path below: an n>1 branch
+                        // adopts its parent's KV through `seq_cp`, so a model that
+                        // cannot donate cells must prefill it normally instead.
+                        let forkable = req.multimodal.is_none()
+                            && !req.skip_prefix_cache
+                            && self.kv_reuse
+                            && self.prefix_reuse_enabled(); // a fork copies: strict flag
                         if forkable && parent_seq >= 0 && n_positions > 0 {
                             req.fork_source = Some((parent_seq, n_positions - 1));
                         } else {
@@ -154,7 +159,19 @@ impl Scheduler {
             // weights is invalid input for a different adapter (or none) at the same
             // positions, so such a request must start from a clean slot — see
             // docs/design/lora-support.md.
-            let allow_reuse = self.kv_reuse && !req.skip_prefix_cache;
+            // `prefix_reuse_enabled()` belongs here rather than further down, where a
+            // first attempt at this fix put it: `allow_reuse` feeds BOTH reuse paths —
+            // the slot table's LCP match and the copy-from-a-live-sibling fork below —
+            // and gating only the first left the fork setting `prefix_seq_id`, which
+            // still reached `llama_memory_seq_cp` and aborted. Reuse is only sound when
+            // the model's KV cache can donate cells; deciding to skip prefill and
+            // failing to copy afterwards does not degrade gracefully, it marks tokens
+            // resident that were never written.
+            // Two different permissions, because they need two different things from the
+            // model. Inheriting the slot's own KV copies nothing and works on hybrids;
+            // copying out of a live sibling needs `seq_cp` and does not.
+            let allow_reuse = self.kv_reuse && !req.skip_prefix_cache && self.slot_reuse_enabled();
+            let allow_copy = allow_reuse && self.prefix_reuse_enabled();
             let Some(choice) =
                 slots.select(&req.prompt_tokens, self.slot_prompt_similarity, allow_reuse)
             else {
@@ -174,7 +191,7 @@ impl Scheduler {
             // slot's token list because while a request owns the sequence *it* is the
             // source of truth. Only a request that is already `Decoding` has its whole
             // prompt in the KV and is therefore copyable.
-            if allow_reuse && req.fork_source.is_none() && req.multimodal.is_none() {
+            if allow_copy && req.fork_source.is_none() && req.multimodal.is_none() {
                 let best = running
                     .iter()
                     .filter(|r| r.kv_seq_id >= 0 && r.multimodal.is_none() && !r.skip_prefix_cache)

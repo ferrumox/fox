@@ -60,6 +60,43 @@ struct ModelSpec {
     /// Quantization prefix to filter files (e.g. "Q4").
     quant: Option<String>,
 }
+/// `("Kimi-K3-Q4_K_M", "00005")` from `Kimi-K3-Q4_K_M-00002-of-00005.gguf`.
+fn split_shard_name(filename: &str) -> Option<(&str, &str)> {
+    let stem = filename.strip_suffix(".gguf")?;
+    let (rest, total) = stem.rsplit_once("-of-")?;
+    let (prefix, index) = rest.rsplit_once('-')?;
+    let five_digits = |s: &str| s.len() == 5 && s.chars().all(|c| c.is_ascii_digit());
+    (five_digits(index) && five_digits(total)).then_some((prefix, total))
+}
+
+/// Every file making up the same sharded GGUF as `filename`, in order.
+///
+/// Large models are published split across `name-00001-of-00005.gguf` … and llama.cpp
+/// loads the whole set when handed the first part. Downloading one part therefore
+/// leaves an unusable file, which is why several of the most-downloaded models on
+/// HuggingFace — Kimi K3, DeepSeek V4, GLM 5.2, MiniMax M3 — were unreachable through
+/// `fox pull` before this existed.
+///
+/// Returns just `filename` when it is not part of a set, so unsharded pulls are
+/// unchanged.
+fn shard_set(filename: &str, all: &[String]) -> Vec<String> {
+    let Some((prefix, total)) = split_shard_name(filename) else {
+        return vec![filename.to_string()];
+    };
+    let mut set: Vec<String> = all
+        .iter()
+        .filter(|f| split_shard_name(f).is_some_and(|(p, t)| p == prefix && t == total))
+        .cloned()
+        .collect();
+    // Sorting is what puts part 1 first; the download order does not matter but the
+    // path reported back to the user does, since that is what llama.cpp must be given.
+    set.sort();
+    if set.is_empty() {
+        vec![filename.to_string()]
+    } else {
+        set
+    }
+}
 
 /// Parse user input into a ModelSpec.
 ///
@@ -304,78 +341,41 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         pick_balanced(&all).to_string()
     };
 
-    eprintln!("Selected: {}", filename);
+    let all_files: Vec<String> = gguf_files.to_vec();
+    let files = shard_set(&filename, &all_files);
+    if files.len() > 1 {
+        eprintln!("Selected: {} ({} shards)", filename, files.len());
+    } else {
+        eprintln!("Selected: {}", filename);
+    }
 
-    // Download with progress bar.
-    let dest = output_dir.join(&filename);
-    if dest.exists() {
-        eprintln!("{} already exists, skipping download.", dest.display());
+    // The first shard is the handle for the whole set — it is what gets reported back
+    // and what llama.cpp is pointed at.
+    let dest = output_dir.join(&files[0]);
+    let mut fetched = 0usize;
+    for (i, name) in files.iter().enumerate() {
+        let part_dest = output_dir.join(name);
+        if part_dest.exists() {
+            eprintln!("{} already exists, skipping.", part_dest.display());
+            continue;
+        }
+        let label = if files.len() > 1 {
+            format!("{name} ({}/{})", i + 1, files.len())
+        } else {
+            name.clone()
+        };
+        download_file(&client, &hf_repo, name, &part_dest, &label).await?;
+        fetched += 1;
+    }
+    if fetched == 0 && files.len() == 1 {
+        eprintln!("Nothing to download.");
         return Ok(());
     }
-
-    let download_url = format!("{HF_CDN_BASE}/{hf_repo}/resolve/main/{filename}");
-    eprintln!("Downloading {} …", filename);
-
-    let resp = client
-        .get(&download_url)
-        .send()
-        .await
-        .with_context(|| format!("downloading {}", download_url))?;
-
-    if !resp.status().is_success() {
-        anyhow::bail!(
-            "download failed with status {} for {}",
-            resp.status(),
-            download_url
-        );
-    }
-
-    let total_bytes = resp.content_length();
-    let pb = match total_bytes {
-        Some(n) => {
-            let pb = ProgressBar::new(n);
-            pb.set_style(
-                ProgressStyle::with_template(
-                    "{spinner:.green} [{elapsed_precise}] [{bar:50.cyan/blue}] \
-                     {bytes}/{total_bytes} ({eta})",
-                )
-                .unwrap()
-                .progress_chars("#>-"),
-            );
-            pb
-        }
-        None => {
-            let pb = ProgressBar::new_spinner();
-            pb.set_style(
-                ProgressStyle::with_template("{spinner:.green} {bytes} downloaded ({elapsed})")
-                    .unwrap(),
-            );
-            pb
-        }
-    };
-
-    let tmp_dest = dest.with_extension("gguf.part");
-    let mut file =
-        std::fs::File::create(&tmp_dest).with_context(|| format!("creating {:?}", tmp_dest))?;
-
-    let mut stream = resp;
-    while let Some(chunk) = stream
-        .chunk()
-        .await
-        .context("error reading download stream")?
-    {
-        file.write_all(&chunk).context("error writing to file")?;
-        pb.inc(chunk.len() as u64);
-    }
-    pb.finish_with_message("download complete");
-
-    std::fs::rename(&tmp_dest, &dest)
-        .with_context(|| format!("renaming {:?} to {:?}", tmp_dest, dest))?;
 
     let stem = dest
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or(&filename);
+        .unwrap_or(&files[0]);
 
     eprintln!();
     theme::print_success(&format!("Saved to {}", dest.display()));
@@ -399,6 +399,85 @@ pub async fn run_pull(args: PullArgs) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+/// Fetch one file to `dest`, showing progress under `label`.
+///
+/// Writes to a `.part` file and renames on completion, so an interrupted download
+/// cannot leave behind something that looks like a finished model — which matters more
+/// with shards, where one truncated part poisons the whole set.
+async fn download_file(
+    client: &reqwest::Client,
+    hf_repo: &str,
+    filename: &str,
+    dest: &std::path::Path,
+    label: &str,
+) -> Result<()> {
+    let download_url = format!("{HF_CDN_BASE}/{hf_repo}/resolve/main/{filename}");
+    eprintln!("Downloading {label} …");
+
+    let resp = client
+        .get(&download_url)
+        .send()
+        .await
+        .with_context(|| format!("downloading {}", download_url))?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "download failed with status {} for {}",
+            resp.status(),
+            download_url
+        );
+    }
+
+    let pb = match resp.content_length() {
+        Some(n) => {
+            let pb = ProgressBar::new(n);
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:50.cyan/blue}] \
+                     {bytes}/{total_bytes} ({eta})",
+                )
+                .unwrap()
+                .progress_chars("#>-"),
+            );
+            pb
+        }
+        None => {
+            let pb = ProgressBar::new_spinner();
+            pb.set_style(
+                ProgressStyle::with_template("{spinner:.green} {bytes} downloaded ({elapsed})")
+                    .unwrap(),
+            );
+            pb
+        }
+    };
+
+    // Sharded repos publish parts under a per-quant subdirectory
+    // (`UD-IQ1_S/Model-UD-IQ1_S-00001-of-00014.gguf`), so the destination's parent may
+    // not exist yet. Verified against the real file lists rather than assumed: every
+    // sharded repo checked (Kimi K3, DeepSeek V4, GLM 5.2, MiniMax M3) nests this way.
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {:?}", parent))?;
+    }
+    let tmp_dest = dest.with_extension("gguf.part");
+    let mut file =
+        std::fs::File::create(&tmp_dest).with_context(|| format!("creating {:?}", tmp_dest))?;
+
+    let mut stream = resp;
+    while let Some(chunk) = stream
+        .chunk()
+        .await
+        .context("error reading download stream")?
+    {
+        file.write_all(&chunk).context("error writing to file")?;
+        pb.inc(chunk.len() as u64);
+    }
+    pb.finish_with_message("download complete");
+
+    std::fs::rename(&tmp_dest, dest)
+        .with_context(|| format!("renaming {:?} to {:?}", tmp_dest, dest))?;
     Ok(())
 }
 
@@ -433,6 +512,84 @@ fn pick_balanced<'a>(files: &[&'a String]) -> &'a String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shard_set_groups_every_part_in_order() {
+        let all: Vec<String> = vec![
+            "m-00003-of-00003.gguf",
+            "m-00001-of-00003.gguf",
+            "m-00002-of-00003.gguf",
+            "other-00001-of-00002.gguf",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        // Handed any part, the whole set comes back — a pull that started from part 2
+        // must still fetch 1 and 3, or llama.cpp gets an incomplete model.
+        let got = shard_set("m-00002-of-00003.gguf", &all);
+        assert_eq!(
+            got,
+            vec![
+                "m-00001-of-00003.gguf",
+                "m-00002-of-00003.gguf",
+                "m-00003-of-00003.gguf"
+            ]
+        );
+    }
+
+    #[test]
+    fn shard_set_handles_parts_nested_in_a_quant_directory() {
+        // Real layout: every sharded repo checked on HuggingFace nests parts under a
+        // per-quant directory, so the grouping key has to survive a path separator.
+        let all: Vec<String> = vec![
+            "UD-IQ1_S/Kimi-K3-UD-IQ1_S-00002-of-00003.gguf",
+            "UD-IQ1_S/Kimi-K3-UD-IQ1_S-00001-of-00003.gguf",
+            "UD-IQ1_S/Kimi-K3-UD-IQ1_S-00003-of-00003.gguf",
+            "UD-IQ1_M/Kimi-K3-UD-IQ1_M-00001-of-00002.gguf",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let got = shard_set("UD-IQ1_S/Kimi-K3-UD-IQ1_S-00001-of-00003.gguf", &all);
+        assert_eq!(
+            got.len(),
+            3,
+            "must not pull in the other quant's parts: {got:?}"
+        );
+        assert!(
+            got[0].ends_with("00001-of-00003.gguf"),
+            "part 1 must sort first"
+        );
+    }
+
+    #[test]
+    fn shard_set_leaves_unsharded_files_alone() {
+        let all: Vec<String> = vec!["a.gguf".to_string(), "b-00001-of-00002.gguf".to_string()];
+        assert_eq!(shard_set("a.gguf", &all), vec!["a.gguf"]);
+    }
+
+    #[test]
+    fn shard_set_does_not_mix_different_totals() {
+        // Same prefix, different split counts: a repo that was re-sharded keeps both
+        // sets. Mixing them yields a model that cannot load.
+        let all: Vec<String> = vec![
+            "m-00001-of-00002.gguf".to_string(),
+            "m-00001-of-00003.gguf".to_string(),
+        ];
+        assert_eq!(
+            shard_set("m-00001-of-00002.gguf", &all),
+            vec!["m-00001-of-00002.gguf"]
+        );
+    }
+
+    #[test]
+    fn shard_like_names_that_are_not_shards_are_not_split() {
+        // Quant names carry digits and dashes too; only the five-digit NNNNN-of-NNNNN
+        // form is a shard marker.
+        let all: Vec<String> = vec!["Qwen3-Coder-30B-A3B-Q4_K_M.gguf".to_string()];
+        assert_eq!(split_shard_name("Qwen3-Coder-30B-A3B-Q4_K_M.gguf"), None);
+        assert_eq!(shard_set(&all[0], &all), vec![all[0].clone()]);
+    }
 
     #[test]
     fn resolve_from_registry_exact_key() {

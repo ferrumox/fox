@@ -115,7 +115,20 @@ impl InferenceEngine {
                 }
             }
             for (seq_id, keep_from) in &batch.kv_trims {
-                engine.model.trim_sequence(*seq_id, *keep_from);
+                // A refused trim is the recurrent/hybrid cache saying the rollback fell
+                // outside its snapshot window. Proceeding would leave the request
+                // skipping a prefix that is no longer where it thinks it is, so take the
+                // same escape hatch the prompt-cache restore failure uses: drop the
+                // sequence and prefill it from scratch. Slower, never wrong.
+                if !engine.model.trim_sequence(*seq_id, *keep_from) {
+                    tracing::warn!(
+                        seq_id,
+                        keep_from,
+                        "KV trim refused (rollback outside the cache's window) — re-prefilling"
+                    );
+                    engine.model.clear_sequence(*seq_id);
+                    engine.scheduler.invalidate_restore(*seq_id);
+                }
             }
 
             if batch.is_empty() {

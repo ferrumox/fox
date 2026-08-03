@@ -22,8 +22,8 @@ TTFT is the headline metric, not tokens/s: prefill is what is being avoided, and
 lands entirely on time-to-first-token.
 
 Usage: bench_burst.py URL MODEL [CONCURRENCY] [SYS_REPEATS] [MAX_TOKENS]
-Prints two lines: "cold <ttft_p50_ms> <ttft_p90_ms> <wall_s> <cached_total> <prompt_tokens>"
-and the same for "warm".
+Prints two lines: "cold <ttft_p50_ms> <ttft_p90_ms> <wall_s> <cached_total> <prompt_tokens>
+<itl_p50_ms> <itl_p99_ms>" and the same for "warm".
 """
 import json
 import sys
@@ -71,6 +71,9 @@ def one(i):
     ttft = None
     cached = 0
     ptok = 0
+    # Inter-token gaps, not just their average: a stream that averages 20 ms but stalls
+    # for 400 ms once is what a user actually notices, and a tok/s figure cannot show it.
+    stamps = []
     with urllib.request.urlopen(req, timeout=600) as r:
         for raw in r:
             if not raw.startswith(b"data: "):
@@ -88,11 +91,15 @@ def one(i):
                 ch = d.get("choices") or [{}]
                 if ch[0].get("delta", {}).get("content"):
                     ttft = time.perf_counter() - t0
+                    stamps.append(time.perf_counter())
+            elif (d.get("choices") or [{}])[0].get("delta", {}).get("content"):
+                stamps.append(time.perf_counter())
             usage = d.get("usage")
             if usage:
                 cached = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0) or 0
                 ptok = usage.get("prompt_tokens", 0) or 0
-    return (ttft if ttft is not None else time.perf_counter() - t0), cached, ptok
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    return (ttft if ttft is not None else time.perf_counter() - t0), cached, ptok, gaps
 
 
 def burst(label):
@@ -100,16 +107,20 @@ def burst(label):
     with ThreadPoolExecutor(max_workers=CONC) as ex:
         out = list(ex.map(one, range(CONC)))
     wall = time.perf_counter() - t0
-    ttfts = sorted(t for t, _, _ in out)
+    ttfts = sorted(t for t, _, _, _ in out)
     p50 = ttfts[len(ttfts) // 2]
     p90 = ttfts[min(len(ttfts) - 1, int(len(ttfts) * 0.9))]
-    cached = sum(c for _, c, _ in out)
+    cached = sum(c for _, c, _, _ in out)
+    gaps = sorted(g for _, _, _, gg in out for g in gg)
     # The prompt length is reported as measured, never estimated: an oversized prompt
     # does not fail loudly on both servers — llama-server returns 400, fox silently
     # rolls the context window, which sets rolled_tokens and disables reuse. Either way
     # the benchmark would be measuring truncation rather than prompt sharing.
-    ptok = max(p for _, _, p in out)
-    print(f"{label} {p50*1000:.0f} {p90*1000:.0f} {wall:.2f} {cached} {ptok}")
+    ptok = max(p for _, _, p, _ in out)
+    itl50 = gaps[len(gaps) // 2] * 1000 if gaps else 0
+    itl99 = gaps[min(len(gaps) - 1, int(len(gaps) * 0.99))] * 1000 if gaps else 0
+    print(f"{label} {p50*1000:.0f} {p90*1000:.0f} {wall:.2f} {cached} {ptok} "
+          f"{itl50:.1f} {itl99:.1f}")
 
 
 burst("cold")

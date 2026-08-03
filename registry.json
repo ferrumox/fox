@@ -1,150 +1,599 @@
 {
   "models": {
     "llama3.2": {
-      "aliases": ["llama3", "llama", "llama3.2:3b"],
+      "aliases": [
+        "llama3",
+        "llama",
+        "llama3.2:3b"
+      ],
       "repo": "bartowski/Llama-3.2-3B-Instruct-GGUF",
       "recommended": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
       "description": "Meta Llama 3.2 3B — fast, great for general chat",
       "size_gb": 2.0,
-      "tags": ["chat", "general", "fast"]
+      "tags": [
+        "chat",
+        "general",
+        "fast"
+      ]
     },
     "llama3.2:1b": {
-      "aliases": ["llama:1b"],
+      "aliases": [
+        "llama:1b"
+      ],
       "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF",
       "recommended": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
       "description": "Meta Llama 3.2 1B — ultra-fast, on-device inference",
       "size_gb": 0.8,
-      "tags": ["chat", "fast", "edge"]
+      "tags": [
+        "chat",
+        "fast",
+        "edge"
+      ]
     },
     "llama3.3": {
-      "aliases": ["llama3.3:70b"],
+      "aliases": [
+        "llama3.3:70b"
+      ],
       "repo": "bartowski/Llama-3.3-70B-Instruct-GGUF",
       "recommended": "Llama-3.3-70B-Instruct-Q4_K_M.gguf",
       "description": "Meta Llama 3.3 70B — latest Meta flagship (Dec 2024)",
       "size_gb": 40.0,
-      "tags": ["chat", "general", "reasoning"]
+      "tags": [
+        "chat",
+        "general",
+        "reasoning"
+      ]
     },
     "mistral-small": {
-      "aliases": ["mistral", "mistral:24b"],
+      "aliases": [
+        "mistral",
+        "mistral:24b"
+      ],
       "repo": "unsloth/Mistral-Small-3.1-24B-Instruct-2503-GGUF",
       "recommended": "Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf",
       "description": "Mistral Small 3.1 24B — updated Mistral (Mar 2025)",
       "size_gb": 14.0,
-      "tags": ["chat", "general", "fast"]
+      "tags": [
+        "chat",
+        "general",
+        "fast"
+      ]
     },
     "phi4": {
-      "aliases": ["phi-4", "phi4:14b"],
+      "aliases": [
+        "phi-4",
+        "phi4:14b"
+      ],
       "repo": "bartowski/phi-4-GGUF",
       "recommended": "phi-4-Q4_K_M.gguf",
       "description": "Microsoft Phi-4 14B — strong reasoning, efficient",
       "size_gb": 8.4,
-      "tags": ["chat", "reasoning", "coding"]
+      "tags": [
+        "chat",
+        "reasoning",
+        "coding"
+      ]
     },
     "phi3.5": {
-      "aliases": ["phi3", "phi-3.5"],
+      "aliases": [
+        "phi3",
+        "phi-3.5"
+      ],
       "repo": "bartowski/Phi-3.5-mini-instruct-GGUF",
       "recommended": "Phi-3.5-mini-instruct-Q4_K_M.gguf",
       "description": "Microsoft Phi-3.5 mini 3.8B — tiny but capable",
       "size_gb": 2.4,
-      "tags": ["chat", "fast", "edge"]
+      "tags": [
+        "chat",
+        "fast",
+        "edge"
+      ]
     },
     "gemma3": {
-      "aliases": ["gemma", "gemma3:4b"],
+      "aliases": [
+        "gemma",
+        "gemma3:4b"
+      ],
       "repo": "unsloth/gemma-3-4b-it-GGUF",
       "recommended": "gemma-3-4b-it-Q4_K_M.gguf",
       "description": "Google Gemma 3 4B — strong small model from Google",
       "size_gb": 2.5,
-      "tags": ["chat", "general", "fast"]
+      "tags": [
+        "chat",
+        "general",
+        "fast"
+      ]
     },
     "gemma3:1b": {
-      "aliases": ["gemma:1b"],
+      "aliases": [
+        "gemma:1b"
+      ],
       "repo": "unsloth/gemma-3-1b-it-GGUF",
       "recommended": "gemma-3-1b-it-Q4_K_M.gguf",
       "description": "Google Gemma 3 1B — ultra-lightweight, edge inference",
       "size_gb": 0.7,
-      "tags": ["chat", "fast", "edge"]
+      "tags": [
+        "chat",
+        "fast",
+        "edge"
+      ]
     },
     "gemma3:12b": {
-      "aliases": ["gemma:12b"],
+      "aliases": [
+        "gemma:12b"
+      ],
       "repo": "unsloth/gemma-3-12b-it-GGUF",
       "recommended": "gemma-3-12b-it-Q4_K_M.gguf",
       "description": "Google Gemma 3 12B — balanced performance",
       "size_gb": 7.5,
-      "tags": ["chat", "general", "reasoning"]
+      "tags": [
+        "chat",
+        "general",
+        "reasoning"
+      ]
     },
     "gemma3:27b": {
-      "aliases": ["gemma:27b"],
+      "aliases": [
+        "gemma:27b"
+      ],
       "repo": "unsloth/gemma-3-27b-it-GGUF",
       "recommended": "gemma-3-27b-it-Q4_K_M.gguf",
       "description": "Google Gemma 3 27B — flagship Gemma, strong reasoning",
       "size_gb": 16.5,
-      "tags": ["chat", "reasoning", "coding"]
+      "tags": [
+        "chat",
+        "reasoning",
+        "coding"
+      ]
     },
     "qwen2.5": {
-      "aliases": ["qwen", "qwen2.5:7b"],
+      "aliases": [
+        "qwen",
+        "qwen2.5:7b"
+      ],
       "repo": "bartowski/Qwen2.5-7B-Instruct-GGUF",
       "recommended": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
       "description": "Alibaba Qwen 2.5 7B — excellent multilingual support",
       "size_gb": 4.7,
-      "tags": ["chat", "multilingual", "coding"]
+      "tags": [
+        "chat",
+        "multilingual",
+        "coding"
+      ]
     },
     "deepseek-r1": {
-      "aliases": ["deepseek", "r1"],
+      "aliases": [
+        "deepseek",
+        "r1"
+      ],
       "repo": "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF",
       "recommended": "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
       "description": "DeepSeek R1 Distill 7B — chain-of-thought reasoning",
       "size_gb": 4.7,
-      "tags": ["reasoning", "math", "thinking"]
+      "tags": [
+        "reasoning",
+        "math",
+        "thinking"
+      ]
     },
     "granite3.1-dense": {
-      "aliases": ["granite", "granite3.1:8b"],
+      "aliases": [
+        "granite",
+        "granite3.1:8b"
+      ],
       "repo": "bartowski/granite-3.1-8b-instruct-GGUF",
       "recommended": "granite-3.1-8b-instruct-Q4_K_M.gguf",
       "description": "IBM Granite 3.1 8B — modern code & reasoning model (Dec 2024)",
       "size_gb": 4.9,
-      "tags": ["coding", "chat", "reasoning"]
+      "tags": [
+        "coding",
+        "chat",
+        "reasoning"
+      ]
     },
     "nomic-embed": {
-      "aliases": ["embed", "nomic"],
+      "aliases": [
+        "embed",
+        "nomic"
+      ],
       "repo": "nomic-ai/nomic-embed-text-v1.5-GGUF",
       "recommended": "nomic-embed-text-v1.5.Q4_K_M.gguf",
       "description": "Nomic Embed Text v1.5 — high-quality text embeddings",
       "size_gb": 0.1,
-      "tags": ["embeddings", "search", "rag"]
+      "tags": [
+        "embeddings",
+        "search",
+        "rag"
+      ]
     },
     "moondream2": {
-      "aliases": ["moondream", "moondream2:vision"],
+      "aliases": [
+        "moondream",
+        "moondream2:vision"
+      ],
       "repo": "ggml-org/moondream2-20250414-GGUF",
       "recommended": "moondream2-text-model-f16_ct-vicuna.gguf",
       "mmproj": "moondream2-mmproj-f16-20250414.gguf",
       "description": "Moondream2 1.8B (vision) — small, fast image understanding. Tiny 2048 trained context (fine for short exchanges). Pull both files (`fox pull moondream2` then `fox pull ggml-org/moondream2-20250414-GGUF --filename moondream2-mmproj-f16-20250414.gguf`), then serve with `--mmproj moondream2-mmproj-f16-20250414`",
       "size_gb": 3.75,
-      "tags": ["chat", "vision", "edge"]
+      "tags": [
+        "chat",
+        "vision",
+        "edge"
+      ]
     },
     "gemma4-e2b": {
-      "aliases": ["gemma4", "gemma4:vision", "gemma-4-e2b"],
+      "aliases": [
+        "gemma4",
+        "gemma4:vision",
+        "gemma-4-e2b"
+      ],
       "repo": "bartowski/google_gemma-4-E2B-it-GGUF",
       "recommended": "google_gemma-4-E2B-it-Q4_K_M.gguf",
       "mmproj": "mmproj-google_gemma-4-E2B-it-f16.gguf",
       "description": "Google Gemma 4 E2B (vision) — natively multimodal flagship-family model, 131K context, verified end-to-end (24/24 e2e checks incl. image_url/images/prefix-cache isolation, 2026-08-01). Pull both files (`fox pull gemma4-e2b` then `fox pull bartowski/google_gemma-4-E2B-it-GGUF --filename mmproj-google_gemma-4-E2B-it-f16.gguf`), then serve with `--mmproj mmproj-google_gemma-4-E2B-it-f16`",
       "size_gb": 3.85,
-      "tags": ["chat", "vision", "reasoning"]
+      "tags": [
+        "chat",
+        "vision",
+        "reasoning"
+      ]
     },
     "mamba-130m": {
-      "aliases": ["mamba", "mamba130m"],
+      "aliases": [
+        "mamba",
+        "mamba130m"
+      ],
       "repo": "Felladrin/gguf-mamba-130m-hf",
       "recommended": "mamba-130m-hf.Q8_0.gguf",
       "description": "Mamba 130M — tiny recurrent/hybrid state-space model (no per-token KV cache; prefix caching and context-shift are unsupported for this architecture, by design). Used to verify KV/state sizing correctness for recurrent models (`fox probe` reports `KV memory class: recurrent`) — see docs/design/mla-recurrent-kv-sizing.md. Not instruction-tuned; a raw completion model, not a chat model.",
       "size_gb": 0.16,
-      "tags": ["recurrent", "completion", "tiny"]
+      "tags": [
+        "recurrent",
+        "completion",
+        "tiny"
+      ]
     },
     "deepseek-v2-lite": {
-      "aliases": ["deepseek-v2", "deepseek2-lite"],
+      "aliases": [
+        "deepseek-v2",
+        "deepseek2-lite"
+      ],
       "repo": "mradermacher/DeepSeek-V2-Lite-GGUF",
       "recommended": "DeepSeek-V2-Lite.Q4_K_M.gguf",
       "description": "DeepSeek-V2-Lite 16B (2.4B active, MoE) — the smallest real Multi-head Latent Attention (MLA) model available in GGUF; DeepSeek-V2/V3 compress KV into a small latent vector, far smaller than fox's positional KV formula assumes. Used to verify KV sizing correctness for MLA models (`fox probe` reports `KV memory class: latent (MLA)`) — see docs/design/mla-recurrent-kv-sizing.md. Large download (~10GB at the recommended quant).",
       "size_gb": 9.66,
-      "tags": ["chat", "moe", "mla", "reasoning"]
+      "tags": [
+        "chat",
+        "moe",
+        "mla",
+        "reasoning"
+      ]
+    },
+    "qwen3.5": {
+      "aliases": [
+        "qwen3.5:4b"
+      ],
+      "repo": "unsloth/Qwen3.5-4B-GGUF",
+      "recommended": "Qwen3.5-4B-Q4_K_M.gguf",
+      "description": "Qwen3.5 4B — small and quick; a good default to try fox with",
+      "size_gb": 2.7,
+      "tags": [
+        "chat",
+        "general",
+        "fast"
+      ]
+    },
+    "qwen3.5:9b": {
+      "aliases": [],
+      "repo": "unsloth/Qwen3.5-9B-GGUF",
+      "recommended": "Qwen3.5-9B-Q4_K_M.gguf",
+      "description": "Qwen3.5 9B — steps up quality while still fitting a laptop",
+      "size_gb": 5.7,
+      "tags": [
+        "chat",
+        "general"
+      ]
+    },
+    "qwen3.6": {
+      "aliases": [
+        "qwen3.6:35b"
+      ],
+      "repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
+      "recommended": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+      "description": "Qwen3.6 35B-A3B — mixture of experts: 35B of quality, ~3B active per token. Pair with --moe-cpu to keep experts in RAM",
+      "size_gb": 22.1,
+      "tags": [
+        "chat",
+        "general",
+        "moe"
+      ]
+    },
+    "qwen3.6:27b": {
+      "aliases": [],
+      "repo": "unsloth/Qwen3.6-27B-GGUF",
+      "recommended": "Qwen3.6-27B-Q4_K_M.gguf",
+      "mmproj": "mmproj-BF16.gguf",
+      "description": "Qwen3.6 27B — dense, and multimodal with its projector",
+      "size_gb": 17.7,
+      "tags": [
+        "chat",
+        "general",
+        "vision"
+      ]
+    },
+    "qwen3-coder": {
+      "aliases": [
+        "coder"
+      ],
+      "repo": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+      "recommended": "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
+      "description": "Qwen3 Coder 30B-A3B — code generation and fill-in-the-middle; what /infill is for",
+      "size_gb": 18.6,
+      "tags": [
+        "code",
+        "moe"
+      ]
+    },
+    "qwen3-vl": {
+      "aliases": [],
+      "repo": "unsloth/Qwen3-VL-4B-Instruct-GGUF",
+      "recommended": "Qwen3-VL-4B-Instruct-Q4_K_M.gguf",
+      "mmproj": "mmproj-BF16.gguf",
+      "description": "Qwen3-VL 4B — small vision-language model, images in chat",
+      "size_gb": 3.3,
+      "tags": [
+        "vision",
+        "fast"
+      ]
+    },
+    "gemma4:26b": {
+      "aliases": [],
+      "repo": "unsloth/gemma-4-26B-A4B-it-GGUF",
+      "recommended": "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+      "description": "Gemma 4 26B-A4B — mixture of experts; runs on a laptop with --moe-cpu",
+      "size_gb": 16.9,
+      "tags": [
+        "chat",
+        "general",
+        "moe"
+      ]
+    },
+    "gemma4:12b": {
+      "aliases": [],
+      "repo": "unsloth/gemma-4-12b-it-GGUF",
+      "recommended": "gemma-4-12b-it-Q4_K_M.gguf",
+      "mmproj": "mmproj-BF16.gguf",
+      "description": "Gemma 4 12B — dense, multimodal with its projector",
+      "size_gb": 7.3,
+      "tags": [
+        "chat",
+        "general",
+        "vision"
+      ]
+    },
+    "gemma4:e4b": {
+      "aliases": [],
+      "repo": "lmstudio-community/gemma-4-E4B-it-GGUF",
+      "recommended": "gemma-4-E4B-it-Q4_K_M.gguf",
+      "mmproj": "mmproj-gemma-4-E4B-it-BF16.gguf",
+      "description": "Gemma 4 E4B — the larger sibling of E2B, still small enough for modest hardware",
+      "size_gb": 6.3,
+      "tags": [
+        "chat",
+        "vision",
+        "fast"
+      ]
+    },
+    "ornith": {
+      "aliases": [
+        "ornith:9b"
+      ],
+      "repo": "deepreinforce-ai/Ornith-1.0-9B-GGUF",
+      "recommended": "ornith-1.0-9b-Q4_K_M.gguf",
+      "description": "Ornith 1.0 9B — general assistant",
+      "size_gb": 5.6,
+      "tags": [
+        "chat",
+        "general"
+      ]
+    },
+    "qwen3-embed": {
+      "aliases": [],
+      "repo": "Qwen/Qwen3-Embedding-0.6B-GGUF",
+      "recommended": "Qwen3-Embedding-0.6B-Q8_0.gguf",
+      "description": "Qwen3 Embedding 0.6B — multilingual embeddings",
+      "size_gb": 0.6,
+      "tags": [
+        "embedding"
+      ]
+    },
+    "qwen3-rerank": {
+      "aliases": [
+        "rerank"
+      ],
+      "repo": "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF",
+      "recommended": "qwen3-reranker-0.6b-q8_0.gguf",
+      "description": "Qwen3 Reranker 0.6B — scores documents against a query. Serve with --reranking",
+      "size_gb": 0.6,
+      "tags": [
+        "reranking"
+      ]
+    },
+    "bge-rerank": {
+      "aliases": [],
+      "repo": "gpustack/bge-reranker-v2-m3-GGUF",
+      "recommended": "bge-reranker-v2-m3-Q4_K_M.gguf",
+      "description": "BGE reranker v2 m3 — multilingual reranking. Serve with --reranking",
+      "size_gb": 0.4,
+      "tags": [
+        "reranking"
+      ]
+    },
+    "embeddinggemma": {
+      "aliases": [
+        "embeddinggemma:300m"
+      ],
+      "repo": "ggml-org/embeddinggemma-300M-GGUF",
+      "recommended": "embeddinggemma-300M-Q8_0.gguf",
+      "description": "EmbeddingGemma 300M — small, fast embeddings for /v1/embeddings",
+      "size_gb": 0.3,
+      "tags": [
+        "embedding",
+        "fast"
+      ]
+    },
+    "olmo3": {
+      "aliases": [
+        "olmo"
+      ],
+      "repo": "lmstudio-community/Olmo-3-32B-Think-GGUF",
+      "recommended": "Olmo-3-32B-Think-Q4_K_M.gguf",
+      "description": "AI2 Olmo 3 32B Think — reasoning model, fully open weights and training data",
+      "size_gb": 19.5,
+      "tags": [
+        "chat",
+        "reasoning"
+      ]
+    },
+    "falcon-h1": {
+      "aliases": [
+        "falcon"
+      ],
+      "repo": "tiiuae/Falcon-H1R-7B-GGUF",
+      "recommended": "Falcon-H1R-7B-Q4_K_M.gguf",
+      "description": "TII Falcon-H1R 7B — hybrid attention/state-space. Prompt reuse is disabled for hybrid memory, so it will not show cached_tokens",
+      "size_gb": 4.6,
+      "tags": [
+        "chat",
+        "reasoning",
+        "hybrid"
+      ]
+    },
+    "apertus": {
+      "aliases": [],
+      "repo": "unsloth/Apertus-8B-Instruct-2509-GGUF",
+      "recommended": "Apertus-8B-Instruct-2509-Q4_K_M.gguf",
+      "description": "Apertus 8B — fully open multilingual model, open data and training recipe",
+      "size_gb": 5.1,
+      "tags": [
+        "chat",
+        "multilingual"
+      ]
+    },
+    "nemotron3": {
+      "aliases": [
+        "nemotron"
+      ],
+      "repo": "lmstudio-community/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF",
+      "recommended": "Nemotron-3-Nano-Omni-30B-A3B-Reasoning-Q4_K_M.gguf",
+      "mmproj": "mmproj-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16.gguf",
+      "description": "NVIDIA Nemotron 3 Nano Omni 30B-A3B — multimodal reasoning MoE; pair with --moe-cpu",
+      "size_gb": 24.5,
+      "tags": [
+        "chat",
+        "reasoning",
+        "vision",
+        "moe"
+      ]
+    },
+    "hunyuan-mt": {
+      "aliases": [
+        "hunyuan"
+      ],
+      "repo": "Mungert/Hunyuan-MT-7B-GGUF",
+      "recommended": "Hunyuan-MT-7B-q4_k_m.gguf",
+      "description": "Tencent Hunyuan MT 7B — translation-focused",
+      "size_gb": 4.7,
+      "tags": [
+        "translation",
+        "multilingual"
+      ]
+    },
+    "ornith:35b": {
+      "aliases": [],
+      "repo": "deepreinforce-ai/Ornith-1.0-35B-GGUF",
+      "recommended": "ornith-1.0-35b-Q4_K_M.gguf",
+      "description": "Ornith 1.0 35B — the larger sibling of the 9B",
+      "size_gb": 21.2,
+      "tags": [
+        "chat",
+        "general"
+      ]
+    },
+    "granite4": {
+      "aliases": [
+        "granite4:3b"
+      ],
+      "repo": "ibm-granite/granite-4.1-3b-GGUF",
+      "recommended": "granite-4.1-3b-Q4_K_M.gguf",
+      "description": "IBM Granite 4.1 3B — small, permissively licensed, aimed at enterprise use",
+      "size_gb": 2.1,
+      "tags": [
+        "chat",
+        "general",
+        "fast"
+      ]
+    },
+    "deepseek-v4": {
+      "aliases": [
+        "deepseek-v4:flash"
+      ],
+      "repo": "unsloth/DeepSeek-V4-Flash-GGUF",
+      "recommended": "UD-IQ1_S/DeepSeek-V4-Flash-UD-IQ1_S-00001-of-00003.gguf",
+      "description": "DeepSeek V4 Flash — 3 shards, 82 GB at IQ1_S. Needs ~90 GB of RAM or VRAM, and IQ1_S is an aggressive quantisation; treat it as the smallest set that loads, not the best this model does",
+      "size_gb": 82.5,
+      "tags": [
+        "chat",
+        "reasoning",
+        "moe",
+        "huge",
+        "sharded"
+      ]
+    },
+    "minimax-m3": {
+      "aliases": [],
+      "repo": "bartowski/MiniMax-M3-GGUF",
+      "recommended": "MiniMax-M3-IQ1_S/MiniMax-M3-IQ1_S-00001-of-00003.gguf",
+      "description": "MiniMax M3 — 3 shards, 90 GB at IQ1_S. Q4_K_M exists in the same repository at 261 GB if you have the room",
+      "size_gb": 90.5,
+      "tags": [
+        "chat",
+        "reasoning",
+        "huge",
+        "sharded"
+      ]
+    },
+    "glm5": {
+      "aliases": [
+        "glm5.2"
+      ],
+      "repo": "unsloth/GLM-5.2-GGUF",
+      "recommended": "UD-IQ1_S/GLM-5.2-UD-IQ1_S-00001-of-00006.gguf",
+      "description": "GLM 5.2 — 6 shards, 217 GB at IQ1_S. Workstation or server territory, not a laptop",
+      "size_gb": 216.7,
+      "tags": [
+        "chat",
+        "reasoning",
+        "huge",
+        "sharded"
+      ]
+    },
+    "kimi-k3": {
+      "aliases": [
+        "kimi"
+      ],
+      "repo": "unsloth/Kimi-K3-GGUF",
+      "recommended": "UD-IQ1_S/Kimi-K3-UD-IQ1_S-00001-of-00014.gguf",
+      "description": "Kimi K3 — 14 shards, 594 GB at IQ1_S, the smallest complete set published. Server hardware only",
+      "size_gb": 594.0,
+      "tags": [
+        "chat",
+        "reasoning",
+        "moe",
+        "huge",
+        "sharded"
+      ]
     }
   }
 }

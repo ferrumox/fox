@@ -121,7 +121,8 @@ pub async fn run_bench(args: BenchArgs) -> Result<()> {
         args.moe_cpu,
         None,  // mmproj_path
         &[],   // lora_modules
-        false, // reranking — benches generate, never score
+        false, // reranking — benches generate, never score,
+        0,     // rs_rollback — no prompt reuse in this path
     )?;
     let model_config = model.model_config();
     let load_elapsed = load_start.elapsed();

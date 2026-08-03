@@ -39,7 +39,7 @@ accumulate, real *free* memory (not total), clean fallback if a backend fails mi
 | ⚠️ | Sliding-window / local attention (Gemma, Mistral, Phi3) | llama.cpp handles it; fox's paged KV doesn't model it |
 | ⚠️ | MoE (Mixtral, Qwen-MoE, DeepSeek-MoE) | load + CPU offload; approximate sizing |
 | ✅ | MLA / latent KV (DeepSeek-V2/V3) | sizing fixed (0.18) via empirical create-then-shrink retry, no per-token formula; verified against real DeepSeek-V2-Lite — see `mla-recurrent-kv-sizing.md` |
-| ✅ | Recurrent/hybrid (Mamba, RWKV, Jamba) | sizing fixed (0.18, same mechanism); prefix-cache-disable detection also fixed (0.18) — was silently wrong (`llama_memory_can_shift`), now `llama_model_is_recurrent`/`llama_model_is_hybrid`; verified against a real Mamba model |
+| ✅ | Recurrent/hybrid (Mamba, RWKV, Jamba) | sizing fixed (0.18, same mechanism); prefix-cache-disable detection also fixed (0.18) — was silently wrong (`llama_memory_can_shift`), now `llama_model_is_recurrent`/`llama_model_is_hybrid`; verified against a real Mamba model. **0.20.0**: disabling it was too broad — these models keep *slot* reuse (nothing is copied), only cross-sequence `seq_cp` stays off, and prompt reuse needs `--rs-rollback > 0` |
 | ❌ | Encoder-decoder (T5) | |
 | ⚠️ | Embeddings (BERT, nomic) | dimension + all-zeros bugs fixed (0.11, golden-verified); always mean-pooled + L2 — dedicated-model pooling (CLS) not auto-detected |
 | ❌ | Vision / multimodal (llava, qwen-vl, gemma3-vision) | image blocks silently dropped |

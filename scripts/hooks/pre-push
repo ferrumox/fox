@@ -1,16 +1,28 @@
 #!/usr/bin/env bash
-# Pre-push hook — mirrors CI exactly so pushes never fail the pipeline.
+# Pre-push hook — mirrors CI's STUB jobs so pushes rarely fail the pipeline.
+#
+# Checks 1-3 run with FOX_SKIP_LLAMA=1 and never compile the llama.cpp module, so the
+# FFI wrappers, src/cli/bench*, probe and llama_cpp/stub.rs can be broken while all
+# three pass — adding a parameter to LlamaCppModel::load() once left eight call sites
+# broken with a fully green hook. Check 4 closes that by type-checking against a real
+# build, the same thing CI's `golden` job does.
+#
+# The first run pays for a CMake build of llama.cpp (minutes); afterwards it is
+# incremental and takes seconds. FOX_SKIP_REAL_CHECK=1 skips it when you know you have
+# not touched anything it covers.
 # Installed via: make setup  (or scripts/install-hooks.sh)
 #
 # Checks run:
 #   1. cargo fmt   — formatting
 #   2. cargo clippy -D warnings — lints
 #   3. cargo test  — unit tests
-#   4. performance-claim check — a commit message quoting a throughput/latency
+#   4. cargo check against a REAL llama.cpp build
+#   5. performance-claim check — a commit message quoting a throughput/latency
 #      number must say how it was measured (see docs/design/rocm-benchmarking-2026-08.md)
 #
 # To skip in an emergency: git push --no-verify
-# To skip only check 4:    FOX_SKIP_PERF_CHECK=1 git push
+# To skip only check 4:    FOX_SKIP_REAL_CHECK=1 git push
+# To skip only check 5:    FOX_SKIP_PERF_CHECK=1 git push
 
 set -euo pipefail
 
@@ -27,9 +39,9 @@ export FOX_SKIP_LLAMA=1
 export CARGO_TERM_COLOR=always
 
 echo ""
-echo "╔══════════════════════════════════════╗"
-echo "║      fox pre-push checks (CI mirror) ║"
-echo "╚══════════════════════════════════════╝"
+echo "╔════════════════════════════════════════╗"
+echo "║   fox pre-push checks (not golden/e2e) ║"
+echo "╚════════════════════════════════════════╝"
 echo ""
 
 # 1. Format
@@ -59,7 +71,26 @@ else
     fail "tests failed"
 fi
 
-# 4. Performance-claim check.
+# 4. Real llama.cpp build.
+#
+# Deliberately NOT under the FOX_SKIP_LLAMA=1 exported above: this is the whole point
+# of the step. `cargo check` rather than `build` or `test` — it catches the signature
+# and call-site errors that the stub cannot see, without paying for codegen or for a
+# model to run against.
+step "cargo check (real llama.cpp)"
+if [[ -n "${FOX_SKIP_REAL_CHECK:-}" ]]; then
+    ok "real build check (skipped via FOX_SKIP_REAL_CHECK)"
+elif env -u FOX_SKIP_LLAMA cargo check --all-targets --features test-helpers 2>&1; then
+    ok "real build check"
+else
+    echo ""
+    echo -e "${RED}The stub build passed but the real one does not compile.${NC}"
+    echo "  Usual cause: a signature changed in llama_cpp/mod.rs without its call"
+    echo "  sites, or llama_cpp/stub.rs no longer mirrors it."
+    fail "real build check failed"
+fi
+
+# 5. Performance-claim check.
 #
 # On 2026-08-02 five separate performance claims were committed and later had to
 # be retracted — not because fox's code was wrong, but because the measurements

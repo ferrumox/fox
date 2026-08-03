@@ -211,7 +211,8 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         args.moe_cpu,
         None,  // mmproj_path — `fox run` has no --mmproj flag yet; use `fox serve` for vision
         &[],   // lora_modules — same: fox run has no --lora-modules flag yet
-        false, // reranking — benches generate, never score
+        false, // reranking — benches generate, never score,
+        0,     // rs_rollback — no prompt reuse in this path
     )?;
     spinner.finish_and_clear();
     theme::print_success("Model loaded.");

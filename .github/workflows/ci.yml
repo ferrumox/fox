@@ -146,6 +146,17 @@ jobs:
           curl -fL --retry 3 -o golden-model.gguf \
             https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
 
+      - name: cargo check --all-targets (real llama.cpp)
+        # The stub jobs above compile with FOX_SKIP_LLAMA=1 and never touch the
+        # llama.cpp module, so a signature change can leave every call site in
+        # src/cli/bench*, probe and the FFI wrappers broken while fmt, clippy and the
+        # full test suite stay green. This job already pays for a real build; the
+        # check is incremental on top of it.
+        #
+        # --all-targets rather than --lib: `make golden` below runs `cargo test --lib`,
+        # which does not compile the binaries or tests/.
+        run: cargo check --all-targets --features test-helpers
+
       - name: Run golden tests
         # `make golden` builds for real, copies the ggml backend .so next to the test
         # binary so dlopen finds them, then runs the suite against the model.

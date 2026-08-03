@@ -45,7 +45,8 @@ pub async fn run_probe(args: ProbeArgs) -> Result<()> {
         false, // moe_offload_cpu
         None,  // mmproj_path
         &[],   // lora_modules
-        false, // reranking — benches generate, never score
+        false, // reranking — benches generate, never score,
+        0,     // rs_rollback — no prompt reuse in this path
     )?;
 
     let info = model.model_info();

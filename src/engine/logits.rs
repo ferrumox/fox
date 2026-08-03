@@ -207,12 +207,18 @@ impl InferenceEngine {
                     // during admission instead (`ScheduledBatch::kv_trims`), which is
                     // what makes token-exact reuse possible.
                     //
-                    // Disabled for models that can't reuse KV across requests at all
-                    // (recurrent/hybrid — a fixed-size state, not positional blocks).
+                    // Gated on slot reuse, NOT on cross-sequence copying. Parking hands
+                    // a sequence to its own slot; nothing is copied anywhere, so a
+                    // hybrid model can do it — and must, or there is nothing resident
+                    // for the next occupant to inherit and every reuse path downstream
+                    // is dead regardless of what it is allowed to do. This gate read
+                    // `supports_prefix_cache` and silently cost every hybrid model all
+                    // prompt reuse.
+                    //
                     // `EngineError` and `Preempt` are deliberately excluded: a request
                     // that failed or was preempted mid-decode has a partial, unreliable
                     // KV state that must never become a reusable prefix.
-                    let should_clear = if self.supports_prefix_cache
+                    let should_clear = if self.supports_slot_reuse
                         && matches!(
                             stop_reason,
                             Some(StopReason::Eos)

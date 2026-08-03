@@ -50,6 +50,7 @@ async fn load_draft_model(
             None,  // mmproj_path — draft models are text-only speculation proposers
             &[],   // lora_modules — adapters apply to the primary model, not the draft
             false, // reranking — a draft model only ever proposes tokens
+            0,     // rs_rollback — the draft holds no reusable prefix of its own
         )
     })
     .await
@@ -78,6 +79,7 @@ pub(super) async fn load_model(
     let path = path.to_path_buf();
     let name = name.to_string();
     let max_batch_size = cfg.max_batch_size;
+    let rs_rollback = cfg.rs_rollback;
     let max_queue_depth = cfg.max_queue_depth;
     let max_prefill_chunk = cfg.max_prefill_chunk;
     // None disables context rolling; Some(n_keep) enables it, preserving n_keep head tokens.
@@ -132,6 +134,7 @@ pub(super) async fn load_model(
             mmproj.as_deref(),
             &lora_modules,
             reranking,
+            rs_rollback,
         )
     })
     .await
@@ -141,7 +144,7 @@ pub(super) async fn load_model(
     // (llama_n_ctx), so the pool can never claim room llama.cpp didn't allocate.
     let kv_tokens = model.kv_cache_capacity();
     let model: Arc<dyn Model> = Arc::new(model);
-    tracing::info!(model = %name, backend = %model.active_backend(), "model ready");
+    let active_backend = model.active_backend().to_string();
     let kv_cache = Arc::new(KVCacheManager::from_kv_tokens(kv_tokens, block_size));
 
     // Draft-model speculation (0.16): load the draft eagerly, alongside the target,
@@ -197,9 +200,12 @@ pub(super) async fn load_model(
         })
     };
 
+    // One "model ready" per model. There used to be two — one after the weights
+    // loaded and one after the engine was built — which read as two models loading.
     let supports_thinking = engine.supports_thinking();
     tracing::info!(
         model = %engine.model_name(),
+        backend = %active_backend,
         thinking = supports_thinking,
         "model ready"
     );

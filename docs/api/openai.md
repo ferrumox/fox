@@ -17,8 +17,10 @@ fox implements the OpenAI REST API. Any application built with the OpenAI Python
 | `POST` | `/v1/embeddings` | Text embedding generation |
 | `GET` | `/v1/models` | List available models |
 | `GET` | `/v1/models/:model` | Get single model info |
+| `POST` | `/v1/rerank`, `/rerank` | Score documents against a query (needs `--reranking`) |
 | `GET` | `/health` | Server health and status |
 | `GET` | `/metrics` | Prometheus metrics |
+| `GET`/`POST` | `/lora-adapters` | Inspect loaded LoRA adapters and re-scale them at runtime |
 
 ---
 
@@ -775,3 +777,74 @@ Error body:
   }
 }
 ```
+
+---
+
+## POST /v1/rerank
+
+Scores each document against the query and returns them ordered by relevance. Also
+served at `/rerank` for clients written against llama-server.
+
+**Requires `--reranking`.** Reranking needs RANK pooling, and most reranker GGUFs carry
+no `pooling_type` in their metadata, so it cannot be inferred from the file — without
+the flag the model resolves to no pooling and the endpoint cannot work. `fox pull
+qwen3-rerank` fetches a suitable model.
+
+```bash
+curl http://localhost:8080/v1/rerank \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-rerank",
+    "query": "how do I enable prefix caching",
+    "documents": [
+      "Set --kv-reuse false to disable prompt reuse.",
+      "Prefix caching is on by default when the model supports seq_cp.",
+      "The block size is set with --block-size."
+    ]
+  }'
+```
+
+```json
+{
+  "model": "qwen3-rerank",
+  "results": [
+    { "index": 1, "relevance_score": 0.94 },
+    { "index": 0, "relevance_score": 0.41 },
+    { "index": 2, "relevance_score": 0.12 }
+  ],
+  "usage": { "prompt_tokens": 84, "total_tokens": 84 }
+}
+```
+
+`index` refers to the position in the request's `documents` array, so the caller can map
+scores back without resending the text. Pass `"top_n": N` to return only the best N.
+
+---
+
+## GET/POST /lora-adapters
+
+Lists the LoRA adapters loaded at startup with `--lora-modules`, and changes an
+adapter's scale without restarting.
+
+```bash
+curl http://localhost:8080/lora-adapters
+```
+
+```json
+[ { "id": 0, "name": "support-tone", "path": "/models/support.gguf", "scale": 1.0 } ]
+```
+
+```bash
+curl -X POST http://localhost:8080/lora-adapters \
+  -H "Content-Type: application/json" \
+  -d '[{ "name": "support-tone", "scale": 0.4 }]'
+```
+
+Adapters are identified by `name` or by `id`; llama-server addresses them by id, while
+fox's own `--lora-modules` and the `model` field are name-based, so both work.
+
+The whole body is resolved before anything is applied, so a request naming one valid and
+one unknown adapter changes nothing rather than leaving a state the caller did not ask
+for. The new scale applies to *subsequent* requests: generations already in flight keep
+the scale they were admitted with, since the adapter set is a property of the batch being
+decoded.

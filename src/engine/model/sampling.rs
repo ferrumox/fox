@@ -103,6 +103,49 @@ pub(crate) struct SamplerParams<'a> {
     pub(crate) token_count: usize,
 }
 
+/// Indices of the `n` largest logits, descending, without materialising the vocabulary.
+///
+/// Replaces `(0..logits.len()).collect()` + `select_nth_unstable_by`, which profiling
+/// showed cost fox **6.6% of wall time** against `llama-server`'s 1.4% in
+/// `llama_token_data_array_partial_sort_inplace` — the whole of the decode-throughput
+/// deficit at concurrency ≥ 4. Two costs were being paid per token *per sequence*:
+///
+///   - a 1 MB allocation (128256 × `usize`) that was immediately truncated to `n`;
+///   - a comparator that dereferenced into a separate 512 KB logits array on every
+///     comparison, while the index array it was permuting moved underneath it.
+///
+/// This keeps a sorted-descending buffer of at most `n` entries and streams the logits
+/// once. The common case per element is a single `f32` compare against the running
+/// threshold — a sequential read of the logits array, no indirection, no allocation
+/// proportional to the vocabulary. Insertions cost an O(n) memmove but happen rarely
+/// after the buffer fills, and `n` is small (top-k is typically ≤ 100; the adaptive
+/// pool starts at 64).
+///
+/// Ties: `partition_point` keeps the earlier-scanned index first among equal logits,
+/// which for a descending scan means the lower token id — the same order the caller's
+/// subsequent `sort_by` would produce, and stable across runs.
+fn select_top_n(logits: &[f32], n: usize) -> Vec<usize> {
+    let mut top: Vec<(usize, f32)> = Vec::with_capacity(n + 1);
+    // NEG_INFINITY until the buffer fills, so every early element is taken.
+    let mut threshold = f32::NEG_INFINITY;
+    for (i, &l) in logits.iter().enumerate() {
+        // NaN compares false here and is therefore treated as smaller than everything,
+        // matching what `partial_cmp(...).unwrap_or(Equal)` did with it before.
+        if top.len() == n && !(l > threshold) {
+            continue;
+        }
+        let pos = top.partition_point(|&(_, v)| v > l);
+        top.insert(pos, (i, l));
+        if top.len() > n {
+            top.pop();
+        }
+        if top.len() == n {
+            threshold = top[n - 1].1;
+        }
+    }
+    top.into_iter().map(|(i, _)| i).collect()
+}
+
 /// Full stochastic sampler: repetition penalty → temperature → top-K → top-P → weighted draw.
 ///
 /// When `temperature` ≤ 0 the function falls back to greedy regardless of other parameters.
@@ -155,6 +198,9 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         return sample_greedy(&logits);
     }
 
+    // (see `select_top_n` for why candidate selection is a linear scan rather than a
+    // partition over a materialised index vector)
+
     // 3. Temperature scaling
     for l in &mut logits {
         *l /= temperature;
@@ -186,11 +232,7 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
     let k = top_k as usize;
     let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let (mut candidates, exp_sum): (Vec<usize>, f32) = if k > 0 && k < logits.len() {
-        let mut idx: Vec<usize> = (0..logits.len()).collect();
-        idx.select_nth_unstable_by(k - 1, |&a, &b| {
-            logits[b].partial_cmp(&logits[a]).unwrap_or(Ordering::Equal)
-        });
-        idx.truncate(k);
+        let idx = select_top_n(&logits, k);
         let sum: f32 = idx.iter().map(|&i| (logits[i] - max_l).exp()).sum();
         (idx, sum)
     } else {
@@ -202,13 +244,11 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         let min_p_threshold = if min_p > 0.0 { min_p / sum } else { 0.0 };
         let mut bound = 64usize.min(logits.len());
         let idx = loop {
-            let mut cand: Vec<usize> = (0..logits.len()).collect();
-            if bound < logits.len() {
-                cand.select_nth_unstable_by(bound - 1, |&a, &b| {
-                    logits[b].partial_cmp(&logits[a]).unwrap_or(Ordering::Equal)
-                });
-                cand.truncate(bound);
-            }
+            let cand: Vec<usize> = if bound < logits.len() {
+                select_top_n(&logits, bound)
+            } else {
+                (0..logits.len()).collect()
+            };
             if bound >= logits.len() {
                 break cand;
             }
@@ -833,5 +873,50 @@ mod tests {
             );
             assert_eq!(t, 3, "min_p=0.5 must keep only the dominant token");
         }
+    }
+
+    /// `select_top_n` must pick the same *set* as a full sort, and in the same order.
+    ///
+    /// The reference is deliberately the naive thing it replaced — sort every index by
+    /// logit descending and take the first n — because the point of the change was
+    /// performance, and a performance change that quietly alters which tokens are
+    /// candidates is a correctness regression wearing a speedup's clothes.
+    #[test]
+    fn select_top_n_matches_a_full_sort() {
+        fn reference(logits: &[f32], n: usize) -> Vec<usize> {
+            let mut idx: Vec<usize> = (0..logits.len()).collect();
+            // Ties broken by index, matching the scan order of `select_top_n`.
+            idx.sort_by(|&a, &b| {
+                logits[b]
+                    .partial_cmp(&logits[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.cmp(&b))
+            });
+            idx.truncate(n);
+            idx
+        }
+
+        // A deterministic pseudo-random spread, plus deliberate ties and negatives.
+        let mut logits: Vec<f32> = (0..5000)
+            .map(|i| (((i * 2654435761u64 as usize) % 10007) as f32) / 100.0 - 50.0)
+            .collect();
+        logits[10] = 9.5;
+        logits[20] = 9.5; // exact tie, must resolve to the lower index first
+        logits[30] = 9.5;
+
+        for n in [1usize, 2, 3, 40, 64, 999] {
+            assert_eq!(
+                select_top_n(&logits, n),
+                reference(&logits, n),
+                "top-{n} disagrees with a full sort"
+            );
+        }
+    }
+
+    /// n larger than the vocabulary must not panic or lose entries.
+    #[test]
+    fn select_top_n_handles_n_beyond_len() {
+        let logits = vec![0.5f32, -1.0, 3.0];
+        assert_eq!(select_top_n(&logits, 10), vec![2, 0, 1]);
     }
 }

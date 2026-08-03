@@ -32,7 +32,7 @@ pub async fn run_models(_args: ModelsArgs) -> anyhow::Result<()> {
 
     println!();
     println!("Pull a model:   fox pull <name>");
-    println!("Example:        fox pull llama3.2");
+    println!("Example:        fox pull qwen3.6");
 
     Ok(())
 }

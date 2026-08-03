@@ -20,6 +20,10 @@ pub struct RegistryConfig {
     /// Max prompt tokens submitted per request per prefill step (0 = single-shot).
     /// Chunking a long prompt lets it interleave with other requests' decode steps.
     pub max_prefill_chunk: usize,
+    /// Recurrent-state snapshots per sequence for cache rollback. See
+    /// `ServeArgs::rs_rollback` for the memory cost; 0 disables prompt reuse on
+    /// hybrid/recurrent models entirely.
+    pub rs_rollback: u32,
     /// Context rolling: when a sequence fills `n_ctx`, discard its oldest KV window and
     /// shift the rest down so decode continues instead of stopping with `Length`.
     /// Only applied to shiftable (non-recurrent) caches.

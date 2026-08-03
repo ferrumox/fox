@@ -1,16 +1,18 @@
 <div align="center">
 
-# fox
+<img src="assets/fox.svg" alt="fox" width="420">
 
 **A local LLM server built for concurrent work. Drop-in replacement for Ollama.**
 
 [![CI](https://github.com/ferrumox/fox/actions/workflows/ci.yml/badge.svg)](https://github.com/ferrumox/fox/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
-[![Version](https://img.shields.io/badge/version-0.19.1-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.20.0-green.svg)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://rustup.rs/)
 [![GitHub Stars](https://img.shields.io/github/stars/ferrumox/fox?style=social)](https://github.com/ferrumox/fox/stargazers)
 
 [![Sponsor](https://img.shields.io/badge/❤️_Sponsor-ea4aaa?style=for-the-badge&logo=github-sponsors&logoColor=white)](https://github.com/sponsors/manuelslemos)
+
+<img src="assets/demo.gif" alt="fox answering the same prompt over its OpenAI and Ollama APIs on one port" width="860">
 
 </div>
 
@@ -29,14 +31,14 @@ irm https://raw.githubusercontent.com/ferrumox/fox/main/install.ps1 | iex
 ```
 
 ```bash
-# Pull a model and start
-fox pull llama3.2
+# Pull a model and start (qwen3.6 is 22 GB; qwen3.5 is 2.7 GB if you want a quicker first run)
+fox pull qwen3.6
 fox serve
 
 # Ask something (OpenAI-compatible)
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"llama3.2","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
+  -d '{"model":"qwen3.6","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
 
 # If you already use Ollama — just change the port from 11434 to 8080. That's it.
 ```
@@ -130,7 +132,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8080/v1", api_key="sk-local")
 
 resp = client.chat.completions.create(
-    model="llama3.2",
+    model="qwen3.6",
     messages=[{"role": "user", "content": "Say hi in 5 words."}],
 )
 print(resp.choices[0].message.content)
@@ -144,7 +146,7 @@ import OpenAI from "openai";
 const openai = new OpenAI({ baseURL: "http://localhost:8080/v1", apiKey: "sk-local" });
 
 const resp = await openai.chat.completions.create({
-  model: "llama3.2",
+  model: "qwen3.6",
   messages: [{ role: "user", content: "Say hi in 5 words." }],
 });
 console.log(resp.choices[0].message?.content);
@@ -163,7 +165,7 @@ console.log(resp.choices[0].message?.content);
   "models": [{
     "title": "fox (local)",
     "provider": "openai",
-    "model": "llama3.2",
+    "model": "qwen3.6",
     "apiBase": "http://localhost:8080/v1"
   }]
 }
@@ -252,7 +254,7 @@ fox search gemma
 fox search qwen coder --limit 5
 
 # Pull a model
-fox pull llama3.2            # top result, balanced quantization
+fox pull qwen3.6            # top result, balanced quantization
 fox pull gemma3:12b          # specific size
 fox pull gemma3:12b-q4       # specific quantization
 fox pull bartowski/gemma-3-12b-it-GGUF  # specific HF repo
@@ -267,22 +269,22 @@ fox run "Explain ownership in Rust"  # single-shot
 
 # Manage models
 fox list                     # list downloaded models
-fox show llama3.2            # model info: architecture, quantization, size
+fox show qwen3.6            # model info: architecture, quantization, size
 fox ps                       # list currently loaded models
 fox models                   # browse curated model catalogue
-fox rm llama3.2              # remove a downloaded model
+fox rm qwen3.6              # remove a downloaded model
 
 # Manage aliases
-fox alias set llama3 Llama-3.2-3B-Instruct-Q4_K_M
+fox alias set q36 Qwen3.6-35B-A3B-UD-Q4_K_M
 fox alias list
 
 # Benchmark
-fox bench llama3.2
-fox bench llama3.2 --runs 10
+fox bench qwen3.6
+fox bench qwen3.6 --runs 10
 
 # Benchmark KV cache quantization types side by side
-fox bench-kv llama3.2
-fox bench-kv llama3.2 --types f16,q8_0,q4_0 --runs 3
+fox bench-kv qwen3.6
+fox bench-kv qwen3.6 --types f16,q8_0,q4_0 --runs 3
 ```
 
 ---
@@ -416,7 +418,7 @@ split_mode = "layer"   # none | layer | row
 
 ```toml
 [aliases]
-"llama3"   = "Llama-3.2-3B-Instruct-Q4_K_M"
+"q36"      = "Qwen3.6-35B-A3B-UD-Q4_K_M"
 "mistral"  = "Mistral-7B-Instruct-v0.3-Q4_K_M"
 ```
 
@@ -429,17 +431,17 @@ split_mode = "layer"   # none | layer | row
 ./target/release/fox-bench \
   --url http://localhost:8080 \
   --compare-url http://localhost:11434 \
-  --model llama3.2
+  --model qwen3.6
 
 # JSON output for CI
 ./target/release/fox-bench \
   --url http://localhost:8080 \
   --compare-url http://localhost:11434 \
-  --model llama3.2 \
+  --model qwen3.6 \
   --output json
 
 # Reproducible benchmark vs Ollama
-./scripts/benchmark.sh llama3.2 4 50
+./scripts/benchmark.sh qwen3.6 4 50
 ```
 
 Output shape (run it for your own numbers):
@@ -514,7 +516,7 @@ make bench           Run fox-bench against a running server
 make docker          Build Docker image
 make docker-run      Start via docker compose
 make install-rust    Install Rust toolchain
-make download-model  Download default model (Llama-3.2-3B Q4_K_M)
+make download-model  Download default model (Qwen3.5 0.8B Q4_K_M)
 ```
 
 ---
@@ -539,6 +541,7 @@ build cover CPU, CUDA, ROCm, Vulkan and Metal.
 
 - **Bug reports**: [GitHub Issues](https://github.com/ferrumox/fox/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/ferrumox/fox/discussions)
+- **Feature status**: [STATUS.md](STATUS.md)
 - **Changelog**: [CHANGELOG.md](CHANGELOG.md)
 - **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md)
 

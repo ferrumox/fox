@@ -102,6 +102,7 @@ async fn run_one(
         GPU_FRACTION,
         kv_type::F16,
         kv_type::F16,
+        0, // rs_rollback — these benches reuse no prompt
     )?;
     let model_config = model.model_config();
     let kv_cache = Arc::new(KVCacheManager::new(
@@ -254,7 +255,8 @@ pub async fn run_bench_spec(args: BenchSpecArgs) -> Result<()> {
         args.moe_cpu,
         None,  // mmproj_path
         &[],   // lora_modules
-        false, // reranking — benches generate, never score
+        false, // reranking — benches generate, never score,
+        0,     // rs_rollback — no prompt reuse in this path
     )?;
     spinner.finish_and_clear();
 

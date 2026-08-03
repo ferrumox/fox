@@ -142,6 +142,7 @@ async fn run_scenario(
         GPU_FRACTION,
         kv_type::F16,
         kv_type::F16,
+        0, // rs_rollback — these benches reuse no prompt
     )?;
     let model_config = model.model_config();
     let kv_cache = Arc::new(KVCacheManager::new(
@@ -164,7 +165,7 @@ async fn run_scenario(
         model_name.to_string(),
         None,
         EngineOptions {
-            max_prefill_chunk: chunk, // the knob under test
+            max_prefill_chunk: chunk,
             ..Default::default()
         },
         None,
@@ -356,7 +357,8 @@ pub async fn run_bench_prefill(args: BenchPrefillArgs) -> Result<()> {
         args.moe_cpu,
         None,  // mmproj_path
         &[],   // lora_modules
-        false, // reranking — benches generate, never score
+        false, // reranking — benches generate, never score,
+        0,     // rs_rollback — no prompt reuse in this path
     )?;
 
     spinner.finish_and_clear();

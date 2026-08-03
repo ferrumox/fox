@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use fox in academic work, please cite it as below."
+title: "fox: a local LLM inference server for concurrent workloads"
+abstract: >-
+  fox is an inference server written in Rust that wraps llama.cpp and serves GGUF
+  models over OpenAI- and Ollama-compatible HTTP APIs. It is built around reuse of
+  already-computed KV cache: sequences retain the tokens they hold, arriving requests
+  skip the prefill for whatever prefix they share, and concurrent requests can copy a
+  shared prefix out of a sequence that is still decoding rather than each prefilling
+  it and each reserving a copy of its blocks.
+type: software
+authors:
+  - family-names: Lemos
+    given-names: "Manuel S."
+repository-code: "https://github.com/ferrumox/fox"
+license:
+  - MIT
+  - Apache-2.0
+version: 0.19.1
+date-released: "2026-08-03"
+keywords:
+  - llm
+  - inference
+  - kv-cache
+  - prefix-caching
+  - continuous-batching
+  - llama.cpp
+  - rust

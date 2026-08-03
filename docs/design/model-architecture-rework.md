@@ -89,7 +89,7 @@ what the regression net must assert. "Verified" = has golden tests in CI.
 | Non-standard head_dim | Gemma-2/3 | `head_dim` from metadata (256), logit softcap → no flash-attn | head_dim source; coherent output with FA=AUTO |
 | MoE | Mixtral, DeepSeek-MoE | expert tensors; `--moe-cpu` offload | loads with/without offload; expert regex matches |
 | MLA (latent KV) | DeepSeek-V2/V3 | compressed KV ≠ `n_head_kv*head_dim` | KV budget comes from llama.cpp, not our formula |
-| Recurrent/Hybrid | Mamba, RWKV, Jamba | **no positional KV**; `can_shift=false` | prefix cache disabled; no seq_cp; sizing deferred |
+| Recurrent/Hybrid | Mamba, RWKV, Jamba | **no positional KV**; `can_shift=false` | no cross-sequence `seq_cp`; slot reuse kept since 0.20.0 (needs `--rs-rollback > 0`); sizing deferred |
 | Embeddings | nomic-embed | pooled output, dim = `n_embd` | embedding length == `n_embd`; non-zero vector |
 
 The matrix lives in code (an enum/table that `ModelInfo` resolves into) **and** in
@@ -175,7 +175,9 @@ formula, because combining these keys correctly *is the model's forward-pass log
 - fox's paged block pool **follows** llama.cpp's real capacity — it never leads. This
   eliminates the whole "fox thinks there's room, `llama_decode` returns nonzero" class of
   hangs/crashes under load.
-- `has_kv_cache = false` (recurrent/hybrid) → disable paging / prefix cache / seq-copy entirely.
+- `has_kv_cache = false` (recurrent/hybrid) → disable paging / cross-sequence seq-copy.
+  **Superseded in part by 0.20.0**: "entirely" was wrong. Reuse of a slot's *own* KV
+  copies nothing and is legal for these models; only cross-sequence copying is not.
 - There is **no** `KvModel::PositionalKv`-with-our-own-formula case. The formula is deleted
   for everyone; the per-architecture branching collapses into "ask llama.cpp."
 

@@ -8,6 +8,7 @@ const DEFAULT_GPU_MEMORY_FRACTION: &str = "0.85";
 const DEFAULT_MAX_BATCH_SIZE: &str = "32";
 const DEFAULT_MAX_QUEUE_DEPTH: &str = "0";
 const DEFAULT_MAX_PREFILL_CHUNK: &str = "512";
+const DEFAULT_RS_ROLLBACK: &str = "4";
 const DEFAULT_BLOCK_SIZE: &str = "16";
 const DEFAULT_HOST: &str = "0.0.0.0";
 const DEFAULT_PORT: &str = "8080";
@@ -59,6 +60,19 @@ pub struct ServeArgs {
     /// instead of blocking the engine loop for the whole prefill.
     #[arg(long, default_value = DEFAULT_MAX_PREFILL_CHUNK, env = "FOX_MAX_PREFILL_CHUNK")]
     pub max_prefill_chunk: usize,
+
+    /// Recurrent-state snapshots kept per sequence so a hybrid/recurrent model can roll
+    /// its cache back and reuse a prompt prefix (0 = no rollback, no prompt reuse).
+    ///
+    /// Ignored by dense models — llama.cpp allocates nothing for architectures that do
+    /// not support rollback. For the ones that do (Qwen3.5, Qwen3-Next, Falcon-H1,
+    /// Jamba) it is what makes prompt reuse possible at all, and it is not free: each
+    /// snapshot is a full recurrent state per sequence. Measured on Qwen3.5-9B with 8
+    /// sequences, ~453 MB per snapshot — 4 costs ~1.8 GB and covers multi-turn, where
+    /// the rollback is a single token; 64 costs ~30 GB and covers re-sending a whole
+    /// prompt. Raise it only for the second case.
+    #[arg(long, default_value = DEFAULT_RS_ROLLBACK, env = "FOX_RS_ROLLBACK")]
+    pub rs_rollback: u32,
 
     /// Roll the context window when a sequence fills n_ctx: discard the oldest KV window
     /// and keep generating, instead of stopping the request with `length`. Automatically
@@ -331,10 +345,12 @@ fn parse_tensor_split(s: &str) -> Vec<f32> {
 /// "Known issues" for the max_models item and why the default itself stays 1.
 fn max_models_default_hint(max_models: usize) -> Option<&'static str> {
     (max_models <= 1).then_some(
-        "only 1 model will be kept resident at a time (--max-models 1, the default) — \
-         requesting a second model evicts the first once it's idle. Pass --max-models N \
-         to keep more resident if you have the VRAM; fox does not yet track how much VRAM \
-         already-loaded models are using when deciding whether another will fit.",
+        // Kept visible at startup on purpose, but said in one line: this fires on the
+        // default configuration, so every user reads it on every start, and a paragraph
+        // there costs more attention than the trade-off is worth. The VRAM-accounting
+        // caveat lives in STATUS.md's known issues, where someone hitting the limit
+        // will look.
+        "--max-models 1 (default): loading a second model evicts the first once idle",
     )
 }
 
@@ -383,9 +399,16 @@ fn setup_logging(json: bool) {
             .with(tracing_subscriber::fmt::layer().json())
             .init();
     } else {
+        // `.compact()`, not `.pretty()`. The pretty formatter is built for reading a
+        // debug session: it prints an indented `at src/file.rs:line` under every event
+        // and a blank line between them, so starting the server produced three lines
+        // per log entry and a screenful of source paths before it had served anything.
+        // That is the first thing a new user sees. Source locations belong in a
+        // debugger or in `--json-logs`, which carries them as fields for anything
+        // machine-read.
         tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().pretty())
+            .with(tracing_subscriber::fmt::layer().compact())
             .init();
     }
 }
@@ -471,6 +494,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         max_batch_size: args.max_batch_size,
         max_queue_depth: args.max_queue_depth,
         max_prefill_chunk: args.max_prefill_chunk,
+        rs_rollback: args.rs_rollback,
         context_shift: args.context_shift,
         context_keep: args.context_keep,
         reranking: args.reranking,

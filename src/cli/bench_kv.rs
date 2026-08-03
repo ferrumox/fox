@@ -108,6 +108,7 @@ async fn run_one_type(
         GPU_FRACTION,
         type_id,
         type_id,
+        0, // rs_rollback — these benches reuse no prompt
     )?;
 
     let model_config = model.model_config();
@@ -319,7 +320,8 @@ pub async fn run_bench_kv(args: BenchKvArgs) -> Result<()> {
         args.moe_cpu,
         None,  // mmproj_path
         &[],   // lora_modules
-        false, // reranking — benches generate, never score
+        false, // reranking — benches generate, never score,
+        0,     // rs_rollback — no prompt reuse in this path
     )?;
 
     spinner.finish_and_clear();

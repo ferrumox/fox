@@ -82,6 +82,24 @@ fn patch_vendored_llama(llama_root: &Path) {
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(fox_stub)");
+
+    // Cargo only re-runs this script when something it was told to watch changes. Until
+    // this list existed, only FOX_CPU_ALL_VARIANTS was declared, so flipping
+    // FOX_SKIP_LLAMA did not invalidate the build script: after any stub build, a plain
+    // `cargo test` reused the stub artifacts and compiled with cfg(fox_stub) still set.
+    // It did not fail, it silently tested the stub model — which is precisely what the
+    // real-model suites exist to avoid. Every environment variable this script reads has
+    // to be declared here, or the same class of bug comes back for the next one.
+    for var in [
+        "FOX_SKIP_LLAMA",
+        "FOX_CPU_ALL_VARIANTS",
+        "CUDACXX",
+        "HIPCC",
+        "VULKAN_SDK",
+        "AMDGPU_TARGETS",
+    ] {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let llama_root = PathBuf::from(&manifest_dir)
         .join("vendor")
@@ -177,7 +195,6 @@ fn main() {
     // run already installed into OUT_DIR, which are copied out regardless. Turning
     // the flag back off therefore needs a `cargo clean` to fully take effect.
     // Harmless if you don't: ggml just keeps loading the best available variant.
-    println!("cargo:rerun-if-env-changed=FOX_CPU_ALL_VARIANTS");
     let cpu_all_variants =
         env::var("FOX_CPU_ALL_VARIANTS").is_ok_and(|v| v != "0" && !v.is_empty());
     cmake_config.define(

@@ -18,19 +18,26 @@ See [Installation](./installation.md) for other platforms and Docker.
 
 ## 2. Download a model
 
-fox can search HuggingFace Hub and download models with a single command. Let's start with Llama 3.2 3B — a capable small model that fits in 2 GB of memory.
+fox can search HuggingFace Hub and download models with a single command. We will use
+Qwen3.6 35B-A3B, the current flagship in the built-in catalogue. It is a mixture of
+experts, so despite the 35B it activates only about 3B parameters per token and runs on
+far less hardware than the size suggests — pair it with `--moe-cpu` to keep the expert
+layers in RAM.
+
+It is a 22 GB download. If you want something quicker to try, `fox pull qwen3.5` is
+Qwen3.5 4B at 2.7 GB and every command below works the same way with it.
 
 ```bash
-fox pull llama3.2
+fox pull qwen3.6
 ```
 
 You will see a progress bar as the model downloads to `~/.cache/ferrumox/models/`.
 
 ```
-Searching HuggingFace for "llama3.2"...
-  → bartowski/Llama-3.2-3B-Instruct-GGUF (Q4_K_M)
-Downloading Llama-3.2-3B-Instruct-Q4_K_M.gguf
-  [████████████████████] 2.0 GB / 2.0 GB  •  12.4 MB/s  •  done
+Searching HuggingFace for "qwen3.6"...
+  → unsloth/Qwen3.6-35B-A3B-GGUF (UD-Q4_K_M)
+Downloading Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+  [████████████████████] 22.1 GB / 22.1 GB  •  12.4 MB/s  •  done
 ```
 
 You can also pull larger models or specify a quantization:
@@ -38,7 +45,7 @@ You can also pull larger models or specify a quantization:
 ```bash
 fox pull gemma3:12b          # 12B Gemma 3
 fox pull qwen2.5:7b          # 7B Qwen 2.5
-fox pull llama3.1:8b-q8      # 8B Llama 3.1, Q8 quantization
+fox pull qwen3.5:9b-q8       # Qwen3.5 9B, Q8 quantization
 ```
 
 ---
@@ -53,13 +60,13 @@ By default, the server binds to `0.0.0.0:8080`. Models load lazily on the first 
 
 ```
 INFO fox::api: listening on 0.0.0.0:8080
-INFO fox::engine: loading Llama-3.2-3B-Instruct-Q4_K_M  [on first request]
+INFO fox::engine: loading Qwen3.6-35B-A3B-UD-Q4_K_M  [on first request]
 ```
 
 If you want to pre-load a model at startup so the first request has no delay:
 
 ```bash
-fox serve --model-path ~/.cache/ferrumox/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf
+fox serve --model-path ~/.cache/ferrumox/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
 ```
 
 ---
@@ -72,7 +79,7 @@ In another terminal, send a chat request using curl:
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "llama3.2",
+    "model": "qwen3.6",
     "messages": [
       {"role": "user", "content": "Explain what a KV cache is in one paragraph."}
     ]
@@ -86,7 +93,7 @@ You will get a response in OpenAI format:
   "id": "chatcmpl-a1b2c3",
   "object": "chat.completion",
   "created": 1741824000,
-  "model": "Llama-3.2-3B-Instruct-Q4_K_M",
+  "model": "Qwen3.6-35B-A3B-UD-Q4_K_M",
   "choices": [{
     "index": 0,
     "message": {
@@ -117,7 +124,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8080/v1", api_key="none")
 
 response = client.chat.completions.create(
-    model="llama3.2",
+    model="qwen3.6",
     messages=[{"role": "user", "content": "Hello!"}]
 )
 print(response.choices[0].message.content)
@@ -126,7 +133,7 @@ print(response.choices[0].message.content)
 **Ollama CLI:**
 
 ```bash
-OLLAMA_HOST=http://localhost:8080 ollama run llama3.2
+OLLAMA_HOST=http://localhost:8080 ollama run qwen3.6
 ```
 
 **Open WebUI:**
@@ -162,7 +169,7 @@ Make sure the model name in your request matches a file in `~/.cache/ferrumox/mo
 
 **Out of memory on model load**
 
-Try a smaller quantization. `fox pull llama3.2:8b-q4` uses roughly half the memory of `q8`. You can also reduce the context length: `fox serve --max-context-len 2048`.
+Try a smaller quantization. `fox pull qwen3.6:4b-q4` uses roughly half the memory of `q8`. You can also reduce the context length: `fox serve --max-context-len 2048`.
 
 **Port 8080 is already in use**
 

@@ -20,6 +20,7 @@ struct ConfigFile {
     gpu_memory_fraction: Option<f32>,
     max_batch_size: Option<usize>,
     max_prefill_chunk: Option<usize>,
+    rs_rollback: Option<u32>,
     context_shift: Option<bool>,
     context_keep: Option<usize>,
     repeat_last_n: Option<i32>,
@@ -91,6 +92,7 @@ pub fn load_config_into_env() {
         "FOX_MAX_PREFILL_CHUNK",
         cfg.max_prefill_chunk.map(|v| v.to_string()),
     );
+    set_if_unset("FOX_RS_ROLLBACK", cfg.rs_rollback.map(|v| v.to_string()));
     set_if_unset(
         "FOX_CONTEXT_SHIFT",
         cfg.context_shift.map(|v| v.to_string()),

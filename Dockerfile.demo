@@ -1,0 +1,12 @@
+# Recorder for the README demo GIF.
+#
+# The demo is a real session, not a mock-up: fox actually starts, actually loads a
+# model, and actually answers. This image exists so that stays reproducible — the
+# recording tools live here rather than needing to be installed on whoever's machine
+# is regenerating the GIF.
+#
+#   docker build -f Dockerfile.demo -t fox:demo .
+#   scripts/record_demo.sh
+FROM ghcr.io/charmbracelet/vhs:latest
+RUN apt-get update && apt-get install -y --no-install-recommends curl jq \
+    && rm -rf /var/lib/apt/lists/*

@@ -1194,3 +1194,72 @@ constraint, so a change to how blocks are *budgeted* has nothing to move. Comput
 sharing and budget sharing are separate wins that show up under separate pressures —
 quoting the accounting fix as the cause of a TTFT number would be attributing it to the
 wrong change.
+
+## Flag audit: was `llama-server` given its best configuration? (2026-08-03)
+
+Published before this check, the concurrent-burst numbers had an obvious line of attack:
+that `llama-server` was run near-default while fox was not. Two of its flags could
+plausibly have closed the gap, so both were checked in the source and one was measured.
+
+**`--slot-prompt-similarity` defaults to `0.10`** (`common/common.h:671`), the same value
+fox defaults to. Its longest-common-prefix slot affinity was therefore *active*
+throughout, which is also why its warm run reports the same `cached_tokens` fox does.
+Nothing was disabled by omission.
+
+**`--cache-reuse` defaults to `0`, disabled** (`common/common.h:620`), and the original
+runs did not set it. Measured with it on, same harness, same model, 8 clients behind the
+1856-token prompt:
+
+| | cold TTFT p50 | warm TTFT p50 | cold `cached_tokens` |
+|---|---|---|---|
+| `--cache-reuse 0` (as published) | 4376 ms | 189 ms | 0 |
+| `--cache-reuse 256` | 4367 ms | 186 ms | 0 |
+
+Unchanged, inside the noise. The flag addresses a different situation: reusing a cache
+across a *deleted gap in the middle* of a prompt via KV shifting. It cannot help here,
+because the problem is not that reuse is refused — it is that at the moment eight
+requests arrive together there is no idle sequence holding the prefix, and
+`get_available_slot()` will not consider a busy one.
+
+So the comparison stands with the reference server configured in its favour. That is the
+claim worth making, and it is only worth making because the check was run rather than
+argued.
+
+## vLLM does run on this iGPU (2026-08-03)
+
+Recorded because the prediction was wrong, and a wrong prediction that gets checked is
+worth more than a right one that does not.
+
+The expectation was that vLLM could not run here. This machine is a Radeon 890M —
+gfx1150, RDNA 3.5, integrated — and vLLM's ROCm builds target gfx90a, gfx942 and the
+discrete RDNA3 parts (gfx1100-1102). gfx1150 is not among them, so the plan was to
+record "not supported on this hardware" as a scope limit.
+
+It runs. `rocm/vllm:latest` with `HSA_OVERRIDE_GFX_VERSION=11.0.0`, which presents the
+iGPU as a discrete RDNA3 card:
+
+```
+torch 2.9.0a0+git1c57644   available: True   count: 1
+device name: (empty)
+Available KV cache memory: 34.30 GiB
+GPU KV cache size: 2,997,008 tokens
+init engine (profile, create kv cache, warmup model) took 7.61 seconds
+ENGINE OK
+' Kaitlin and I am a 17 year old female. I have'
+```
+
+Two things to carry into any comparison rather than trip over later.
+
+`torch.cuda.get_device_name(0)` returns an **empty string**. ROCm sees the device and
+allocates against it, but does not recognise the target well enough to name it. Anything
+that keys behaviour off the device name will misbehave, and it is a reminder that the
+override is a workaround, not support.
+
+The 5.22 tok/s in that run is **not** vLLM's speed and must not be quoted as such: it was
+a 0.5B model under `enforce_eager=True`, which disables CUDA graphs and Inductor
+compilation. That gate existed to answer "does it run", and it does. Measuring it fairly
+means dropping `enforce_eager` and giving it the same tuning effort as every other engine.
+
+Consequence for scope: the three-way comparison — fox, llama.cpp, vLLM, plus Ollama — is
+achievable on this machine. It should be, with the override documented as part of vLLM's
+configuration, since a reader with the same hardware needs it too.

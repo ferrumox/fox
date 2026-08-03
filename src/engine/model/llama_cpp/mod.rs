@@ -121,6 +121,28 @@ fn meta_str(model: *const ffi::llama_model, key: &str) -> Option<String> {
 /// doubling math throughput and typically costs performance for this workload.
 /// Falls back to half the logical CPUs (a reasonable SMT-aware guess) and then
 /// to llama.cpp's own 4.
+/// Whether to use llama.cpp's unified KV cache. True everywhere except when
+/// `FOX_KV_UNIFIED=0` is set.
+///
+/// The escape hatch exists for one job: measuring what unified KV actually costs.
+/// It is the load-bearing choice behind fox's prefix sharing — `n_stream = 1` is what
+/// makes a partial `seq_cp` a metadata-only operation — and the same choice is the
+/// leading suspect for fox sitting ~10% below `llama-server` on decode-bound
+/// throughput. Those two claims cannot both be tested without being able to turn it
+/// off in a binary that is otherwise byte-identical, which is the point: building two
+/// binaries would put the build itself into the comparison.
+///
+/// Not a supported tuning knob. With it off, prefix reuse across live sequences
+/// degrades or disappears; it exists so the trade-off can be quantified rather than
+/// asserted.
+#[cfg(not(fox_stub))]
+fn kv_unified_setting() -> bool {
+    !matches!(
+        std::env::var("FOX_KV_UNIFIED").as_deref(),
+        Ok("0") | Ok("false") | Ok("off")
+    )
+}
+
 #[cfg(not(fox_stub))]
 fn resolve_n_threads() -> i32 {
     if let Some(n) = std::env::var("FOX_N_THREADS")
@@ -458,6 +480,7 @@ impl LlamaCppModel {
         mmproj_path: Option<&std::path::Path>,
         lora_modules: &[(String, std::path::PathBuf, f32)],
         reranking: bool,
+        rs_rollback: u32,
     ) -> Result<Self> {
         // Suppress llama.cpp's verbose loading output (tensor info, repack, etc.).
         // Fox shows its own clean progress spinner instead.
@@ -674,7 +697,14 @@ impl LlamaCppModel {
         // donated, non-dense seq_id silently fragments the batch (measured: 1.74
         // of a possible 4 under sustained load) — see
         // docs/design/rocm-benchmarking-2026-08.md's "Known limitation".
-        ctx_params.kv_unified = true;
+        ctx_params.n_rs_seq = rs_rollback;
+        ctx_params.kv_unified = kv_unified_setting();
+        if !ctx_params.kv_unified {
+            // Logged at info, not debug: a benchmark arm running with prefix sharing
+            // crippled must be identifiable from the server log alone, or a stray
+            // environment variable becomes an unexplained result months later.
+            tracing::info!("kv_unified disabled via FOX_KV_UNIFIED — prefix reuse degraded");
+        }
         // Never inherit llama.cpp's 4-thread default — see resolve_n_threads().
         let n_threads = resolve_n_threads();
         ctx_params.n_threads = n_threads;
@@ -830,6 +860,7 @@ impl LlamaCppModel {
         gpu_memory_fraction: f32,
         type_k: u32,
         type_v: u32,
+        rs_rollback: u32,
     ) -> Result<Self> {
         let model = self._model;
 
@@ -863,7 +894,8 @@ impl LlamaCppModel {
         ctx_params.n_ctx = n_ctx;
         ctx_params.n_batch = effective_max_ctx.max(max_batch_size as u32);
         ctx_params.n_seq_max = n_seq;
-        ctx_params.kv_unified = true; // see load() for why
+        ctx_params.n_rs_seq = rs_rollback; // see load() for why
+        ctx_params.kv_unified = kv_unified_setting(); // see load() for why
         let n_threads = resolve_n_threads(); // see load() for why
         ctx_params.n_threads = n_threads;
         ctx_params.n_threads_batch = n_threads;
@@ -1088,17 +1120,22 @@ impl Model for LlamaCppModel {
         }
     }
 
-    fn trim_sequence(&self, seq_id: i32, from_pos: usize) {
+    fn trim_sequence(&self, seq_id: i32, from_pos: usize) -> bool {
         let ctx_guard = match self._ctx.lock() {
             Ok(g) => g,
-            Err(_) => return,
+            Err(_) => return false,
         };
         unsafe {
             let mem = ffi::llama_get_memory(ctx_guard.as_ptr() as *const _);
-            if !mem.is_null() {
-                // p1 = -1 → remove [from_pos, ∞) for this sequence.
-                ffi::llama_memory_seq_rm(mem, seq_id, from_pos as i32, -1);
+            if mem.is_null() {
+                return false;
             }
+            // p1 = -1 → remove [from_pos, ∞) for this sequence. The result is not
+            // cosmetic: on a hybrid cache the recurrent half refuses a rollback beyond
+            // its snapshot window and returns false, having mutated nothing
+            // (`llama-memory-hybrid.cpp:143` tries the recurrent side first for exactly
+            // that reason). The caller re-prefills from scratch when it fails.
+            ffi::llama_memory_seq_rm(mem, seq_id, from_pos as i32, -1)
         }
     }
 
@@ -1128,6 +1165,17 @@ impl Model for LlamaCppModel {
         // actually asks: does fox's block-level KV copy-on-write (the prefix
         // cache's mechanism) apply to this model at all. See
         // docs/design/mla-recurrent-kv-sizing.md.
+        //
+        // The unified check is not a refinement of the architecture one, it is a hard
+        // precondition. Without `kv_unified`, `n_stream > 1`, so a partial
+        // `llama_memory_seq_cp` no longer takes the metadata-only branch and reaches
+        // `GGML_ASSERT(is_full)` at `llama-kv-cache.cpp:518`, which aborts the process
+        // rather than returning an error. Observed doing exactly that under
+        // `FOX_KV_UNIFIED=0` before this guard existed. The two settings are coupled:
+        // fox's prefix cache is only legal on a unified KV cache.
+        if !kv_unified_setting() {
+            return false;
+        }
         unsafe {
             let model = self._model.as_ptr();
             !ffi::llama_model_is_recurrent(model) && !ffi::llama_model_is_hybrid(model)

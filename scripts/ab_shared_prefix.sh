@@ -81,7 +81,9 @@ arm() {
   local out
   out=$(python3 "$S/bench_burst.py" "$URL" "$NAME" "$CONC" "$REPEATS" "$MAXTOK" 2>&1) || {
     echo "  $label: el cliente falló"; echo "$out" | tail -3; stop; return 1; }
-  while read -r phase p50 p90 wall cached ptok; do
+  # bench_burst.py añadió ITL p50/p99 al final de cada línea; hay que absorberlos o
+  # `read` los mete en $ptok y la comprobación de tamaño de prompt compara basura.
+  while read -r phase p50 p90 wall cached ptok itl50 itl99; do
     echo "$p50 $wall $cached" >> "$OUT/${phase}_$label.dat"
     printf "  %-13s %-5s TTFT p50 %6s ms  p90 %6s ms  wall %5ss  cached %6s  prompt %s tok\n" \
            "$label" "$phase" "$p50" "$p90" "$wall" "$cached" "$ptok"

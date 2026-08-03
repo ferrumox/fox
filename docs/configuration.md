@@ -137,8 +137,26 @@ Prompt reuse and scheduling:
 | `FOX_CACHE_RAM` | `--cache-ram` | `0` (off) |
 | `FOX_MAX_QUEUE_DEPTH` | `--max-queue-depth` | see `--help` |
 | `FOX_MAX_PREFILL_CHUNK` | `--max-prefill-chunk` | see `--help` |
+| `FOX_RS_ROLLBACK` | `--rs-rollback` | `4` |
 | `FOX_CONTEXT_SHIFT` | `--context-shift` | see `--help` |
 | `FOX_CONTEXT_KEEP` | `--context-keep` | see `--help` |
+
+`--rs-rollback` deserves a note, because its cost is not proportional to its number.
+It sets how many recurrent-state snapshots are kept per sequence, which is what lets a
+**hybrid or recurrent** model (Qwen3.5, Qwen3-Next, Falcon-H1, Jamba) roll its cache back
+far enough to reuse a prompt prefix. At `0` those models cannot reuse a prompt at all.
+Dense models ignore it and allocate nothing.
+
+Each snapshot is a full recurrent state per sequence. Measured on Qwen3.5-9B with 8
+concurrent sequences, roughly **453 MB per snapshot**:
+
+| `--rs-rollback` | extra memory | what it covers |
+|---|---|---|
+| `0` | none | nothing — no prompt reuse on these models |
+| `4` (default) | ~1.8 GB | multi-turn chat, where the next turn contains the previous reply and the rollback is a single token |
+| `64` | ~30 GB | re-sending an identical prompt, where the whole generated reply has to be rolled back |
+
+Raise it only if your workload re-sends prompts verbatim, and watch the memory when you do.
 
 Sampling:
 

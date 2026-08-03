@@ -455,6 +455,7 @@ mod tests {
             max_batch_size: 4,
             max_queue_depth: 0,
             max_prefill_chunk: 0,
+            rs_rollback: 0,
             context_shift: false,
             context_keep: 0,
             reranking: false,

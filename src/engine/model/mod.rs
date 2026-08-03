@@ -505,7 +505,15 @@ pub trait Model: Send + Sync {
     /// leaving the old tail (rest of prompt + generated tokens) in place makes the next
     /// occupant re-submit tokens at positions that already have cells, which
     /// llama_decode rejects. Default: no-op (stubs have no real KV).
-    fn trim_sequence(&self, _seq_id: i32, _from_pos: usize) {}
+    /// Returns whether the trim actually happened. It can legitimately fail: on
+    /// recurrent and hybrid caches a partial rollback is only possible while the
+    /// distance is within the retained snapshot window (`n_rs_seq`,
+    /// `llama-memory-recurrent.cpp:181`), and outside it llama.cpp returns false rather
+    /// than corrupting the state. A caller that ignores this leaves the request
+    /// believing tokens are resident that were never trimmed back to.
+    fn trim_sequence(&self, _seq_id: i32, _from_pos: usize) -> bool {
+        true
+    }
 
     /// Copy `token_count` tokens worth of KV cache from `src_seq_id` to `dst_seq_id`
     /// (positions 0..token_count). Used by prefix caching: before prefilling a request whose
@@ -535,6 +543,23 @@ pub trait Model: Send + Sync {
     /// recurrent / hybrid models (Mamba, Qwen3.5, etc.) return false.
     /// Prefix caching must be disabled when this returns false.
     fn supports_seq_copy(&self) -> bool;
+
+    /// Whether a request may inherit the KV a sequence *already holds* and skip
+    /// prefilling those tokens.
+    ///
+    /// Deliberately separate from [`Self::supports_seq_copy`], which asks a stricter
+    /// question — may KV be copied *between* sequences. Conflating the two cost fox
+    /// prompt reuse on every hybrid model: `supports_seq_copy()` is false for them
+    /// (`seq_cp` on recurrent state is not a partial operation), and gating slot reuse
+    /// on the same flag disabled the kind that needs no copy at all. `llama-server`
+    /// does exactly that kind on the same architectures and the same llama.cpp —
+    /// measured reusing 14680 tokens on Qwen3.5-9B where fox reused none.
+    ///
+    /// Default true: the real guard is [`Self::trim_sequence`]'s return value, checked
+    /// at the point of use, not a static prediction here.
+    fn supports_slot_reuse(&self) -> bool {
+        true
+    }
 
     /// Return the embedding dimension (n_embd) for the model.
     fn embedding_dim(&self) -> usize;

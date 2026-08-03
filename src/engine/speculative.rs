@@ -189,11 +189,12 @@ mod tests {
         fn clear_sequence(&self, seq_id: i32) {
             self.calls.lock().unwrap().push(format!("clear({seq_id})"));
         }
-        fn trim_sequence(&self, seq_id: i32, from_pos: usize) {
+        fn trim_sequence(&self, seq_id: i32, from_pos: usize) -> bool {
             self.calls
                 .lock()
                 .unwrap()
                 .push(format!("trim({seq_id},{from_pos})"));
+            true
         }
         fn copy_sequence_range(&self, _src_seq_id: i32, _dst_seq_id: i32, _token_count: i32) {}
         fn supports_seq_copy(&self) -> bool {

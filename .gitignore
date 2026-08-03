@@ -8,6 +8,8 @@ models/
 
 # Vulkan bundle extracted by `make vulkan`
 /fox-vulkan/
+# Reference-server bundle extracted from Dockerfile.llama-server-vulkan for benchmarks
+/llama-server-vulkan/
 
 # MkDocs build output (generated; deployed to Pages by the Docs workflow)
 /site/

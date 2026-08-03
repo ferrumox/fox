@@ -11,12 +11,175 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.0] - 2026-08-03
+
+Prompt reuse now works on hybrid and recurrent models, where it had been silently off.
+Minor rather than patch because of one line in particular: `--rs-rollback` defaults to
+`4`, so **a hybrid model allocates ~1.8 GB more than it did in 0.19.1**. On a
+memory-tight box that is a difference you want to read before upgrading, not discover.
+
+### Added
+
+- **`--rs-rollback <N>`** (`FOX_RS_ROLLBACK`, `rs_rollback` in `config.toml`, default
+  `4`) — recurrent-state snapshots kept per sequence so a hybrid or recurrent model can
+  roll its KV cache back far enough to reuse a prompt prefix. Dense models ignore it and
+  allocate nothing; llama.cpp clamps it to `0` for architectures without rollback
+  support.
+
+  The cost is not proportional to the number. Measured on Qwen3.5-9B with 8 concurrent
+  sequences, **~453 MB per snapshot**:
+
+  | `--rs-rollback` | extra memory | covers |
+  |---|---|---|
+  | `0` | none | nothing — no prompt reuse on these models |
+  | `4` (default) | ~1.8 GB | multi-turn chat: the next turn contains the previous reply, so the rollback is one token |
+  | `64` | ~30 GB | re-sending an identical prompt, where a whole reply must be rolled back |
+
+  Raise it only for workloads that re-send prompts verbatim.
+
+### Fixed
+
+- **Hybrid and recurrent models could not reuse prompts at all, and `llama-server`
+  could.** On Qwen3.5-9B with 8 clients behind a shared 1856-token prompt, fox's warm
+  TTFT was **42923 ms with `cached_tokens: 0`** against `llama-server`'s 13264 ms with
+  14680 — the reference reusing on the same architecture, the same llama.cpp and the
+  same GGUF. `registry.json` recommends this family (`qwen3.5`, `qwen3.5:9b`), so fox's
+  main differentiator was off on the models its own catalogue leads with.
+
+  Four separate gates had to be opened, and three were only found by measuring against
+  a real model — the unit tests passed and the log reported the capability as enabled
+  while reuse stayed at zero:
+
+  1. **One capability where there were two.** Inheriting the KV a sequence already
+     holds copies nothing and is legal on hybrids; copying a prefix out of *another*
+     live sequence needs `seq_cp` and is not. Both hung off one flag, so hybrids lost
+     the cheap kind too. Now `Model::supports_slot_reuse()` is separate from
+     `supports_seq_copy()`, and the scheduler carries both.
+  2. **Finished sequences were never parked.** `logits.rs` parked a completed sequence
+     only when the model supported *copying*. With nothing resident, every reuse path
+     downstream was dead no matter what it was permitted to do.
+  3. **`trim_sequence` discarded llama.cpp's result.** A partial `seq_rm` on a
+     recurrent cache legitimately fails outside its snapshot window
+     (`llama-memory-recurrent.cpp:181`) and mutates nothing. Ignoring that left a
+     request skipping a prefix that was no longer there. It now returns the result and
+     the engine re-prefills on refusal — slower, never wrong.
+  4. **`n_rs_seq` defaulted to `0`.** The snapshot window itself is `0` in
+     `llama_context_default_params` (`llama-context.cpp:3457`) and fox inherited it, so
+     every partial rollback failed. `QWEN35` is in `llm_arch_supports_rs_rollback`: the
+     architecture was never the obstacle.
+
+  Result on Qwen3.5-9B, 8 clients, warm burst, with a window sized for the workload
+  (`--rs-rollback 64`): TTFT **42923 → 638 ms**, `cached_tokens` **0 → 14856**, trims
+  refused **8 of 8 → 0**. Against `llama-server` on the same model that is 13296 → 638
+  ms, i.e. fox goes from losing 3.2× to winning 20.8×.
+
+  **At the shipped default it does not, and this workload is the reason to say so.**
+  Re-sending an identical prompt requires rolling back the whole generated reply, which
+  needs a window of that size; `--rs-rollback 4` cannot and falls back to a full
+  prefill. Measured with defaults: fox warm **39970 ms, `cached_tokens` 0** against
+  `llama-server`'s **13214 ms** — still 3.0× behind. Out of the box this release
+  *unblocks* prompt reuse on hybrid models; it does not deliver it for prompts sent
+  verbatim twice unless you raise the window and pay the memory.
+
+  **The case the default was chosen for does not hold either, now that it has been
+  measured.** The reasoning was that a multi-turn conversation needs a rollback of one
+  token, because the next turn contains the previous reply. `scripts/bench_multiturn.py`
+  refutes it on this model: 4 conversations × 6 turns produced **20 slot hits and 20
+  refused trims**, `cached_tokens` 0 throughout. The refusals report `keep_from=155`
+  against a turn-0 prompt of ~157 tokens, i.e. the shared prefix ends at the first user
+  message and the assistant reply does not match at all — the parked sequence holds the
+  raw generated tokens while the next request carries that reply re-wrapped by the chat
+  template. Where those two do not coincide, the required rollback is the whole reply,
+  not one token.
+
+  So the premise was wrong, not the arithmetic. On Llama-3.2-1B the chain does line up
+  (fox reuses 342 tokens per turn), so this is model- and template-dependent and not a
+  blanket property. **`--rs-rollback 4` should be read as "enough for models whose
+  template makes a conversation a token-exact prefix chain", which is not all of them,
+  and is not the catalogue's own Qwen3.5.** Left at 4 rather than raised because the
+  window that would cover it is the reply length, at ~453 MB per snapshot.
+
+- **Prompt reuse was decided without checking whether the model could perform it**,
+  which aborted the process instead of degrading. Three entry points — slot affinity,
+  copy-from-a-live-sibling, and the `n>1`/`best_of` fork — all reached
+  `llama_memory_seq_cp` without consulting `supports_seq_copy()`, so the engine could
+  log `prefix caching disabled` while the scheduler went on skipping prefill, ending in
+  `GGML_ASSERT(is_full)` at `llama-kv-cache.cpp:518`. The only guard that existed
+  (`batch.rs:261`) tested `llama_memory_can_shift()`, which the codebase itself
+  documents as the wrong predicate because it returns true for recurrent models. The
+  check now sits on `allow_reuse`, which feeds all three.
+
+### Performance
+
+- **Decode-bound throughput: 45 → 47 tok/s per request at 4 clients** (aggregate 170 →
+  175, ranges disjoint over 3 alternating rounds), closing the gap to `llama-server`
+  from 1.10× to 1.06×.
+
+  Profiling found the sampler's candidate selection, not the copy the older notes
+  blamed: fox spent **6.6% of wall time in `quicksort::partition`** against
+  `llama-server`'s 1.4% in `llama_token_data_array_partial_sort_inplace`. Per token
+  *per sequence* it allocated a 128256-element index vector (1 MB) only to truncate it
+  to `n`, and partitioned it with a comparator that dereferenced into a separate 512 KB
+  logits array on every comparison. `select_top_n` now keeps a sorted buffer of at most
+  `n` entries and streams the logits once — one `f32` compare against a running
+  threshold in the common case, sequential, no indirection.
+
+  Validated end-to-end rather than by micro-benchmark: this repo has a precedent of a
+  4.6× sampling micro-benchmark win producing zero real throughput. The gain shrinks as
+  models grow — on a dense 7B the aggregate figure reaches parity with `llama-server`
+  either way — so it is worth most on small models.
+
+### Internal
+
+- **`make ci` and the pre-push hook now type-check against a real llama.cpp build.**
+  Both ran entirely with `FOX_SKIP_LLAMA=1`, which never compiles the llama.cpp module,
+  so adding a parameter to `LlamaCppModel::load()` left eight call sites broken with
+  every check green. CI's `golden` job would have caught it; the local gate would not,
+  and the hook's banner claimed it mirrored CI. New `make check-real`,
+  `FOX_SKIP_REAL_CHECK=1` to skip, and `cargo check --all-targets` added to the
+  `golden` job so binaries and `tests/` are covered too.
+- **Benchmark harness**: `scripts/bench_engines.sh` runs fox, `llama-server` and Ollama
+  across two backends and four workloads (burst, decode, saturation sweep, noisy
+  neighbour), one server alive at a time with arm order rotated per round; plus
+  `bench_decode.py`, `bench_noisy.py`, `probe_cached_tokens.py`, `bench_vllm.sh` and
+  `try_ollama_rocm.sh`. Findings, including the ones that went against fox, are in
+  `docs/design/benchmark-plan-2026-08.md`.
+
+---
+
 ## [0.19.1] - 2026-08-03
 
 A correctness pass over everything a reader sees before they run anything, plus one
 build fix. No engine changes.
 
 ### Fixed
+
+- **Starting the server printed a screenful of noise before it had served
+  anything.** Three separate causes, all in the first thing a new user sees. The
+  human log format was `tracing`'s `.pretty()`, built for reading a debug session:
+  it prints an indented `at src/file.rs:line` under every event and a blank line
+  between them, so each entry took three lines. Underneath that, the stop-token log
+  dumped the model's entire special-token list — 247 `<|reserved_special_token_N|>`
+  entries for Llama 3, which buried every other line. And `model ready` was logged
+  twice per model, once after the weights loaded and once after the engine was
+  built, which read as two models loading. Startup is now nine lines. The token
+  list moved to `debug`, the count stays at `info`, and `--json-logs` still carries
+  source locations as fields for anything machine-read. The `--max-models 1` notice
+  stays — making that trade-off visible was a deliberate fix — but says it in one
+  line instead of a paragraph, since it fires on the default configuration and
+  therefore greets everyone.
+
+- **`FOX_SKIP_LLAMA` did not invalidate the build script, so real builds silently ran
+  as stubs.** `build.rs` declared `cargo:rerun-if-env-changed` for
+  `FOX_CPU_ALL_VARIANTS` and nothing else. Cargo therefore never re-ran the script when
+  `FOX_SKIP_LLAMA` changed: after any stub build, a plain `cargo test` reused the stub
+  artifacts and kept compiling with `cfg(fox_stub)` set. It did not fail — it tested the
+  stub model, which is exactly what the real-model suites exist to catch. **99 tests
+  were being skipped in silence** (425 in a real build, 326 in a stub one), and
+  `make golden` could have been running the golden net against the stub. All six
+  environment variables the script reads are now declared. Found because a test count
+  dropped from 425 to 326 with no code change; all 425 pass in a real build, so nothing
+  had rotted while they were unrun.
 
 - **The ROCm FP8 guard patch is applied by the build instead of by hand.** The fix
   existed only as an uncommitted edit inside the `vendor/llama.cpp` working tree.
@@ -57,6 +220,56 @@ build fix. No engine changes.
   reader tunes against it.
 
 ### Added
+
+- **`fox pull` downloads sharded GGUFs.** Large models are published split across
+  `name-00001-of-00014.gguf` … and llama.cpp loads the whole set when handed the first
+  part, so fetching one part left an unusable file. Several of the most-downloaded
+  models on HuggingFace — Kimi K3, DeepSeek V4, GLM 5.2, MiniMax M3 — were therefore
+  unreachable through `fox pull` and could not be listed in the catalogue at all.
+  Handed any part, fox now resolves the whole set, downloads each part, and reports
+  the first one, which is what llama.cpp must be pointed at.
+
+  Two details came from checking real repositories rather than assuming the layout.
+  Parts are nested in a per-quant subdirectory (`UD-IQ1_S/Model-UD-IQ1_S-00001-of-…`),
+  so the destination's parent directory has to be created; and a repository commonly
+  holds several differently-sized sets at once, so grouping keys on the split count as
+  well as the name — mixing two sets yields a model that cannot load.
+
+  The four models this unblocks are in the catalogue, each labelled with its real
+  size: DeepSeek V4 Flash (82 GB), MiniMax M3 (90 GB), GLM 5.2 (217 GB) and Kimi K3
+  (594 GB). Those figures are the *smallest complete set published* for each, at IQ1_S,
+  so the description says outright that this is the set that loads rather than the best
+  the model does. Listing them without that would be worse than omitting them: a
+  `fox pull` sitting next to 2 GB entries should not quietly start a 594 GB download.
+
+- **25 current models in the built-in catalog, taking it from 18 entries to 43.** The
+  catalog was not broken — all 18 existing entries still resolve on HuggingFace — but
+  its selection had aged, so `fox pull` offered a 2024/2025 line-up and the README's
+  worked example pulled a model from 2024. Added across roles rather than by
+  popularity: Qwen3.5 4B and 9B, Qwen3.6 35B-A3B and 27B, Gemma 4 26B-A4B, 12B and
+  E4B, Qwen3-Coder 30B-A3B, Qwen3-VL 4B, Ornith 1.0 9B, EmbeddingGemma 300M, Qwen3
+  Embedding 0.6B, and two rerankers. Existing entries are kept, since removing them
+  would break anyone's `fox pull llama3.2`.
+
+  Two gaps this closes are features that shipped without anything to run them on:
+  `/rerank` and `--reranking` landed in 0.19 with no reranker in the catalog at all,
+  and the mixture-of-experts entries are the first models here that give `--moe-cpu`
+  something to demonstrate.
+
+  Vendors beyond Qwen and Gemma: IBM Granite 4.1, AI2 Olmo 3, TII Falcon-H1R, Apertus,
+  NVIDIA Nemotron 3 Nano Omni, Tencent Hunyuan MT, and Ornith. Falcon-H1R is worth
+  singling out — it is hybrid attention/state-space, so prompt reuse is disabled for it
+  and it will report no cached tokens, which makes it the one entry that exercises that
+  path from the catalog.
+
+  Some current families are missing for a reason rather than by oversight: Kimi K3,
+  DeepSeek V4, GLM 5.2, MiniMax M3 and Inkling all publish as multi-part GGUFs, and
+  neither `registry.json` (one `recommended` filename) nor `fox pull` handles sharded
+  downloads. That is a real gap in fox, not a shortage of models.
+
+  Every repository, filename, projector and size was verified against the HuggingFace
+  API rather than written from memory, and sizes are the real byte counts. The whole
+  catalog is re-checked at 43 of 43 resolving, with no duplicate aliases.
 
 - **The 16 `fox serve` flags that were never documented** — `--speculative`,
   `--spec-ngram`, `--spec-draft-len`, `--draft-model`, `--lora-modules`, `--mmproj`,

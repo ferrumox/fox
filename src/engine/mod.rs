@@ -62,6 +62,10 @@ pub struct InferenceEngine {
     /// Whether the loaded model supports KV-cache sequence copying (llama_memory_seq_cp).
     /// False for recurrent/hybrid models (Mamba, Qwen3.5, etc.); prefix caching is disabled.
     supports_prefix_cache: bool,
+    /// Whether a finished sequence may be parked for its own slot to reuse. Weaker
+    /// than `supports_prefix_cache`, which asks whether KV may be copied *between*
+    /// sequences — see `Model::supports_slot_reuse`.
+    supports_slot_reuse: bool,
     /// Text forms of the model's EOS and EOT tokens, used as base stop sequences.
     model_stop_tokens: Vec<String>,
     // See `EngineOptions` for the semantics of these two.
@@ -90,16 +94,31 @@ impl InferenceEngine {
         draft_model: Option<Arc<dyn Model>>,
     ) -> Self {
         let supports_prefix_cache = model.supports_seq_copy();
+        // The scheduler decides to skip prefill; llama.cpp performs the copy. Telling
+        // only the engine leaves the scheduler skipping prefill for cells nobody copied.
+        scheduler.set_prefix_reuse(supports_prefix_cache);
+        let supports_slot_reuse = model.supports_slot_reuse();
+        scheduler.set_slot_reuse(supports_slot_reuse);
         if supports_prefix_cache {
             tracing::info!("prefix caching enabled (model supports seq_cp)");
         } else {
+            // The reason is deliberately not spelled out: it is now either a
+            // recurrent/hybrid model or a non-unified KV cache, and naming only the
+            // first sent a previous investigation looking at the wrong thing.
             tracing::info!(
-                "prefix caching disabled (model uses recurrent/hybrid memory — seq_cp unsupported)"
+                slot_reuse = supports_slot_reuse,
+                "cross-sequence prefix copying disabled (model cannot donate KV cells); \
+                 slot reuse is unaffected"
             );
         }
         let model_stop_tokens = model.stop_tokens();
         if !model_stop_tokens.is_empty() {
-            tracing::info!("model stop tokens: {:?}", model_stop_tokens);
+            // Count at info, list at debug. Llama 3 declares 247 reserved special
+            // tokens, so printing the list made starting the server emit a wall of
+            // `<|reserved_special_token_N|>` that buried every other startup line.
+            // The number is what an operator needs; the names are a debugging detail.
+            tracing::info!(count = model_stop_tokens.len(), "model stop tokens loaded");
+            tracing::debug!("model stop tokens: {:?}", model_stop_tokens);
         }
         let speculative = options.speculative.map(|cfg| match cfg {
             SpeculativeConfig::Ngram { ngram, draft_len } => {
@@ -124,6 +143,7 @@ impl InferenceEngine {
             model_name,
             metrics,
             supports_prefix_cache,
+            supports_slot_reuse,
             model_stop_tokens,
             max_prefill_chunk: options.max_prefill_chunk,
             context_shift: options.context_shift,
