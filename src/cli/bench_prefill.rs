@@ -103,6 +103,11 @@ fn sampling() -> SamplingParams {
         show_thinking: false,
         initial_in_thinking: false,
         max_thinking_chars: 8192,
+        grammar: None,
+        logprobs: None,
+        min_p: 0.0,
+        min_tokens: 0,
+        logit_bias: None,
     }
 }
 

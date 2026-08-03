@@ -125,6 +125,24 @@ pub struct ChatCompletionRequest {
     /// Structured output format.
     #[serde(default)]
     pub response_format: Option<ResponseFormat>,
+    /// Return per-token log-probabilities when true.
+    #[serde(default)]
+    pub logprobs: Option<bool>,
+    /// Number of most-likely alternatives to return per token (0–20). Only meaningful
+    /// with `logprobs: true`.
+    #[serde(default)]
+    pub top_logprobs: Option<u8>,
+    /// Additive per-token logit bias, keyed by token id (as a string, OpenAI style).
+    /// Values around ±100 effectively force or ban a token.
+    #[serde(default)]
+    pub logit_bias: Option<std::collections::HashMap<String, f32>>,
+    /// Min-P sampling: drop tokens below `min_p × max_prob` (fox extension).
+    #[serde(default)]
+    pub min_p: Option<f32>,
+    /// Suppress end-of-generation until at least this many tokens are produced (fox
+    /// extension).
+    #[serde(default)]
+    pub min_tokens: Option<usize>,
     /// fox extension: opt in to the model's native reasoning/thinking when it
     /// supports it. Default off — thinking is NOT enabled unless requested.
     #[serde(default)]
@@ -198,6 +216,48 @@ pub struct ChatCompletionChoice {
     pub index: u32,
     pub message: ChatMessageResponse,
     pub finish_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<ChatLogprobs>,
+}
+
+/// OpenAI `logprobs` block: one entry per generated token.
+#[derive(Debug, Serialize)]
+pub struct ChatLogprobs {
+    pub content: Vec<ChatLogprobEntry>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ChatLogprobEntry {
+    pub token: String,
+    pub logprob: f32,
+    pub bytes: Vec<u8>,
+    pub top_logprobs: Vec<ChatTopLogprob>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ChatTopLogprob {
+    pub token: String,
+    pub logprob: f32,
+    pub bytes: Vec<u8>,
+}
+
+impl From<crate::scheduler::TokenLogprob> for ChatLogprobEntry {
+    fn from(l: crate::scheduler::TokenLogprob) -> Self {
+        ChatLogprobEntry {
+            token: l.token,
+            logprob: l.logprob,
+            bytes: l.bytes,
+            top_logprobs: l
+                .top
+                .into_iter()
+                .map(|t| ChatTopLogprob {
+                    token: t.token,
+                    logprob: t.logprob,
+                    bytes: t.bytes,
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -230,6 +290,8 @@ pub struct ChatCompletionChunkChoice {
     pub index: u32,
     pub delta: ChatMessageDelta,
     pub finish_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<ChatLogprobs>,
 }
 
 #[derive(Debug, Serialize)]

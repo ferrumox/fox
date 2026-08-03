@@ -79,6 +79,7 @@ Multi-turn conversation using the Ollama chat format. Supports streaming (NDJSON
 | `model` | `string` | (required) | Model name. |
 | `messages` | `array` | (required) | Conversation history. Each item has `role` and `content`. |
 | `stream` | `boolean` | `true` | Stream responses as NDJSON. Set to `false` for a single JSON response. |
+| `format` | `string` \| `object` | `null` | Guided decoding. `"json"` constrains output to any valid JSON; a JSON-schema object constrains it to conform to that schema (fox masks grammar-forbidden tokens before sampling, so the output always parses). An unconvertible schema returns HTTP `400`. |
 | `options` | `object` | `{}` | Sampling and generation options (see table below). |
 
 **`options` fields:**
@@ -88,6 +89,7 @@ Multi-turn conversation using the Ollama chat format. Supports streaming (NDJSON
 | `temperature` | `0.8` | Sampling temperature. |
 | `top_p` | `0.9` | Nucleus sampling probability. |
 | `top_k` | `40` | Top-K filter (mirrors upstream Ollama). `0` = disabled. |
+| `min_p` | `0.0` | Min-P sampling: drop tokens below `min_p × max_prob`. `0.0` = disabled. |
 | `repeat_penalty` | `1.1` | Repetition penalty (mirrors upstream Ollama). `1.0` = disabled. |
 | `seed` | `null` | RNG seed. |
 | `num_predict` | `512` | Maximum tokens to generate (`2048` when thinking is on). |

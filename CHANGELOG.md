@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0]
+
+fox gains **structured and controllable output**. Guided decoding constrains generation
+to a grammar via llama.cpp's core GBNF sampler, so `response_format` / Ollama `format`
+now *guarantee* valid (and schema-conforming) JSON instead of hoping for it — with the
+JSON-schema→GBNF converter written in Rust. Alongside it, the OpenAI chat endpoint
+exposes token `logprobs`/`top_logprobs`, and the sampler grows `min_p`, `logit_bias`
+and `min_tokens` — knobs that were previously accepted and silently dropped. Every piece
+rides the regression net (golden tests on a real model + stub unit/integration tests).
+See `docs/design/structured-output.md`.
+
+### Added
+
+- **Guided decoding / structured output** — fox can now *constrain* generation to a
+  grammar instead of hoping the model produces valid JSON. Set OpenAI
+  `response_format` (`{"type":"json_object"}` or `{"type":"json_schema","json_schema":
+  {"schema":…}}`) or Ollama `format` (`"json"` or a JSON-schema object), and every
+  sampled token is masked to the grammar-legal set via llama.cpp's core GBNF sampler
+  before fox's sampler picks within it — so the output always parses. JSON-schema is
+  converted to GBNF in Rust (`type`, `properties`+`required`, `items`, `enum`, nesting).
+  A schema fox can't convert is a `400`, never a silent unconstrained fallback.
+  Verified on a real model (golden `golden_grammar_constrains_output`,
+  `golden_json_schema_constrains_to_valid_json`). First item of the 0.14
+  structured-output work (`docs/design/structured-output.md`).
+- **Token log-probabilities** — the OpenAI chat endpoint now honours `logprobs` and
+  `top_logprobs` (0–20). Each generated token reports its natural-log probability plus
+  the most-likely alternatives (`choices[].logprobs.content[]`), on both streaming
+  chunks and non-streaming responses. Computed from the logits fox already produces, so
+  no extra inference cost; the log-softmax core is unit-tested. logprobs reflect the
+  model's raw distribution (before any guided-decoding grammar mask).
+- **More sampling controls** — `min_p` (drop tokens below `min_p × max_prob`; OpenAI
+  and Ollama `options.min_p`), `logit_bias` (per-token additive bias, OpenAI; ±100
+  bans/forces a token), and `min_tokens` (suppress end-of-generation until at least N
+  tokens are produced; OpenAI). All are honoured instead of being silently dropped.
+
 ## [0.13.0] - 2026-07-21
 
 fox becomes a real server under concurrent, long-prompt, long-conversation load. The

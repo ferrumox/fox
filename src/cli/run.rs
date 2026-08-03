@@ -577,5 +577,10 @@ fn build_sampling_params(
         show_thinking: args.show_thinking,
         initial_in_thinking: false, // set by callers that force thinking mode
         max_thinking_chars: 8192,
+        grammar: None,
+        logprobs: None,
+        min_p: 0.0,
+        min_tokens: 0,
+        logit_bias: None,
     }
 }

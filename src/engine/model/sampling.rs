@@ -59,9 +59,14 @@ pub(crate) struct SamplerParams<'a> {
     pub(crate) temperature: f32,
     pub(crate) top_p: f32,
     pub(crate) top_k: u32,
+    /// Minimum probability relative to the top token (0 = disabled). Tokens whose
+    /// probability is below `min_p × max_prob` are dropped before the draw.
+    pub(crate) min_p: f32,
     pub(crate) repetition_penalty: f32,
     pub(crate) frequency_penalty: f32,
     pub(crate) presence_penalty: f32,
+    /// Additive per-token bias applied to the raw logits (OpenAI `logit_bias`).
+    pub(crate) logit_bias: Option<&'a std::collections::HashMap<i32, f32>>,
     pub(crate) generated_ids: &'a [i32],
     pub(crate) seed: Option<u64>,
     pub(crate) token_count: usize,
@@ -76,14 +81,26 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         temperature,
         top_p,
         top_k,
+        min_p,
         repetition_penalty,
         frequency_penalty,
         presence_penalty,
+        logit_bias,
         generated_ids,
         seed,
         token_count,
     } = p;
     let mut logits = logits.to_vec();
+
+    // 0. logit_bias: additive per-token bias on the raw logits (OpenAI semantics,
+    //    where ±100 effectively forces or bans a token).
+    if let Some(bias) = logit_bias {
+        for (&id, &b) in bias {
+            if id >= 0 && (id as usize) < logits.len() {
+                logits[id as usize] += b;
+            }
+        }
+    }
 
     // 1. Repetition + frequency/presence penalties
     if repetition_penalty != 1.0 && !generated_ids.is_empty() {
@@ -130,6 +147,18 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         .map(|(i, &l)| (i, (l - max_l).exp() / exp_sum))
         .collect();
     probs.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(Ordering::Equal));
+
+    // 5b. Min-P: drop tokens whose probability is below `min_p × max_prob`. Probs are
+    // sorted descending, so keep the leading run above the threshold (at least the top).
+    if min_p > 0.0 && !probs.is_empty() {
+        let threshold = min_p * probs[0].1;
+        let keep = probs
+            .iter()
+            .take_while(|(_, p)| *p >= threshold)
+            .count()
+            .max(1);
+        probs.truncate(keep);
+    }
 
     // 6. Top-P nucleus truncation
     if top_p < 1.0 {
@@ -274,9 +303,11 @@ mod tests {
                 temperature: 0.0,
                 top_p: 1.0,
                 top_k: 0,
+                min_p: 0.0,
                 repetition_penalty: 1.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
+                logit_bias: None,
                 generated_ids: &[],
                 seed: None,
                 token_count: 0,
@@ -294,9 +325,11 @@ mod tests {
                 temperature: -1.0,
                 top_p: 1.0,
                 top_k: 0,
+                min_p: 0.0,
                 repetition_penalty: 1.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
+                logit_bias: None,
                 generated_ids: &[],
                 seed: None,
                 token_count: 0,
@@ -316,9 +349,11 @@ mod tests {
             temperature: 1.0,
             top_p: 1.0,
             top_k: 0,
+            min_p: 0.0,
             repetition_penalty: 1.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
+            logit_bias: None,
             generated_ids: &[],
             seed: Some(42),
             token_count: 0,
@@ -342,9 +377,11 @@ mod tests {
                     temperature: 1.0,
                     top_p: 1.0,
                     top_k: 2,
+                    min_p: 0.0,
                     repetition_penalty: 1.0,
                     frequency_penalty: 0.0,
                     presence_penalty: 0.0,
+                    logit_bias: None,
                     generated_ids: &[],
                     seed: Some(seed),
                     token_count: 0,
@@ -371,9 +408,11 @@ mod tests {
                     temperature: 1.0,
                     top_p: 0.5,
                     top_k: 0,
+                    min_p: 0.0,
                     repetition_penalty: 1.0,
                     frequency_penalty: 0.0,
                     presence_penalty: 0.0,
+                    logit_bias: None,
                     generated_ids: &[],
                     seed: Some(seed),
                     token_count: 0,
@@ -397,14 +436,77 @@ mod tests {
                 temperature: 0.0, // greedy so result is deterministic
                 top_p: 1.0,
                 top_k: 0,
+                min_p: 0.0,
                 repetition_penalty: 10.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
+                logit_bias: None,
                 generated_ids: &[0], // token 0 was already generated
                 seed: None,
                 token_count: 1,
             },
         );
         assert_eq!(token, 1, "penalised token 0 should lose to token 1");
+    }
+
+    fn greedy_params<'a>(
+        logit_bias: Option<&'a std::collections::HashMap<i32, f32>>,
+    ) -> SamplerParams<'a> {
+        SamplerParams {
+            temperature: 0.0,
+            top_p: 1.0,
+            top_k: 0,
+            min_p: 0.0,
+            repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            logit_bias,
+            generated_ids: &[],
+            seed: None,
+            token_count: 0,
+        }
+    }
+
+    #[test]
+    fn logit_bias_forces_a_token() {
+        // Token 2 has the lowest logit but a huge positive bias makes it win.
+        let logits = vec![5.0f32, 4.0, 0.0];
+        let mut bias = std::collections::HashMap::new();
+        bias.insert(2, 100.0);
+        assert_eq!(sample_token(&logits, greedy_params(Some(&bias))), 2);
+    }
+
+    #[test]
+    fn logit_bias_bans_a_token() {
+        // Token 0 is the top logit but a large negative bias eliminates it.
+        let logits = vec![5.0f32, 4.0, 0.0];
+        let mut bias = std::collections::HashMap::new();
+        bias.insert(0, -100.0);
+        assert_eq!(sample_token(&logits, greedy_params(Some(&bias))), 1);
+    }
+
+    #[test]
+    fn min_p_keeps_only_dominant_token() {
+        // Token 3 dominates; min_p = 0.5 drops every token below half its probability.
+        let logits = vec![0.0f32, 0.0, 0.0, 10.0];
+        for seed in 0u64..20 {
+            let t = sample_token(
+                &logits,
+                SamplerParams {
+                    temperature: 1.0,
+                    top_p: 1.0,
+                    top_k: 0,
+                    min_p: 0.5,
+                    repetition_penalty: 1.0,
+                    frequency_penalty: 0.0,
+                    presence_penalty: 0.0,
+                    logit_bias: None,
+                    generated_ids: &[],
+                    seed: Some(seed),
+                    token_count: 0,
+                },
+            );
+            assert_eq!(t, 3, "min_p=0.5 must keep only the dominant token");
+        }
     }
 }

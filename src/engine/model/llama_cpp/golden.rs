@@ -179,6 +179,10 @@ fn golden_chunked_prefill_matches_single_shot() {
         skip_prefix_tokens: 0,
         prefix_seq_id: None,
         prefill_pos,
+        grammar: None,
+        min_p: 0.0,
+        min_tokens: 0,
+        logit_bias: None,
     };
 
     // argmax of the final-position logits — robust to tiny fp reduction-order diffs.
@@ -254,6 +258,10 @@ fn golden_context_shift_continues_past_n_ctx() {
         skip_prefix_tokens: 0,
         prefix_seq_id: None,
         prefill_pos: 0,
+        grammar: None,
+        min_p: 0.0,
+        min_tokens: 0,
+        logit_bias: None,
     };
 
     // Prefill the prompt on seq 0.
@@ -287,6 +295,222 @@ fn golden_context_shift_continues_past_n_ctx() {
     }
 
     assert!(rolled > 0, "the loop must have triggered at least one roll");
+}
+
+/// Guided decoding (0.14, S1) must constrain output to the grammar. A grammar that
+/// only admits `yes` or `no` must force the generated text to be exactly one of them —
+/// every other token is masked to -inf before sampling, so the model cannot escape it.
+#[test]
+fn golden_grammar_constrains_output() {
+    let m = golden!();
+    let grammar: std::sync::Arc<str> = std::sync::Arc::from("root ::= \"yes\" | \"no\"");
+    let prompt = m
+        .tokenize("Is the sky blue? Answer with one word:")
+        .unwrap();
+
+    let mk_req = |last: Option<i32>, ctx_len: usize| InferenceRequestForModel {
+        id: 1,
+        prompt_tokens: prompt.clone(),
+        last_token: last,
+        generated_tokens: 0,
+        max_new_tokens: 8,
+        context_len: ctx_len,
+        kv_seq_id: 0,
+        temperature: 0.0, // greedy *within* the grammar-allowed set
+        top_p: 1.0,
+        top_k: 0,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        seed: None,
+        generated_token_ids: vec![],
+        skip_prefix_tokens: 0,
+        prefix_seq_id: None,
+        prefill_pos: 0,
+        grammar: Some(grammar.clone()),
+        min_p: 0.0,
+        min_tokens: 0,
+        logit_bias: None,
+    };
+
+    // Prefill seeds the grammar sampler and yields the first constrained token.
+    let pre = m.do_prefill(&[1], &[mk_req(None, 0)], 0).unwrap();
+    let mut next = pre[0].logits.clone().unwrap().sampled_token;
+
+    // Decode until the grammar allows an end-of-generation token, collecting the
+    // constrained pieces. Same position bookkeeping as the context-shift golden:
+    // the token is written at position `live` (ctx_len = live + 1).
+    let mut gen: Vec<i32> = Vec::new();
+    let mut live = prompt.len();
+    for _ in 0..8 {
+        if m.is_eog_token(next) {
+            break;
+        }
+        gen.push(next);
+        let out = m.do_decode(&[1], &[mk_req(Some(next), live + 1)]).unwrap();
+        next = out[0].1.sampled_token;
+        live += 1;
+    }
+
+    let mut bytes = Vec::new();
+    for &t in &gen {
+        bytes.extend(m.token_to_piece_bytes(t));
+    }
+    let text = String::from_utf8_lossy(&bytes).replace(super::SPM_SPACE, " ");
+    let out = text.trim();
+    assert!(
+        out == "yes" || out == "no",
+        "grammar `root ::= \"yes\" | \"no\"` must force output to yes/no, got {out:?}"
+    );
+
+    // The grammar sampler exists after use and frees cleanly (no leak / no double-free).
+    assert!(
+        m.grammars.contains_key(&1),
+        "grammar sampler must be cached"
+    );
+    m.free_grammar(1);
+    assert!(
+        !m.grammars.contains_key(&1),
+        "free_grammar must drop the sampler"
+    );
+}
+
+/// JSON-schema guided decoding (0.14, S2) must yield JSON that parses and conforms to
+/// the schema. Converts a small object schema to GBNF (the Rust converter), constrains
+/// generation with it, and asserts the output is a valid JSON object with the required
+/// field of the right type — proving the generated grammar is real, valid GBNF.
+#[test]
+fn golden_json_schema_constrains_to_valid_json() {
+    let m = golden!();
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": { "answer": { "type": "boolean" } },
+        "required": ["answer"]
+    });
+    let gbnf = crate::api::shared::json_schema::schema_to_gbnf(&schema).unwrap();
+    let grammar: std::sync::Arc<str> = std::sync::Arc::from(gbnf.as_str());
+    let prompt = m.tokenize("Is the sky blue? Reply as JSON:").unwrap();
+
+    let mk_req = |last: Option<i32>, ctx_len: usize| InferenceRequestForModel {
+        id: 1,
+        prompt_tokens: prompt.clone(),
+        last_token: last,
+        generated_tokens: 0,
+        max_new_tokens: 64,
+        context_len: ctx_len,
+        kv_seq_id: 0,
+        temperature: 0.0,
+        top_p: 1.0,
+        top_k: 0,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        seed: None,
+        generated_token_ids: vec![],
+        skip_prefix_tokens: 0,
+        prefix_seq_id: None,
+        prefill_pos: 0,
+        grammar: Some(grammar.clone()),
+        min_p: 0.0,
+        min_tokens: 0,
+        logit_bias: None,
+    };
+
+    let pre = m.do_prefill(&[1], &[mk_req(None, 0)], 0).unwrap();
+    let mut next = pre[0].logits.clone().unwrap().sampled_token;
+    let mut gen: Vec<i32> = Vec::new();
+    let mut live = prompt.len();
+    for _ in 0..64 {
+        if m.is_eog_token(next) {
+            break;
+        }
+        gen.push(next);
+        let out = m.do_decode(&[1], &[mk_req(Some(next), live + 1)]).unwrap();
+        next = out[0].1.sampled_token;
+        live += 1;
+    }
+    let mut bytes = Vec::new();
+    for &t in &gen {
+        bytes.extend(m.token_to_piece_bytes(t));
+    }
+    let text = String::from_utf8_lossy(&bytes).replace(super::SPM_SPACE, " ");
+    let parsed: serde_json::Value = serde_json::from_str(text.trim())
+        .unwrap_or_else(|e| panic!("constrained output must be valid JSON, got {text:?}: {e}"));
+    assert!(
+        parsed
+            .get("answer")
+            .map(|v| v.is_boolean())
+            .unwrap_or(false),
+        "output must be an object with a boolean `answer`, got {parsed}"
+    );
+    m.free_grammar(1);
+}
+
+/// `min_tokens` (0.14) must suppress end-of-generation until the floor is reached. The
+/// model's EOG set is precomputed at load; with `min_tokens` active, `sample_constrained`
+/// masks those ids, so none of the first `min_tokens` generated tokens may be an EOG.
+#[test]
+fn golden_min_tokens_suppresses_eog() {
+    let m = golden!();
+    assert!(
+        !m.eog_tokens.is_empty(),
+        "the model's end-of-generation set must be precomputed"
+    );
+    assert!(
+        m.eog_tokens.iter().all(|&id| m.is_eog_token(id)),
+        "every precomputed eog id must actually be an EOG token"
+    );
+
+    // A prompt that invites a very short answer — a naive decode could emit EOS quickly.
+    let prompt = m.tokenize("Reply with just 'ok'.").unwrap();
+    let floor = 6usize;
+
+    let mk_req = |last: Option<i32>, ctx_len: usize, generated: usize| InferenceRequestForModel {
+        id: 1,
+        prompt_tokens: prompt.clone(),
+        last_token: last,
+        generated_tokens: generated,
+        max_new_tokens: 32,
+        context_len: ctx_len,
+        kv_seq_id: 0,
+        temperature: 0.0,
+        top_p: 1.0,
+        top_k: 0,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        seed: None,
+        generated_token_ids: vec![],
+        skip_prefix_tokens: 0,
+        prefix_seq_id: None,
+        prefill_pos: 0,
+        grammar: None,
+        min_p: 0.0,
+        min_tokens: floor,
+        logit_bias: None,
+    };
+
+    // Prefill must also respect min_tokens (generated_tokens == 0 < floor).
+    let pre = m.do_prefill(&[1], &[mk_req(None, 0, 0)], 0).unwrap();
+    let mut next = pre[0].logits.clone().unwrap().sampled_token;
+    assert!(
+        !m.is_eog_token(next),
+        "first token must not be EOG under min_tokens"
+    );
+
+    let mut live = prompt.len();
+    for i in 1..floor {
+        // generated_tokens = i (< floor) keeps EOG suppressed.
+        let out = m
+            .do_decode(&[1], &[mk_req(Some(next), live + 1, i)])
+            .unwrap();
+        next = out[0].1.sampled_token;
+        assert!(
+            !m.is_eog_token(next),
+            "token {i} must not be EOG while below the min_tokens floor"
+        );
+        live += 1;
+    }
 }
 
 /// tokenize → detokenize must reconstruct tricky text. Uses the raw-byte piece

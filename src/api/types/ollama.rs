@@ -121,6 +121,9 @@ pub struct OllamaOptions {
     pub top_p: Option<f32>,
     #[serde(default)]
     pub top_k: Option<u32>,
+    /// Min-P sampling threshold (mirrors upstream Ollama).
+    #[serde(default)]
+    pub min_p: Option<f32>,
     #[serde(default)]
     pub repeat_penalty: Option<f32>,
     #[serde(default)]

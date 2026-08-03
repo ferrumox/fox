@@ -1,3 +1,5 @@
+use std::ffi::CString;
+
 use anyhow::{anyhow, Result};
 
 use crate::engine::ffi;
@@ -184,20 +186,7 @@ impl LlamaCppModel {
             let logits_slice: &[f32] =
                 unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
             let sampled = if let Some(r) = req {
-                sample_token(
-                    logits_slice,
-                    SamplerParams {
-                        temperature: r.temperature,
-                        top_p: r.top_p,
-                        top_k: r.top_k,
-                        repetition_penalty: r.repetition_penalty,
-                        frequency_penalty: r.frequency_penalty,
-                        presence_penalty: r.presence_penalty,
-                        generated_ids: &r.generated_token_ids,
-                        seed: r.seed,
-                        token_count: r.generated_tokens,
-                    },
-                )
+                self.sample_constrained(r, logits_slice)
             } else {
                 sample_greedy(logits_slice)
             };
@@ -272,20 +261,7 @@ impl LlamaCppModel {
             let logits_slice: &[f32] =
                 unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab as usize) };
             let sampled = if let Some(r) = req {
-                sample_token(
-                    logits_slice,
-                    SamplerParams {
-                        temperature: r.temperature,
-                        top_p: r.top_p,
-                        top_k: r.top_k,
-                        repetition_penalty: r.repetition_penalty,
-                        frequency_penalty: r.frequency_penalty,
-                        presence_penalty: r.presence_penalty,
-                        generated_ids: &r.generated_token_ids,
-                        seed: r.seed,
-                        token_count: r.generated_tokens,
-                    },
-                )
+                self.sample_constrained(r, logits_slice)
             } else {
                 sample_greedy(logits_slice)
             };
@@ -295,6 +271,123 @@ impl LlamaCppModel {
 
         unsafe { ffi::llama_batch_free(batch) };
         Ok(results)
+    }
+
+    /// Sample one token from `logits`, honoring the request's GBNF grammar (mask
+    /// forbidden tokens, then advance the grammar with the pick), `min_tokens` (suppress
+    /// end-of-generation until the floor is reached), and the sampler knobs (`min_p`,
+    /// `logit_bias`, temperature, top-k/p, penalties). Without a grammar or an active
+    /// EOG suppression it is exactly `sample_token`.
+    pub(super) fn sample_constrained(&self, req: &InferenceRequestForModel, logits: &[f32]) -> i32 {
+        let params = SamplerParams {
+            temperature: req.temperature,
+            top_p: req.top_p,
+            top_k: req.top_k,
+            min_p: req.min_p,
+            repetition_penalty: req.repetition_penalty,
+            frequency_penalty: req.frequency_penalty,
+            presence_penalty: req.presence_penalty,
+            logit_bias: req.logit_bias.as_deref(),
+            generated_ids: &req.generated_token_ids,
+            seed: req.seed,
+            token_count: req.generated_tokens,
+        };
+
+        let grammar = req.grammar.as_deref();
+        let suppress_eog = req.min_tokens > req.generated_tokens && !self.eog_tokens.is_empty();
+
+        // Fast path: no grammar and nothing to mask → sample the raw logits directly.
+        if grammar.is_none() && !suppress_eog {
+            return sample_token(logits, params);
+        }
+
+        // Otherwise build a working buffer: the grammar-masked logits if a grammar is
+        // set (falling back to a copy if it failed to parse), else a plain copy.
+        let mut buf = match grammar {
+            Some(g) => self
+                .grammar_mask(req.id, g, logits)
+                .unwrap_or_else(|| logits.to_vec()),
+            None => logits.to_vec(),
+        };
+        // min_tokens: forbid end-of-generation until enough tokens have been produced.
+        if suppress_eog {
+            for &id in &self.eog_tokens {
+                if (id as usize) < buf.len() {
+                    buf[id as usize] = f32::NEG_INFINITY;
+                }
+            }
+        }
+
+        let tok = sample_token(&buf, params);
+        if grammar.is_some() {
+            self.grammar_accept(req.id, tok);
+        }
+        tok
+    }
+
+    /// Mask every token the request's grammar forbids to `-inf`, creating the grammar
+    /// sampler lazily on first use. Returns `None` if the grammar string fails to parse.
+    fn grammar_mask(&self, req_id: u64, grammar: &str, logits: &[f32]) -> Option<Vec<f32>> {
+        if !self.grammars.contains_key(&req_id) {
+            let root = CString::new("root").ok()?;
+            let gstr = CString::new(grammar).ok()?;
+            let smpl = unsafe {
+                ffi::llama_sampler_init_grammar(self.vocab, gstr.as_ptr(), root.as_ptr())
+            };
+            if smpl.is_null() {
+                tracing::warn!(
+                    request_id = req_id,
+                    "GBNF grammar failed to parse — generating unconstrained"
+                );
+                return None;
+            }
+            self.grammars
+                .insert(req_id, super::GrammarSampler { ptr: smpl });
+        }
+        let ptr = self.grammars.get(&req_id)?.ptr;
+        if ptr.is_null() {
+            return None;
+        }
+
+        let n = logits.len();
+        let mut data: Vec<ffi::llama_token_data> = logits
+            .iter()
+            .enumerate()
+            .map(|(i, &l)| ffi::llama_token_data {
+                id: i as i32,
+                logit: l,
+                p: 0.0,
+            })
+            .collect();
+        let mut arr = ffi::llama_token_data_array {
+            data: data.as_mut_ptr(),
+            size: n,
+            selected: -1,
+            sorted: false,
+        };
+        // The grammar sampler sets forbidden tokens' logit to -inf in place.
+        unsafe { ffi::llama_sampler_apply(ptr, &mut arr) };
+
+        // Scatter the survivors back by token id; anything the grammar dropped stays
+        // -inf and gets probability 0 through fox's softmax, so it can never be sampled.
+        let mut masked = vec![f32::NEG_INFINITY; n];
+        for k in 0..arr.size {
+            let td = unsafe { *arr.data.add(k) };
+            let id = td.id as usize;
+            if id < n {
+                masked[id] = td.logit;
+            }
+        }
+        Some(masked)
+    }
+
+    /// Advance the request's grammar state with the token that was actually chosen.
+    fn grammar_accept(&self, req_id: u64, token: i32) {
+        if let Some(entry) = self.grammars.get(&req_id) {
+            if !entry.ptr.is_null() {
+                unsafe { ffi::llama_sampler_accept(entry.ptr, token) };
+            }
+        }
     }
 
     pub(super) fn do_get_embeddings(&self, tokens: &[i32]) -> Result<Vec<f32>> {

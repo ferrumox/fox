@@ -34,14 +34,14 @@ accumulate, real *free* memory (not total), clean fallback if a backend fails mi
 | | Class | fox |
 |---|-------|-----|
 | ✅ | Dense (Llama, Mistral, Phi) | |
-| ⚠️ | GQA/MQA (`n_head_kv < n_head`) | `embedding_dim` bug |
+| ✅ | GQA/MQA (`n_head_kv < n_head`) | `embedding_dim` bug fixed (= `n_embd`, 0.11) |
 | ⚠️ | Non-standard head_dim + softcapping (Gemma 2/3) | needs FA=AUTO + head_dim from metadata (patched) |
 | ⚠️ | Sliding-window / local attention (Gemma, Mistral, Phi3) | llama.cpp handles it; fox's paged KV doesn't model it |
 | ⚠️ | MoE (Mixtral, Qwen-MoE, DeepSeek-MoE) | load + CPU offload; approximate sizing |
 | ❌ | MLA / latent KV (DeepSeek-V2/V3) | positional sizing wrong |
 | ⚠️ | Recurrent/hybrid (Mamba, RWKV, Jamba) | detected, prefix-cache off; KV formula N/A |
 | ❌ | Encoder-decoder (T5) | |
-| ⚠️ | Embeddings (BERT, nomic) | dimension bug |
+| ⚠️ | Embeddings (BERT, nomic) | dimension + all-zeros bugs fixed (0.11, golden-verified); always mean-pooled + L2 — dedicated-model pooling (CLS) not auto-detected |
 | ❌ | Vision / multimodal (llava, qwen-vl, gemma3-vision) | image blocks silently dropped |
 | ⚠️ | RoPE scaling (linear/NTK/YaRN, long context) | llama.cpp handles; fox doesn't expose/validate |
 
@@ -82,7 +82,7 @@ vocab (⚠️ some hardcoded literals) · ✅ multi-token UTF-8 reassembly · �
 
 ## 5. Serving / API / runtime
 
-✅ OpenAI + Ollama compat · ✅ SSE/NDJSON streaming · ⚠️ embeddings (dim bug) · ✅ multi-model
+✅ OpenAI + Ollama compat · ✅ SSE/NDJSON streaming · ✅ embeddings (mean-pool + L2; ⚠️ CLS not auto-detected) · ✅ multi-model
 + LRU + keep-alive (⚠️ `max_models=1` default) · ✅ disconnect cancellation · ✅
 preemption/queueing · ✅ auth + CORS · ✅ Prometheus + logs + health.
 ❌ consistent defaults across both APIs · ⚠️/❌ rate-limit/backpressure/max-queue · ❌ OOM

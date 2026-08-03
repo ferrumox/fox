@@ -387,6 +387,147 @@ async fn test_v1_chat_streaming() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Guided decoding – response_format (0.14)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_v1_chat_response_format_json_object_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state("stub", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 4,
+            "response_format": {"type": "json_object"},
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        resp.status(),
+        200,
+        "a json_object response_format must be accepted"
+    );
+}
+
+#[tokio::test]
+async fn test_v1_chat_response_format_bad_schema_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state("stub", dir.path());
+    let app = make_router(&state);
+
+    // A schema fox can't convert to a grammar must be a 400, not a silent fallback.
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 4,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "x", "schema": {"type": "widget"}}
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "an unconvertible json_schema must be rejected with 400"
+    );
+}
+
+#[tokio::test]
+async fn test_v1_chat_logprobs_present_when_requested() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state("stub", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": false,
+            "max_tokens": 4,
+            "logprobs": true,
+            "top_logprobs": 3,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    // The logprobs object (with its content array) is present on the choice when asked.
+    assert!(
+        v["choices"][0]["logprobs"]["content"].is_array(),
+        "logprobs.content must be present when requested: {v}"
+    );
+}
+
+#[tokio::test]
+async fn test_v1_chat_logprobs_absent_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state("stub", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": false,
+            "max_tokens": 4,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert!(
+        v["choices"][0]["logprobs"].is_null(),
+        "logprobs must be omitted when not requested: {v}"
+    );
+}
+
+#[tokio::test]
+async fn test_v1_chat_accepts_min_p_logit_bias_min_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = make_test_state("stub", dir.path());
+    let app = make_router(&state);
+
+    let resp = post_json(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "stub",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": false,
+            "max_tokens": 4,
+            "min_p": 0.05,
+            "min_tokens": 2,
+            "logit_bias": {"100": 5.0, "200": -100.0},
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        resp.status(),
+        200,
+        "min_p / min_tokens / logit_bias must be accepted"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // NDJSON streaming – POST /api/chat  (stream: true)
 // ─────────────────────────────────────────────────────────────────────────────
 
