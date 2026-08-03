@@ -11,6 +11,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.2] - 2026-08-03
+
+Hybrid and recurrent models reuse prompts for the first time. Qwen3.5 — which
+`registry.json` recommends — went from `cached_tokens: 0` for an entire conversation to
+reusing everything up to the last user message.
+
+### Fixed
+
+- **A conversation on a hybrid model re-read itself from scratch on every turn.**
+  Measured on Qwen3.5-9B before this: 20 slot hits, 20 **refused** trims,
+  `cached_tokens` 0 throughout. The prefix was reusable; the *route* to it was not. fox
+  reached a past position by trimming back from where generation stopped, and that
+  rollback spans the whole generated reply — which recurrent state refuses beyond
+  `--rs-rollback` snapshots, and the window that would cover it costs ~453 MB per
+  snapshot.
+
+  Restoring a serialised state has no such limit: it writes the sequence outright. fox
+  already knew how to serialise a sequence, but only when evicting a slot — by which
+  time the blob holds prompt *and* reply, reproducing the problem it would solve.
+  Checkpointing at the **end of prefill** makes the blob cover exactly the prompt, so
+  the next turn restores it and trims two tokens instead of sixty-six.
+
+  A second condition had to go with it: the host-RAM cache was consulted only when it
+  **strictly beat** the live slot. The two tie at 155 tokens, so a usable checkpoint sat
+  in RAM unread while the engine took a slot whose offer it could not honour. Where the
+  KV cannot roll back, a tie now goes to the cache.
+
+  Measured after, 3 rounds, 4 conversations × 6 turns, Qwen3.5-9B: later-turn TTFT
+  **1144 → 750 ms**, `cached_tokens` **0 → 257**, refused trims **20 → 2**. In the same
+  run `llama-server` sits flat at 3200 ms (1.1× from turn 0 to the rest, against fox's
+  3.7×), so fox is **4.3× ahead** where before it had no reuse at all.
+
+### Changed
+
+- **`--cache-ram` is no longer off by default for models whose KV cannot be rolled
+  back.** They get 2048 MB of host RAM implicitly, logged at startup with the reason,
+  and an explicit `--cache-ram` always wins. For these architectures it is not a tuning
+  option but the only route to prompt reuse. Dense models are untouched — they reach the
+  same prefix by trimming, for free.
+
+### Known limits of this fix
+
+Stated because they are measured, not guessed:
+
+- **Turn 0 costs ~500 ms more** — serialising the state, ~53 MB per sequence on this
+  model. Repaid on the following turn and every turn after.
+- **The advantage grows with conversation length; there is no crossover up to 5151
+  prompt tokens.** Later-turn TTFT stays flat at 400-600 ms whatever the history size,
+  because the restore cost barely moves while the prefill avoided scales with the
+  prompt:
+
+  | prompt | checkpoint | turn 0 | later turns | gain |
+  |---|---|---|---|---|
+  | 159 tok | 58 MB | 1228 ms | 586 ms | 2.1× |
+  | 991 | 85 MB | 5325 ms | 396 ms | 13.4× |
+  | 2591 | 135 MB | 14821 ms | 466 ms | 31.8× |
+  | 5151 | 215 MB | 28856 ms | 582 ms | **49.6×** |
+
+  (An earlier draft of this entry claimed the advantage narrowed, from a 549 → 961 ms
+  drift inside one 4-conversation run. That was contention between conversations, not a
+  trend against length, and measuring it properly refuted it.)
+
+- **The limit is memory, not time.** A checkpoint is **~50 MB fixed plus ~32 KB per
+  token** (exact fit across the four sizes above). The 2048 MB default therefore holds
+  ~34 checkpoints of a short conversation but only ~9 at 5000 tokens, and behaviour once
+  the budget evicts is still untested. Scaling the default with the context length rather
+  than fixing it is the obvious next step.
+- **2 of the original 20 refused trims remain**, unexplained. Small, but a loose end
+  rather than a rounded-down zero.
+---
+
 ## [0.20.1] - 2026-08-03
 
 Benchmark harness and design notes only. **No engine changes** — the binary behaves

@@ -107,6 +107,11 @@ pub struct ServeArgs {
     /// one warm without holding any — a reclaimed sequence is copied to host memory and
     /// restored later instead of being re-prefilled. Worth it when VRAM is the scarce
     /// resource and prompts are long. `0` (the default) disables it.
+    /// `0` leaves it to the model: hybrid and recurrent architectures get
+    /// `--cache-ram 2048` implicitly, because for them it is not an optimisation but
+    /// the only way prompt reuse works at all — their KV cannot be trimmed back to a
+    /// past position, so a serialised checkpoint is the only route. Dense models get
+    /// nothing, since they reach the same prefix by trimming, for free.
     #[arg(long, default_value = "0", env = "FOX_CACHE_RAM")]
     pub cache_ram: usize,
 

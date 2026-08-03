@@ -56,7 +56,7 @@ Quantization levels from Q2_K through Q8_0, F16, and F32 are all supported. When
 
 ## Versioning
 
-The current release is **v0.20.1**.
+The current release is **v0.20.2**.
 
 | Version | Highlight |
 |---------|-----------|

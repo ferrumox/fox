@@ -224,11 +224,24 @@ impl Scheduler {
             // slots already offer: restoring a state that covers less than `choice.lcp`
             // would be a memcpy that loses information. On a hit the chosen slot's KV
             // is replaced wholesale, so its own resident tokens no longer apply.
+            //
+            // EXCEPT when the slot's offer cannot actually be taken up. On a KV that
+            // cannot be rolled back, reaching `choice.lcp` means trimming across the
+            // whole generated reply, which the cache refuses — so the slot's LCP is a
+            // promise the engine cannot keep, and a *tied* cache entry beats it because
+            // a restore has no rollback to perform. Requiring the cache to strictly win
+            // is what left Qwen3.5 with 20 slot hits, 20 refused trims and
+            // `cached_tokens` 0 while a usable checkpoint sat in RAM unread.
+            let cache_floor = if self.prefix_reuse_enabled() {
+                choice.lcp
+            } else {
+                choice.lcp.saturating_sub(1)
+            };
             let mut lcp = choice.lcp;
             if allow_reuse {
                 if let Some(hit) = pcache
                     .as_mut()
-                    .and_then(|c| c.take_best(&req.prompt_tokens, choice.lcp))
+                    .and_then(|c| c.take_best(&req.prompt_tokens, cache_floor))
                 {
                     kv_restores.push((slots.seq_id_at(choice.index), hit.data));
                     slots.set_resident(
@@ -494,6 +507,18 @@ impl Scheduler {
                 break;
             }
         }
+    }
+
+    /// The sequence id and prompt tokens of a request that has just finished prefill.
+    ///
+    /// Returns `None` once the request has generated anything, so a checkpoint can only
+    /// ever capture the prompt boundary.
+    pub fn prefilled_sequence(&self, req_id: u64) -> Option<(i32, Vec<i32>)> {
+        let running = self.running_batch.lock().ok()?;
+        running
+            .iter()
+            .find(|r| r.id == req_id && r.generated_tokens <= 1)
+            .map(|r| (r.kv_seq_id, r.prompt_tokens.clone()))
     }
 
     /// Mark request as Finished with the given stop reason.

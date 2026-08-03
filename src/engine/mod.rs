@@ -66,6 +66,14 @@ pub struct InferenceEngine {
     /// than `supports_prefix_cache`, which asks whether KV may be copied *between*
     /// sequences — see `Model::supports_slot_reuse`.
     supports_slot_reuse: bool,
+    /// Serialise a sequence to the host-RAM prompt cache as soon as its prefill ends.
+    ///
+    /// Only for models whose KV cannot be rolled back (hybrid, recurrent). For them the
+    /// resident-slot path is a dead end — reaching a past position means trimming across
+    /// the whole generated reply, which recurrent state refuses beyond `--rs-rollback`
+    /// snapshots. A serialised state has no such limit, and one taken at the end of
+    /// prefill lands exactly on the boundary the next turn diverges from.
+    checkpoint_after_prefill: bool,
     /// Text forms of the model's EOS and EOT tokens, used as base stop sequences.
     model_stop_tokens: Vec<String>,
     // See `EngineOptions` for the semantics of these two.
@@ -144,6 +152,9 @@ impl InferenceEngine {
             metrics,
             supports_prefix_cache,
             supports_slot_reuse,
+            // Dense models reach the same prefix by trimming, which is free; paying for
+            // a serialised copy of every prompt would be a straight loss for them.
+            checkpoint_after_prefill: !supports_prefix_cache,
             model_stop_tokens,
             max_prefill_chunk: options.max_prefill_chunk,
             context_shift: options.context_shift,

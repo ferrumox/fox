@@ -172,10 +172,27 @@ pub(super) async fn load_model(
         })
     };
 
+    // A model that cannot roll its KV back reaches a past prefix only by restoring a
+    // serialised state, so for it the host-RAM prompt cache is not a tuning option — it
+    // is the mechanism. Left at 0 (the flag's default) such a model reuses nothing at
+    // all, which is what Qwen3.5 did: 20 slot hits, 20 refused trims, cached_tokens 0.
+    // An explicit --cache-ram always wins; this only fills in the 0.
+    const IMPLICIT_CACHE_RAM_BYTES: usize = 2048 * 1024 * 1024;
+    let cache_ram_bytes = if cfg.cache_ram_bytes == 0 && !model.supports_seq_copy() {
+        tracing::info!(
+            mb = IMPLICIT_CACHE_RAM_BYTES / (1024 * 1024),
+            "host-RAM prompt cache enabled implicitly: this model's KV cannot be rolled \
+             back, so a checkpoint is the only way it can reuse a prompt"
+        );
+        IMPLICIT_CACHE_RAM_BYTES
+    } else {
+        cfg.cache_ram_bytes
+    };
+
     let scheduler = Arc::new(
         Scheduler::with_max_queue_depth(kv_cache.clone(), max_batch_size, max_queue_depth)
             .with_kv_reuse(cfg.kv_reuse, cfg.slot_prompt_similarity)
-            .with_prompt_cache(cfg.cache_ram_bytes),
+            .with_prompt_cache(cache_ram_bytes),
     );
     let engine = Arc::new(InferenceEngine::new(
         model,

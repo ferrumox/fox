@@ -245,11 +245,58 @@ impl InferenceEngine {
                 // Not done: emit this token and continue through the committed list.
                 self.scheduler
                     .update_after_token(*req_id, token_id, from_prefill);
+
+                // Checkpoint the sequence the moment prefill ends, for models whose KV
+                // cannot be rolled back.
+                //
+                // On a hybrid or recurrent cache, reuse cannot be reached by *trimming*
+                // back from where generation stopped: the rollback would span the whole
+                // reply and recurrent state only rolls back within `--rs-rollback`
+                // snapshots. Restoring a serialised state has no such limit — it writes
+                // the sequence outright. Saving here rather than at eviction is the
+                // whole trick: the blob then covers exactly the prompt, so the next turn
+                // restores it and trims two tokens instead of sixty.
+                //
+                // Measured on Qwen3.5-9B before this existed: 20 slot hits, 20 refused
+                // trims, `cached_tokens` 0 for the entire conversation.
+                if from_prefill && self.checkpoint_after_prefill {
+                    self.checkpoint_prefilled_sequence(*req_id);
+                }
                 emitted_this_step += 1;
             }
         }
 
         Ok(())
+    }
+}
+
+impl super::InferenceEngine {
+    /// Serialise a just-prefilled sequence into the host-RAM prompt cache.
+    ///
+    /// Keyed by the prompt tokens alone, deliberately: the point of the checkpoint is
+    /// to be a *prompt-boundary* state. Keying it by prompt+generated, the way an
+    /// eviction save does, would reproduce the problem it exists to solve — the next
+    /// turn would match a blob whose tail it has to roll back past.
+    fn checkpoint_prefilled_sequence(&self, req_id: u64) {
+        let Some((seq_id, tokens)) = self.scheduler.prefilled_sequence(req_id) else {
+            return;
+        };
+        if seq_id < 0 || tokens.is_empty() {
+            return;
+        }
+        match self.model.state_seq_save(seq_id) {
+            Ok(data) => {
+                tracing::debug!(
+                    seq_id,
+                    bytes = data.len(),
+                    tokens = tokens.len(),
+                    "checkpointed a prefilled sequence (model cannot roll back its KV)"
+                );
+                self.scheduler.store_prompt_state(tokens, data);
+            }
+            // Costs a re-prefill next turn, nothing more.
+            Err(e) => tracing::debug!(seq_id, "prefill checkpoint skipped: {e}"),
+        }
     }
 }
 
