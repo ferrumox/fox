@@ -6,40 +6,44 @@ fox ships as a single self-contained binary. There is no runtime to install, no 
 
 ## Pre-built binaries
 
-The fastest way to get started is to download the latest release binary for your platform.
+Releases publish **Linux x86_64** only, in two variants: a CPU build and a **Vulkan**
+build that runs on AMD/Intel iGPUs and any Vulkan-capable GPU (and falls back to CPU on
+its own when there is no device).
 
-### Linux (x86_64)
-
-```bash
-curl -L https://github.com/ferrumox/fox/releases/latest/download/fox-linux-x86_64.tar.gz \
-  | tar xz
-sudo mv fox /usr/local/bin/
-fox --version
-```
-
-### macOS (Apple Silicon)
+### Installer (recommended)
 
 ```bash
-curl -L https://github.com/ferrumox/fox/releases/latest/download/fox-macos-arm64.tar.gz \
-  | tar xz
-sudo mv fox /usr/local/bin/
-fox --version
+curl -fsSL https://github.com/ferrumox/fox/releases/latest/download/install.sh | sh
 ```
 
-### macOS (Intel)
+It detects `/dev/dri` and picks the Vulkan build when a GPU is present, verifies the
+published SHA-256, refuses to start if the target directory is not writable, and prints
+what to do next. Options:
+
+| flag | effect |
+|---|---|
+| `--vulkan` / `--cpu` | force a variant instead of detecting |
+| `--version vX.Y.Z` | install a specific release |
+| `--prefix ~/.local` | install somewhere you own, no `sudo` |
+
+### By hand
 
 ```bash
-curl -L https://github.com/ferrumox/fox/releases/latest/download/fox-macos-x86_64.tar.gz \
-  | tar xz
-sudo mv fox /usr/local/bin/
-fox --version
+V=0.20.2
+curl -LO https://github.com/ferrumox/fox/releases/download/v$V/fox-$V-x86_64-unknown-linux-gnu-vulkan.tar.gz
+curl -LO https://github.com/ferrumox/fox/releases/download/v$V/fox-$V-x86_64-unknown-linux-gnu-vulkan.tar.gz.sha256
+sha256sum -c fox-$V-x86_64-unknown-linux-gnu-vulkan.tar.gz.sha256
+tar xzf fox-$V-x86_64-unknown-linux-gnu-vulkan.tar.gz
 ```
 
-### Windows (x86_64)
+Drop `-vulkan` from the name for the CPU build. Keep the `.so` files next to the binary:
+`fox` is linked with `RPATH=$ORIGIN` and finds its backends nowhere else.
 
-Download `fox-windows-x86_64.zip` from the [releases page](https://github.com/ferrumox/fox/releases/latest), extract it, and place `fox.exe` somewhere on your `PATH`.
+### macOS and Windows
 
-The Windows release includes Vulkan backend support (`ggml-vulkan.dll`). If you have a Vulkan-capable GPU (NVIDIA, AMD, Intel), fox will use it automatically — no CUDA installation required. For NVIDIA GPU with CUDA, `ggml-cuda.dll` is also included.
+Not published as binaries. Use WSL2 with the Linux installer, or build from source
+(below). `install.ps1` exists and will tell you the same thing rather than failing with a
+404 — it checks the release's assets before promising anything.
 
 ---
 

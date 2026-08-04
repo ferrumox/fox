@@ -152,6 +152,51 @@ vulkan:
 		echo "Vulkan bundle -> $(VULKAN_OUT)/  (fox, fox-bench, libggml-vulkan.so)"; \
 		echo "Run: ./$(VULKAN_OUT)/fox serve --model-path <model.gguf>"
 
+# Prepare a release: refuses to continue if the tree is dirty, the CHANGELOG has no
+# entry, ci or e2e fail, or the version does not end up matching in every file. Stops at
+# the release commit — tagging is `make publish`, deliberately a separate step.
+#   make release VERSION=0.21.0
+release:
+	@test -n "$(VERSION)" || (echo "uso: make release VERSION=X.Y.Z" && exit 1)
+	./scripts/release.sh $(VERSION)
+
+# Tag ONE release from main and verify a Release run actually started. Never
+# `git push --tags`: GitHub fires no workflow when more than three tags arrive at once.
+#   make publish VERSION=0.21.0
+publish:
+	@test -n "$(VERSION)" || (echo "uso: make publish VERSION=X.Y.Z" && exit 1)
+	./scripts/publish.sh $(VERSION)
+
+# Soak test — sustained mixed traffic against a REAL server, then a verdict.
+#
+# Covers what nothing else does: `make e2e` is 22 checks over two minutes and every
+# other test starts from a fresh process, so a leak, a KV pool that never returns or
+# latency drift are all invisible. Traffic mixes conversations, one-off prompts and
+# clients that hang up mid-stream, because each shape has broken something before.
+#
+#   make soak SOAK_MODEL=~/.cache/ferrumox/models/llama-3.2-1b-instruct-q8_0.gguf
+#   make soak SOAK_MODEL=... SOAK_MINUTES=60 SOAK_CONC=8
+SOAK_MODEL ?=
+SOAK_MINUTES ?= 10
+SOAK_CONC ?= 4
+SOAK_PORT ?= 8410
+soak:
+	@test -n "$(SOAK_MODEL)" || (echo "Set SOAK_MODEL=/path/to/model.gguf" && exit 1)
+	cargo build --release --bin fox
+	@echo "arrancando fox en :$(SOAK_PORT)…"
+	@./target/release/fox serve --model-path "$(SOAK_MODEL)" --host 127.0.0.1 \
+		--port $(SOAK_PORT) --max-context-len 4096 --max-batch-size $(SOAK_CONC) \
+		> /tmp/fox-soak.log 2>&1 & \
+	for i in $$(seq 1 90); do \
+		curl -sf -m 2 http://127.0.0.1:$(SOAK_PORT)/health >/dev/null && break; sleep 2; \
+	done; \
+	python3 scripts/soak.py http://127.0.0.1:$(SOAK_PORT) \
+		"$$(basename "$(SOAK_MODEL)" .gguf)" $(SOAK_MINUTES) $(SOAK_CONC); \
+	rc=$$?; \
+	pid=$$(ss -lptn "sport = :$(SOAK_PORT)" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1); \
+	[ -n "$$pid" ] && kill $$pid; \
+	exit $$rc
+
 # Install the pre-push git hook so CI checks run automatically on every push.
 setup:
 	bash scripts/install-hooks.sh

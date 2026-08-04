@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/ferrumox/fox/actions/workflows/ci.yml/badge.svg)](https://github.com/ferrumox/fox/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
-[![Version](https://img.shields.io/badge/version-0.20.2-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.20.3-green.svg)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://rustup.rs/)
 [![GitHub Stars](https://img.shields.io/github/stars/ferrumox/fox?style=social)](https://github.com/ferrumox/fox/stargazers)
 
@@ -23,12 +23,12 @@ Fox is dual-licensed MIT OR Apache-2.0 and stays that way. There is no paid tier
 ## Try it in 30 seconds
 
 ```bash
-# Linux / macOS
+# Linux x86_64 — picks the Vulkan build when a GPU is present, CPU otherwise
 curl -fsSL https://github.com/ferrumox/fox/releases/latest/download/install.sh | sh
-
-# Windows
-irm https://raw.githubusercontent.com/ferrumox/fox/main/install.ps1 | iex
 ```
+
+macOS and Windows: build from source (below), or run the Linux installer under WSL2.
+Prebuilt binaries are Linux x86_64 for now.
 
 ```bash
 # Pull a model and start (qwen3.6 is 22 GB; qwen3.5 is 2.7 GB if you want a quicker first run)
@@ -196,32 +196,39 @@ Auto-detection priority: **CUDA → ROCm → Vulkan → Metal → CPU**.
 
 ## Installation
 
-### Linux / macOS
+### Linux x86_64
 
 ```bash
 curl -fsSL https://github.com/ferrumox/fox/releases/latest/download/install.sh | sh
 ```
 
-Or download a binary directly:
+It detects `/dev/dri` and installs the **Vulkan** build when a GPU is present (AMD/Intel
+iGPUs included) or the **CPU** build otherwise, verifies the published checksum, and
+tells you if `$PREFIX/bin` is not on your `PATH`. Override with `--vulkan`, `--cpu`,
+`--version vX.Y.Z` or `--prefix ~/.local`.
+
+Or take the tarball yourself — two variants per release:
 
 ```bash
-# Linux x86_64
-curl -L https://github.com/ferrumox/fox/releases/latest/download/fox-linux-x86_64 -o fox && chmod +x fox
-
-# macOS Apple Silicon
-curl -L https://github.com/ferrumox/fox/releases/latest/download/fox-macos-arm64 -o fox && chmod +x fox
-
-# macOS Intel
-curl -L https://github.com/ferrumox/fox/releases/latest/download/fox-macos-x86_64 -o fox && chmod +x fox
+V=0.20.2
+curl -LO https://github.com/ferrumox/fox/releases/download/v$V/fox-$V-x86_64-unknown-linux-gnu-vulkan.tar.gz
+tar xzf fox-$V-x86_64-unknown-linux-gnu-vulkan.tar.gz     # drop -vulkan for the CPU build
 ```
 
-### Windows
+The `.so` files in the tarball must stay beside the binary: `fox` is linked with
+`RPATH=$ORIGIN` and looks for its backends nowhere else.
 
-```powershell
-irm https://raw.githubusercontent.com/ferrumox/fox/main/install.ps1 | iex
+### macOS and Windows
+
+No prebuilt binaries yet — the release workflow builds Linux x86_64 only. Either run the
+Linux installer under WSL2, or build from source:
+
+```bash
+git clone --recurse-submodules https://github.com/ferrumox/fox
+cd fox && cargo build --release --bin fox
 ```
 
-Or download [`fox-windows-x86_64.exe`](https://github.com/ferrumox/fox/releases/latest/download/fox-windows-x86_64.exe) directly.
+`--recurse-submodules` is not optional: llama.cpp is vendored, not a system dependency.
 
 ### Build from source
 

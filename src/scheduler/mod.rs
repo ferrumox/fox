@@ -1638,4 +1638,88 @@ mod tests {
         assert_eq!(req.skip_prefix_tokens, 0, "no reuse of any kind");
         assert!(req.prefix_seq_id.is_none());
     }
+
+    /// A checkpoint may only ever capture the prompt boundary.
+    ///
+    /// `prefilled_sequence` is what the engine asks after prefill ends, and the whole
+    /// point of checkpointing *there* rather than at eviction is that the blob then
+    /// covers exactly the prompt. If it kept answering once generation was under way,
+    /// the saved state would include the reply — reproducing the problem the checkpoint
+    /// exists to avoid, since the next turn would then have to roll back past it.
+    #[test]
+    fn prefilled_sequence_stops_answering_once_generation_starts() {
+        let kv = test_kv(16);
+        let sched = Scheduler::new(kv, 4);
+        let tokens: Vec<i32> = (1..=20).collect();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                7,
+                tokens.clone(),
+                8,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
+        sched.schedule_step();
+
+        // First token: prefill has just ended, this is the boundary worth saving.
+        sched.update_after_token(7, 101, true);
+        let got = sched
+            .prefilled_sequence(7)
+            .expect("boundary is checkpointable");
+        assert_eq!(got.1, tokens, "the blob must be keyed by the prompt alone");
+
+        // Second token: the sequence now holds generated KV too.
+        sched.update_after_token(7, 102, false);
+        assert!(
+            sched.prefilled_sequence(7).is_none(),
+            "past the prompt boundary a checkpoint would capture the reply as well"
+        );
+    }
+
+    /// When the KV cannot be rolled back, a *tied* cache entry beats the live slot.
+    ///
+    /// The slot advertises an LCP it cannot deliver on such a model: reaching it means
+    /// trimming across the generated reply, which a recurrent cache refuses. Requiring
+    /// the cache to win *strictly* is what left Qwen3.5 with 20 slot hits, 20 refused
+    /// trims and `cached_tokens` 0 while a usable checkpoint sat in RAM unread.
+    ///
+    /// The tie is the whole point, so it has to be built: a parked slot holding the
+    /// tokens (which is what makes `choice.lcp` non-zero) *and* a checkpoint covering
+    /// the same ones. An earlier version of this test stored only the checkpoint, so
+    /// `choice.lcp` was 0, there was no tie, and it passed with the fix reverted.
+    #[test]
+    fn a_tied_checkpoint_wins_when_the_kv_cannot_roll_back() {
+        let kv = test_kv(16);
+        let sched = Scheduler::new(kv, 4).with_prompt_cache(4096);
+        sched.set_slot_reuse(true);
+
+        let tokens: Vec<i32> = (1..=18).collect();
+        // Park a sequence holding exactly these tokens: now a slot offers them.
+        run_and_park(&sched, 42, tokens.clone(), &[777]);
+        sched.schedule_step();
+        // And a checkpoint covering the same prompt, as the engine stores after prefill.
+        sched.store_prompt_state(tokens.clone(), vec![0xAB; 64]);
+
+        // Hybrid/recurrent: the slot's offer cannot actually be taken up.
+        sched.set_prefix_reuse(false);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                9,
+                tokens,
+                5,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
+        let batch = sched.schedule_step();
+
+        assert!(
+            !batch.kv_restores.is_empty(),
+            "a checkpoint tying the slot must still be restored when the KV cannot roll back"
+        );
+    }
 }

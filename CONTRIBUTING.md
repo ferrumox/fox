@@ -217,6 +217,69 @@ To add a new model:
 - **PagedAttention-style KV cache** — prevents memory fragmentation under concurrent load. Enables accurate eviction without OOM.
 - **mpsc channel for token streaming** — decouples the engine loop from the HTTP handler. The handler detects client disconnects via `send().is_err()` without polling.
 
+## Cutting a release
+
+The version bump, the CHANGELOG entry and `make e2e` come first. **The tag comes last,
+immediately before pushing** — never earlier.
+
+This is a rule because breaking it costs more than it looks. On 2026-08-03 three tags
+were created the moment their release commit landed, and every one of them had to be
+deleted and recreated when a later measurement showed the CHANGELOG claiming something
+untrue: a default that did not do what the entry said, and an "advantage narrows" line
+that a proper experiment reversed. Nothing was pushed, so nothing broke — but a tag that
+moves is not a marker, and `main`/`develop` currently sit far behind, which makes tags
+the only durable record these releases have.
+
+The `release: X.Y.Z` commit is the marker while work continues. Tag that commit when you
+push it, not when you write it. If a marker is genuinely needed sooner, use an annotated
+`-rc1` tag: the churn then shows up in history instead of being hidden behind a
+`git tag -d`.
+
+Write the CHANGELOG entry first — including what the release does **not** do and any
+measured limits — then let the tooling do the rest:
+
+```bash
+make release VERSION=0.21.0    # checks, bump, `release: X.Y.Z` commit
+# merge to develop, snapshot to main (below)
+make publish VERSION=0.21.0    # ONE tag, then verifies a Release run started
+```
+
+`make release` refuses to continue on a dirty tree, from `main`, when the tag already
+exists locally or on the remote, when the CHANGELOG has no entry for the version (or an
+empty one), when `make ci` or `make e2e` fail, or when the bumped version does not end
+up matching in `Cargo.toml`, `Cargo.lock` and the README badge. That last check exists
+because 0.14 through 0.18 shipped with `Cargo.toml` still reading `0.11.0` — six
+releases whose binary reported the wrong version.
+
+`make publish` pushes **one** tag and then asks the API whether a Release run actually
+started. Never `git push --tags`: GitHub fires **no** workflow when more than three tags
+arrive in a single push, which is how ten tags were published and nothing was built.
+`release.yml` also has `workflow_dispatch` now, so a missed trigger is re-run rather
+than fixed by deleting a tag.
+
+### How `develop` and `main` differ
+
+They are not two views of one history — `git merge-base main develop` is **empty**. Treat
+them as two mechanisms:
+
+- **`develop`** takes ordinary merges, one per feature branch, keeping the merge commit:
+  `git merge --no-ff feature/0.X -m "Merge branch 'feature/0.X' into develop"`.
+- **`main`** takes a **squashed snapshot per released version**, in order, one commit each
+  (`release: vX.Y.Z`), **and the tag lives there**. It is 10 linear single-parent commits
+  whose tree matches `develop`'s exactly; merging into it would splice unrelated
+  histories.
+
+  ```bash
+  git checkout main
+  git read-tree -u --reset <the release commit>   # take that version's tree wholesale
+  git commit -m "release: vX.Y.Z"
+  git tag vX.Y.Z
+  ```
+
+Version by version, tag by tag. Never one snapshot covering several releases: `main` is
+the only record of what each version actually contained, and collapsing two of them
+throws that away.
+
 ## Pull request process
 
 `develop` is the active trunk; `main` is the release branch. Branch from and target `develop`.

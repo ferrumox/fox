@@ -5,6 +5,16 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+-rc*'
+  # Manual re-run. Needed because a tag push is not a reliable trigger: GitHub fires no
+  # workflow at all when more than three tags arrive in one push, which is how ten
+  # releases were tagged and none were ever built. Without this the only recovery was
+  # deleting the tag and pushing it again.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.21.0)'
+        required: true
+        type: string
 
 # Two reliable Linux x86_64 targets: a plain CPU build (broad compatibility) and a
 # Vulkan build (AMD/Intel iGPUs and any Vulkan GPU). Both validated. Other platforms
@@ -17,7 +27,35 @@ permissions:
   contents: write
 
 jobs:
+  # Refuse to publish a tag whose tree disagrees with it. Versions 0.14 through 0.18
+  # shipped with `Cargo.toml` still reading 0.11.0 — six releases whose binary reported
+  # the wrong version, because nothing checked.
+  verify-version:
+    name: Version matches tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Cargo.toml must equal the tag
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          WANT="${TAG#v}"; WANT="${WANT%%-rc*}"
+          GOT=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "tag=$TAG  Cargo.toml=$GOT"
+          if [ "$GOT" != "$WANT" ]; then
+            echo "::error::Cargo.toml says $GOT but the tag says $WANT"
+            exit 1
+          fi
+      - name: CHANGELOG must describe it
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          WANT="${TAG#v}"; WANT="${WANT%%-rc*}"
+          grep -q "^## \[$WANT\]" CHANGELOG.md || {
+            echo "::error::CHANGELOG.md has no '## [$WANT]' entry"; exit 1; }
+
   build:
+    needs: verify-version
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -87,6 +125,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           prerelease: ${{ contains(github.ref_name, '-rc') }}
+          # install.sh and install.ps1 ride along with every release. The README has
+          # always advertised
+          #   curl -fsSL .../releases/latest/download/install.sh | sh
+          # and that URL 404'd, because the only assets uploaded were the tarball and
+          # its checksum. The advertised way to install fox did not work.
           files: |
             ${{ env.ASSET }}
             ${{ env.ASSET_SHA256 }}
+            install.sh
+            install.ps1

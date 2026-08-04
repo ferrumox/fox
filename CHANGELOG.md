@@ -11,6 +11,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.3] - 2026-08-04
+
+The advertised way to install fox did not work. This release makes it work, and is the
+first whose tag actually publishes an installer.
+
+### Fixed
+
+- **`curl … /releases/latest/download/install.sh | sh` returned 404.** The release
+  workflow uploaded the tarball and its checksum and nothing else, so the one-liner
+  printed in the README since the beginning could never have worked. `install.sh` and
+  `install.ps1` now ship as assets of every release.
+- **The Vulkan build was unreachable from the installer.** Each release carries two
+  tarballs — CPU and Vulkan — and `install.sh` did not contain the word "vulkan": it
+  always asked for the plain name. The variant that matters on the AMD/Intel iGPUs fox
+  targets could not be installed by the documented method. It now detects `/dev/dri` and
+  picks the Vulkan build, with `--vulkan` / `--cpu` to override.
+- **The installer offered platforms nobody builds.** macOS and aarch64 were mapped to
+  filenames no workflow produces, so those users got a bare 404 from `curl`. It now says
+  which platforms are published and how to build for the rest. `install.ps1` targeted
+  `x86_64-pc-windows-msvc`, which is not built at all — it now inspects the release's
+  assets, explains WSL2 and building from source, and will start working by itself the
+  day a Windows build is published.
+- **The published checksum was never verified.** Every tarball ships a `.sha256` beside
+  it and nothing read it. It is checked now, and a mismatch aborts.
+- **Documentation advertised five direct downloads that do not exist** —
+  `fox-linux-x86_64`, `fox-macos-arm64`, `fox-macos-x86_64`, `fox-windows-x86_64.exe`
+  and its `.zip`. README, `installation.md`, `quickstart.md` and `index.md` now describe
+  the assets a release really publishes, under their real names.
+
+### Added
+
+- **`make soak`** — sustained mixed traffic against a real server, ending in a verdict.
+  `make e2e` is 22 checks over two minutes and everything below it starts from a fresh
+  process, so a leak, a KV pool that never returns, or latency drift are all invisible.
+  Traffic mixes multi-turn conversations, one-off prompts, and clients that hang up
+  mid-stream — that last shape is where the three prefix-cache lifecycle bugs of 0.15.1
+  lived, and no request-shaped test can see it.
+
+  It checks that the KV floor does **not grow between two load cycles**, rather than
+  that it returns to zero. A drained fox legitimately holds KV: parked sequences keep
+  theirs on purpose, so a single measurement cannot tell parking from a leak. Measured
+  across two runs: 1579 and 1823 requests, zero failures, RSS +0.6%, KV floor 0.0234 →
+  0.0164.
+- Tests for the prefill-checkpoint plumbing shipped untested in 0.20.2: that a
+  checkpoint can only ever capture the prompt boundary, and that a checkpoint tying the
+  live slot still wins when the KV cannot roll back.
+
+---
+
 ## [0.20.2] - 2026-08-03
 
 Hybrid and recurrent models reuse prompts for the first time. Qwen3.5 — which

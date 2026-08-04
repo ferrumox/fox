@@ -7,8 +7,7 @@ This guide gets you from zero to a running inference server in under five minute
 ## 1. Install fox
 
 ```bash
-curl -L https://github.com/ferrumox/fox/releases/latest/download/fox-linux-x86_64.tar.gz \
-  | tar xz
+curl -fsSL https://github.com/ferrumox/fox/releases/latest/download/install.sh | sh
 sudo mv fox /usr/local/bin/
 ```
 

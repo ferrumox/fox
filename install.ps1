@@ -1,7 +1,7 @@
 # install.ps1 — Install fox (ferrumox) on Windows from GitHub Releases.
 #
 # Usage (run in PowerShell as Administrator or with user-writable install dir):
-#   irm https://raw.githubusercontent.com/ferrumox/fox/main/install.ps1 | iex
+#   irm https://github.com/ferrumox/fox/releases/latest/download/install.ps1 | iex
 #
 # Options (set before piping or pass as env vars):
 #   $env:FOX_VERSION = "v1.0.0"          # specific version (default: latest)
@@ -32,6 +32,29 @@ if (-not $Version) {
 $VersionNum = $Version.TrimStart('v')
 $ZipName    = "fox-${VersionNum}-${Target}.zip"
 $Url        = "https://github.com/$Repo/releases/download/$Version/$ZipName"
+
+# Check the asset exists before promising anything. fox's release workflow currently
+# builds Linux x86_64 only — the Windows target was removed pending verification — so
+# this script could never succeed, and said so with a bare 404 from Invoke-WebRequest.
+# Probing the release means the message is accurate today and this script starts working
+# by itself the day a Windows build is published.
+try {
+    $rel = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/tags/$Version"
+    $names = @($rel.assets | ForEach-Object { $_.name })
+} catch { $names = @() }
+if ($names.Count -gt 0 -and ($names -notcontains $ZipName)) {
+    Write-Host ""
+    Write-Host "No Windows build in release $Version." -ForegroundColor Red
+    Write-Host "fox publishes Linux x86_64 binaries only right now. On Windows:"
+    Write-Host ""
+    Write-Host "  - WSL2, then the Linux installer:"
+    Write-Host "      curl -fsSL https://github.com/$Repo/releases/latest/download/install.sh | sh"
+    Write-Host "  - or build it: git clone --recurse-submodules https://github.com/$Repo"
+    Write-Host "                 cd fox; cargo build --release --bin fox"
+    Write-Host ""
+    Write-Host "That release published:" ($names -join ", ")
+    exit 1
+}
 $TmpDir     = Join-Path $env:TEMP "fox-install-$([System.IO.Path]::GetRandomFileName())"
 
 Write-Host "Installing fox $Version..."

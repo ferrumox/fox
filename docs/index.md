@@ -8,7 +8,7 @@ fox is a local LLM inference server written in Rust. It runs GGUF models on your
 
 ```bash
 # Install
-curl -L https://github.com/ferrumox/fox/releases/latest/download/fox-linux-x86_64.tar.gz | tar xz
+curl -fsSL https://github.com/ferrumox/fox/releases/latest/download/install.sh | sh
 sudo mv fox /usr/local/bin/
 
 # Download a model
