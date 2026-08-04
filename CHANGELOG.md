@@ -11,6 +11,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.4] - 2026-08-04
+
+The binary published in 0.20.3 did not start. This fixes the packaging and makes a
+release prove it runs before it is published.
+
+### Fixed
+
+- **The release tarball was missing `libmtmd.so.0`, so the installed binary died on
+  startup:**
+
+  ```
+  error while loading shared libraries: libmtmd.so.0: cannot open shared object file
+  ```
+
+  The workflow bundled `libggml*` and `libllama*` by name. `libmtmd` arrived with vision
+  support in 0.17 and was never added, and no published release had contained the vision
+  code until 0.20.3 — so the omission only became fatal when it shipped.
+  `Dockerfile.vulkan` had always used `lib*.so*`; the release workflow had drifted from
+  it. Now it globs the same way.
+
+- **A release now has to run before it is published.** After packaging, the workflow
+  unpacks its own tarball somewhere else and executes `fox --version`. Packaging had
+  only ever been verified by reading the glob, which is how a release that cannot start
+  reached users. This was found by installing 0.20.3 with its own advertised one-liner
+  and running the result — the check now does that automatically.
+
+---
+
 ## [0.20.3] - 2026-08-04
 
 The advertised way to install fox did not work. This release makes it work, and is the

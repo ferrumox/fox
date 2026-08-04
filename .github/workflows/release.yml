@@ -110,16 +110,32 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           TARBALL="fox-${VERSION}-x86_64-unknown-linux-gnu${{ matrix.suffix }}.tar.gz"
           RELEASE_DIR="target/release"
-          # Bundle binaries + any backend shared libraries built alongside them
-          # (fox has RPATH=$ORIGIN, so it finds them in the same directory).
+          # Every shared library built beside the binaries. NOT a hand-written list of
+          # prefixes: this globbed `libggml*` and `libllama*` only, so `libmtmd.so.0`
+          # — which arrived with vision support in 0.17 — was left out and the shipped
+          # binary could not start at all:
+          #   error while loading shared libraries: libmtmd.so.0: cannot open shared
+          # Dockerfile.vulkan has always used `lib*.so*`; the workflow had drifted.
           FILES=(fox fox-bench)
-          for so in "$RELEASE_DIR"/libggml*.so* "$RELEASE_DIR"/libllama*.so*; do
+          for so in "$RELEASE_DIR"/lib*.so*; do
             [[ -f "$so" ]] && FILES+=("$so")
           done
           tar czf "$TARBALL" -C "$RELEASE_DIR" "${FILES[@]##*/}"
           sha256sum "$TARBALL" > "${TARBALL}.sha256"
           echo "ASSET=$TARBALL" >> "$GITHUB_ENV"
           echo "ASSET_SHA256=${TARBALL}.sha256" >> "$GITHUB_ENV"
+
+      - name: The tarball must actually run
+        # Unpack what is about to be published, somewhere else, and start it. v0.20.3
+        # shipped a binary that died on a missing `libmtmd.so.0` and nothing noticed,
+        # because packaging was only ever checked by reading the glob. A release that
+        # cannot print its own version is not a release.
+        shell: bash
+        run: |
+          SMOKE="$(mktemp -d)"
+          tar xzf "$ASSET" -C "$SMOKE"
+          "$SMOKE/fox" --version
+          echo "packaged bundle starts and reports its version"
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
