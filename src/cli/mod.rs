@@ -39,7 +39,7 @@ pub struct Cli {
 pub enum Command {
     /// Start the OpenAI-compatible HTTP inference server
     Serve(Box<serve::ServeArgs>),
-    /// Run single-shot inference and stream output to stdout
+    /// Chat with a model in the terminal, or answer one prompt and exit
     Run(run::RunArgs),
     /// Benchmark model load time and inference throughput
     Bench(bench::BenchArgs),

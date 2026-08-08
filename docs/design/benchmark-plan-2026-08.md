@@ -512,6 +512,19 @@ where fox's cache cannot help), batch embedding, and offline bulk processing.
   got published before being retracted. The tell was in the same table: `ITL p50 0.0 /
   p99 0.0`, i.e. no inter-token gaps at all, read as an oddity instead of as a broken
   instrument.
+- **Discard the first round of every arm.** Not just of the engine you happen to know
+  has a warm-up cost. The first run of *any* arm pays a cold page cache for the model
+  file and the first fault-in of its KV reservation; measured 2026-08-04, GPU occupancy
+  in round 1 was 17% for fox and 33% for `llama-server` against ~70-84% afterwards, and
+  several sweep levels failed to complete outright. The resulting outlier was read as
+  "the `llama-server` arm is unstable" for most of a day, and its ranges were declared
+  unpublishable on that basis. `scripts/bench_engines.sh` now runs an unrecorded warm-up
+  round by default (`WARMUP=0` to skip). After it, occupancy is 58/58/58 and 56/58/57,
+  and the 16-client range narrowed from [300, 436] to [376, 389].
+
+  The lesson had already been learned and written down — "discard vLLM's first start,
+  the torch.compile cache is cold" — and applied to that one engine instead of to the
+  harness. A rule filed under one engine's name is a rule you will re-learn.
 - **When a result is surprising, suspect the instrument first.** Three times in one day a
   striking number was a measurement fault: a bundle 14 minutes older than the commit, a
   shell variable collision that silently ran one engine of three, and the field above.

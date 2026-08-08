@@ -97,6 +97,16 @@ SWEEP_LEVELS="${SWEEP_LEVELS:-1 2 4 8 16 32}"
 PORT="${PORT:-8360}"
 URL="http://127.0.0.1:$PORT"
 ROUNDS="${ROUNDS:-3}"
+# One unrecorded round before the measured ones. The first run of an arm is cold in ways
+# that have nothing to do with the engine: the model file is not in the page cache and a
+# large KV reservation is being faulted in for the first time. Measured on 2026-08-04 —
+# GPU occupancy in round 1 was 17% for fox and 33% for llama-server against ~70-84% in
+# rounds 2 and 3, several levels failed to complete at all, and the resulting outlier was
+# read as "the llama-server arm is unstable" for most of a day.
+#
+# The same lesson had already been written down for vLLM ("discard the first start, the
+# torch.compile cache is cold") and applied to that one engine instead of to the harness.
+WARMUP="${WARMUP:-1}"
 CONC="${CONC:-8}"
 REPEATS="${REPEATS:-30}"
 MAXTOK="${MAXTOK:-64}"
@@ -462,6 +472,17 @@ run_arm() {
 
 rm -f "$OUT"/cold_*.dat "$OUT"/warm_*.dat "$OUT"/decode_*.dat "$OUT"/mem_*.dat "$OUT"/sweep_*.dat "$OUT"/noisy_*.dat "$OUT"/multiturn_*.dat
 read -r -a ARMS <<< "$ENGINES"
+
+if [ "$WARMUP" = 1 ]; then
+  echo "calentamiento (no se registra): la primera ronda de cada motor está fría"
+  WARMUP_OUT="$OUT"
+  OUT="$(mktemp -d -t bench-warmup-XXXX)"
+  for a in "${ARMS[@]}"; do run_arm "$a" >/dev/null 2>&1 || true; done
+  rm -rf "$OUT"
+  OUT="$WARMUP_OUT"
+  echo "  hecho"
+fi
+
 for r in $(seq 1 "$ROUNDS"); do
   echo "ronda $r/$ROUNDS:"
   # Rotate left by (r-1) so every engine leads a round: with 3 arms and 3 rounds each

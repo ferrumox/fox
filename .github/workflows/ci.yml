@@ -72,6 +72,19 @@ jobs:
       - name: cargo test
         run: cargo test --all --features test-helpers
 
+      - name: Docs name only things that exist
+        # Prose cannot be compiled; the names in it can be checked. Five documents were
+        # once found asserting a behaviour that a release had changed, and the only
+        # reason anyone noticed was acting on them. This catches the mechanical half:
+        # a flag or FOX_* variable that was renamed or invented.
+        run: |
+          cargo build --bin fox -q
+          python3 scripts/check_docs_flags.py
+          # A chat prompt rendered by hand and then tokenized as raw text loses its
+          # control tokens. `fox run` shipped that way from the day it was written and
+          # no test saw it: they all go over HTTP, where the right call is used.
+          python3 scripts/check_prompt_tokenization.py
+
   build-release:
     name: Release Build
     runs-on: ubuntu-latest

@@ -79,6 +79,9 @@ ci:
 	FOX_SKIP_LLAMA=1 cargo fmt --all -- --check
 	FOX_SKIP_LLAMA=1 cargo clippy --all-targets --features test-helpers -- -D warnings
 	FOX_SKIP_LLAMA=1 cargo test --all --features test-helpers
+	@FOX_SKIP_LLAMA=1 cargo build --bin fox -q
+	python3 scripts/check_docs_flags.py
+	python3 scripts/check_prompt_tokenization.py
 	@echo ""
 	@echo "==> everything above ran with FOX_SKIP_LLAMA=1 and never compiled the"
 	@echo "    llama.cpp module. Checking it for real now (slow the first time,"

@@ -172,18 +172,24 @@ async fn run_scenario(
     ));
 
     let long_tokens = synth_long_prompt(&engine, args.long_prompt_tokens);
-    let short_prompt_text = engine
-        .apply_chat_template(&[
-            (
-                "system".to_string(),
-                "You are a helpful assistant.".to_string(),
-            ),
-            ("user".to_string(), SHORT_PROMPT.to_string()),
-        ])
-        .unwrap_or_else(|_| format!("user: {SHORT_PROMPT}"));
+    // Templated prompts go through `build_prompt_tokens`, never `apply_chat_template`
+    // followed by `tokenize`: the latter is the raw-text tokenizer and would turn the
+    // template's control markers into literal text. See the comment in `run.rs`.
+    let short_messages = [
+        (
+            "system".to_string(),
+            "You are a helpful assistant.".to_string(),
+        ),
+        ("user".to_string(), SHORT_PROMPT.to_string()),
+    ];
     let short_tokens = engine
-        .tokenize(&short_prompt_text)
-        .unwrap_or_else(|_| short_prompt_text.bytes().map(|b| b as i32).collect());
+        .build_prompt_tokens(&short_messages, false, None)
+        .unwrap_or_else(|_| {
+            let flat = format!("user: {SHORT_PROMPT}");
+            engine
+                .tokenize(&flat)
+                .unwrap_or_else(|_| flat.bytes().map(|b| b as i32).collect())
+        });
 
     let engine_loop = {
         let e = engine.clone();

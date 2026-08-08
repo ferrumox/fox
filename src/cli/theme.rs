@@ -54,21 +54,42 @@ pub fn print_styled(color: Option<Color>, bold: bool, dim: bool, text: &str) {
 ///   ─────────────────────────────── (dim)
 ///   /bye or Ctrl+D to exit · /think to toggle reasoning · N tokens  (dim)
 /// ```
-pub fn print_banner(model_name: &str, _context_len: u32, supports_thinking: bool) {
+pub fn print_banner(model_name: &str, _context_len: u32, _supports_thinking: bool) {
     eprint_styled(None, false, false, "  🦊  ");
     eprint_styled(Some(Color::White), true, false, model_name);
     eprintln!();
     eprint_styled(None, false, true, &format!("  {}\n", "─".repeat(44)));
-    if supports_thinking {
-        eprint_styled(
-            None,
-            false,
-            true,
-            "  /bye or Ctrl+D to exit · /think to toggle reasoning\n\n",
-        );
+    // One hint, pointing at the full list. Naming two of the five commands here left
+    // the rest undiscoverable — there was no way to learn `/clear` existed.
+    eprint_styled(
+        None,
+        false,
+        true,
+        "  /help for commands · /bye or Ctrl+D to exit\n\n",
+    );
+}
+
+/// Print the REPL command list, in response to `/help`.
+pub fn print_repl_help(supports_thinking: bool) {
+    let think = if supports_thinking {
+        "  /think          show or hide the model's reasoning\n"
     } else {
-        eprint_styled(None, false, true, "  /bye or Ctrl+D to exit\n\n");
-    }
+        ""
+    };
+    eprint_styled(
+        None,
+        false,
+        true,
+        &format!(
+            "\n  /help           this list\n\
+             \x20 /clear          forget the conversation, keep the system prompt\n\
+             {think}\x20 /bye            exit (also Ctrl+D)\n\
+             \n\
+             \x20 \"\"\"             start a multi-line message; \"\"\" again to send\n\
+             \x20 ↑ ↓             recall previous messages\n\
+             \x20 Ctrl+C          discard the line you are typing\n\n"
+        ),
+    );
 }
 
 /// Print the user-prompt glyph `  ❯ ` (bold cyan) to stderr and flush.

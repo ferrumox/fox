@@ -1,6 +1,6 @@
 [package]
 name = "ferrumox"
-version = "0.20.4"
+version = "0.20.5"
 edition = "2021"
 description = "fox — a fast local LLM inference server, drop-in compatible with the Ollama and OpenAI APIs"
 license = "MIT OR Apache-2.0"
@@ -39,6 +39,10 @@ prometheus = "0.14"
 indicatif = "0.17"
 crossterm = "0.28"
 dialoguer = "0.11"
+# Line editing for the `fox run` chat REPL. Plain read_line() leaves the terminal in
+# canonical mode, where arrow keys are not handled by the line discipline: pressing Up
+# to recall the last message typed a literal `^[[A` into the prompt.
+rustyline = { version = "18", default-features = false, features = ["with-file-history"] }
 ahash = "0.8.12"
 sha2 = "0.10"
 hex = "0.4"

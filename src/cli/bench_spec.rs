@@ -137,12 +137,17 @@ async fn run_one(
         ),
         ("user".to_string(), prompt.to_string()),
     ];
-    let prompt_text = engine
-        .apply_chat_template(&messages)
-        .unwrap_or_else(|_| format!("user: {prompt}"));
+    // Templated prompts must go through `build_prompt_tokens`, not `tokenize`: the
+    // latter is the raw-text tokenizer, which turns the template's control markers into
+    // literal text and adds a second BOS. See the comment in `run.rs`.
     let prompt_tokens = engine
-        .tokenize(&prompt_text)
-        .unwrap_or_else(|_| prompt_text.bytes().map(|b| b as i32).collect());
+        .build_prompt_tokens(&messages, false, None)
+        .unwrap_or_else(|_| {
+            let flat = format!("user: {prompt}");
+            engine
+                .tokenize(&flat)
+                .unwrap_or_else(|_| flat.bytes().map(|b| b as i32).collect())
+        });
 
     let engine_loop = {
         let e = engine.clone();

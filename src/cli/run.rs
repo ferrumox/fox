@@ -296,45 +296,30 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
         messages.push(("system".to_string(), args.system_prompt.clone()));
     }
 
-    loop {
-        theme::print_prompt_glyph();
+    // Line editing comes from rustyline. Plain `read_line()` leaves the terminal in
+    // canonical mode, where the line discipline does not interpret arrow keys: pressing
+    // Up to recall the previous message typed a literal `^[[A` into the prompt, and a
+    // typo could only be fixed by backspacing to it.
+    let history_path = chat_history_path();
+    let mut editor = new_editor(history_path.as_deref());
 
-        // Read input via spawn_blocking to avoid blocking the tokio runtime thread,
-        // which would starve the engine loop task running concurrently.
-        // Typing `"""` on its own line enters multiline mode; a second `"""` submits.
-        let result = tokio::task::spawn_blocking(|| {
-            let mut first_line = String::new();
-            let n = std::io::stdin().read_line(&mut first_line)?;
-            if n == 0 {
-                return Ok::<(String, usize), std::io::Error>((first_line, 0));
-            }
-            if first_line.trim() == "\"\"\"" {
-                let mut buf = String::new();
-                let mut total = n;
-                loop {
-                    eprint!("  · ");
-                    let _ = std::io::stderr().flush();
-                    let mut line = String::new();
-                    let m = std::io::stdin().read_line(&mut line)?;
-                    if m == 0 {
-                        break;
-                    }
-                    total += m;
-                    if line.trim() == "\"\"\"" {
-                        break;
-                    }
-                    buf.push_str(&line);
-                }
-                Ok((buf, total))
-            } else {
-                Ok((first_line, n))
-            }
+    loop {
+        // Reading blocks, so it runs off the runtime thread — otherwise it would starve
+        // the engine loop task running concurrently. The editor is moved in and handed
+        // back because it owns terminal state that must survive across turns.
+        let (returned, result) = tokio::task::spawn_blocking(move || {
+            let outcome = read_turn(editor.as_mut());
+            (editor, outcome)
         })
         .await
         .expect("spawn_blocking panicked");
+        editor = returned;
 
-        let (line, n) = match result {
-            Ok(v) => v,
+        let line = match result {
+            Ok(Input::Line(l)) => l,
+            // Ctrl+C abandons the half-typed line, it does not end the session.
+            Ok(Input::Interrupted) => continue,
+            Ok(Input::Eof) => break,
             Err(e) => {
                 eprintln!("\nError reading input: {}", e);
                 break;
@@ -342,11 +327,6 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
         };
 
         eprintln!();
-
-        if n == 0 {
-            // EOF (Ctrl+D)
-            break;
-        }
 
         let input = line.trim().to_string();
 
@@ -356,6 +336,24 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
 
         if input == "/bye" || input == "/exit" || input == "exit" || input == "quit" {
             break;
+        }
+
+        // Recorded after the exit check: recalling "how do I quit" helps nobody.
+        if let Some(ed) = editor.as_mut() {
+            let _ = ed.add_history_entry(input.as_str());
+        }
+
+        if input == "/help" || input == "/?" {
+            theme::print_repl_help(supports_thinking);
+            continue;
+        }
+
+        if input == "/clear" {
+            // Drop the history but keep the system prompt, which is configuration
+            // rather than conversation.
+            messages.truncate(if args.no_system_prompt { 0 } else { 1 });
+            theme::eprint_styled(None, false, true, "  context cleared\n\n");
+            continue;
         }
 
         if input == "/think" {
@@ -387,8 +385,8 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
         spinner.enable_steady_tick(Duration::from_millis(80));
 
         let start = Instant::now();
-        let (response, token_count) =
-            stream_turn_collecting(args, engine, &messages, spinner, show_thinking).await?;
+        let turn = stream_turn_collecting(args, engine, &messages, spinner, show_thinking).await?;
+        let (response, token_count, cancelled) = (turn.text, turn.visible, turn.cancelled);
         let elapsed = start.elapsed();
 
         println!();
@@ -399,17 +397,68 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
             0.0
         };
 
-        if response.is_empty() {
-            eprintln!("(Context window full — clearing conversation history.)");
-            eprintln!();
-            messages.truncate(if args.no_system_prompt { 0 } else { 1 });
+        if cancelled {
+            // Keep what was generated, cut back to a clean boundary: someone who stops a
+            // reply has usually read enough of it to build on, but a mid-word tail
+            // derails the next turn (see `trim_to_clean_boundary`). With nothing kept
+            // there is no reply at all, so the question goes with it — leaving a user
+            // turn unanswered would corrupt the next template render.
+            //
+            // This branch has to come first. An interrupted turn also produces an empty
+            // response, and the test below reads that as a full context window.
+            let kept = trim_to_clean_boundary(&response);
+            if kept.is_empty() {
+                messages.pop();
+            } else {
+                messages.push(("assistant".to_string(), kept.to_string()));
+            }
+        } else if response.is_empty() {
+            // An empty reply used to be reported as a full context window and the whole
+            // conversation was thrown away. That diagnosis was a guess, and usually a
+            // wrong one: the engine emits tokens whose text is filtered out (control
+            // markers, a reasoning block with thinking hidden), which produces no text
+            // while the window sits nearly empty. Say what actually happened and keep
+            // the conversation — a session should not lose its history to a guess.
+            let ctx_used = engine
+                .build_prompt_tokens(&messages, show_thinking, None)
+                .map(|t| t.len())
+                .unwrap_or(0);
+            let full = ctx_used as u32 >= engine.context_len().saturating_sub(64);
+            if full {
+                theme::eprint_styled(
+                    None,
+                    false,
+                    true,
+                    &format!(
+                        "  context window full ({ctx_used}/{}) — clearing the conversation\n\n",
+                        engine.context_len()
+                    ),
+                );
+                messages.truncate(if args.no_system_prompt { 0 } else { 1 });
+            } else {
+                theme::eprint_styled(
+                    None,
+                    false,
+                    true,
+                    &format!(
+                        "  the model produced no text ({} token(s), stop: {:?}) — \
+                         conversation kept, try rephrasing\n\n",
+                        turn.tokens, turn.stop_reason
+                    ),
+                );
+                // The user turn stays unanswered otherwise, which breaks the strict
+                // user/assistant alternation some chat templates require.
+                messages.pop();
+            }
         } else {
             messages.push(("assistant".to_string(), response));
         }
 
+        // Counted the way the next turn will actually be tokenised, or the status line
+        // reports a context size the engine never sees.
         let ctx_tokens = engine
-            .apply_chat_template(&messages)
-            .and_then(|p| engine.tokenize(&p).map(|t| t.len()))
+            .build_prompt_tokens(&messages, show_thinking, None)
+            .map(|t| t.len())
             .unwrap_or(0);
         let gpu_info = get_gpu_info();
         let ram_info = get_ram_info();
@@ -422,37 +471,170 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
         );
     }
 
+    if let (Some(ed), Some(path)) = (editor.as_mut(), history_path.as_deref()) {
+        let _ = ed.save_history(&path);
+    }
+
     engine_loop.abort();
     Ok(())
 }
 
-/// Run one inference turn, stream tokens to stdout, and return `(response_text, token_count)`.
+/// Trim an interrupted reply back to a boundary a model will accept as a finished turn.
+///
+/// Stopping generation cuts mid-word, and `"…methods for baking larg"` is not something a
+/// model ever wrote as a finished turn, so sending it back as one puts the conversation
+/// in a state the model was never trained on. Cutting at the last sentence end — or
+/// failing that the last word — costs a few words of a reply the user chose to abandon
+/// and leaves the history looking like an ordinary short answer.
+///
+/// This is hygiene, not a fix for anything measured: it was written while chasing empty
+/// replies after a cancelled turn, and a control run reproduced those with no
+/// cancellation involved, so the mid-word tail was not their cause.
+fn trim_to_clean_boundary(text: &str) -> &str {
+    let trimmed = text.trim_end();
+    // Prefer a sentence end, but only a late one: cutting a 300-word reply back to its
+    // first full stop would throw away most of what the user just read.
+    if let Some(idx) = trimmed.rfind(['.', '!', '?', '\n']) {
+        if idx + 1 >= trimmed.len() / 2 {
+            return trimmed[..idx + 1].trim_end();
+        }
+    }
+    match trimmed.rfind(char::is_whitespace) {
+        Some(idx) => trimmed[..idx].trim_end(),
+        // A single unbroken word: there is no clean cut, so keep it whole.
+        None => trimmed,
+    }
+}
+
+/// What one turn of input produced.
+enum Input {
+    Line(String),
+    /// Ctrl+C — abandon the line, keep the session.
+    Interrupted,
+    /// Ctrl+D or a closed stdin.
+    Eof,
+}
+
+/// Where the chat history is kept between sessions, beside the other config.
+/// `None` disables persistence rather than failing the session over it.
+fn chat_history_path() -> Option<PathBuf> {
+    let dir = dirs::config_dir()?.join("ferrumox");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("chat_history"))
+}
+
+/// Build the line editor, loading previous history. Returns `None` when the terminal
+/// cannot be driven, in which case the caller falls back to plain reads and the session
+/// still works — just without editing.
+fn new_editor(history: Option<&std::path::Path>) -> Option<rustyline::DefaultEditor> {
+    let mut ed = rustyline::DefaultEditor::new().ok()?;
+    if let Some(path) = history {
+        // A missing file on first run is the normal case, not an error.
+        let _ = ed.load_history(path);
+    }
+    Some(ed)
+}
+
+/// Read one line, from the editor when there is one and from stdin when there is not.
+fn read_one(
+    editor: Option<&mut rustyline::DefaultEditor>,
+    prompt: &str,
+    plain: impl FnOnce(),
+) -> Result<Input, rustyline::error::ReadlineError> {
+    match editor {
+        Some(ed) => match ed.readline(prompt) {
+            Ok(l) => Ok(Input::Line(l)),
+            Err(rustyline::error::ReadlineError::Interrupted) => Ok(Input::Interrupted),
+            Err(rustyline::error::ReadlineError::Eof) => Ok(Input::Eof),
+            Err(e) => Err(e),
+        },
+        None => {
+            plain();
+            let mut buf = String::new();
+            let n = std::io::stdin().read_line(&mut buf)?;
+            Ok(if n == 0 { Input::Eof } else { Input::Line(buf) })
+        }
+    }
+}
+
+/// Read a full turn. Typing `"""` alone enters multiline mode; a second `"""` submits.
+fn read_turn(
+    mut editor: Option<&mut rustyline::DefaultEditor>,
+) -> Result<Input, rustyline::error::ReadlineError> {
+    const PROMPT: &str = "\x1b[1;36m  ❯ \x1b[0m";
+    const CONT: &str = "\x1b[1;36m  · \x1b[0m";
+
+    let first = match read_one(editor.as_deref_mut(), PROMPT, theme::print_prompt_glyph)? {
+        Input::Line(l) => l,
+        other => return Ok(other),
+    };
+    if first.trim() != "\"\"\"" {
+        return Ok(Input::Line(first));
+    }
+
+    let mut buf = String::new();
+    loop {
+        match read_one(editor.as_deref_mut(), CONT, || {
+            eprint!("  · ");
+            let _ = std::io::stderr().flush();
+        })? {
+            Input::Line(l) if l.trim() == "\"\"\"" => break,
+            Input::Line(l) => {
+                buf.push_str(&l);
+                // The editor strips the newline; plain reads keep it.
+                if !buf.ends_with('\n') {
+                    buf.push('\n');
+                }
+            }
+            Input::Eof => break,
+            Input::Interrupted => return Ok(Input::Interrupted),
+        }
+    }
+    Ok(Input::Line(buf))
+}
+
+/// What one turn produced. `tokens` counts tokens the engine emitted, which is not the
+/// same as text: a token whose text is filtered away (a control marker, half a UTF-8
+/// sequence) still counts. The two disagreeing is exactly the case worth reporting.
+struct Turn {
+    text: String,
+    tokens: usize,
+    /// Emitted tokens whose text survived filtering.
+    visible: usize,
+    cancelled: bool,
+    stop_reason: Option<crate::scheduler::StopReason>,
+}
+
+/// Run one inference turn, streaming tokens to stdout.
 async fn stream_turn_collecting(
     args: &RunArgs,
     engine: &Arc<InferenceEngine>,
     messages: &[(String, String)],
     spinner: ProgressBar,
     show_thinking: bool,
-) -> Result<(String, usize)> {
-    let mut prompt = engine.apply_chat_template(messages).unwrap_or_else(|_| {
-        messages
-            .iter()
-            .map(|(r, c)| format!("{}: {}", r, c))
-            .collect::<Vec<_>>()
-            .join("\n")
-    });
-
-    // For models that require an explicit thinking activation (e.g. Qwen3-Instruct),
-    // append the opening <think> tag to the prompt so the model starts in reasoning
-    // mode.  The engine state is also initialised with in_thinking=true so the output
-    // filter knows the first generated tokens are reasoning content, not regular output.
-    if show_thinking {
-        prompt.push_str("<think>\n");
-    }
-
+) -> Result<Turn> {
+    // Build the prompt exactly the way a `/v1/chat/completions` request does. Doing it
+    // by hand here — render the template, then hand the result to `tokenize()` — looks
+    // equivalent and is not: `tokenize()` is the *raw text* tokenizer, so it takes the
+    // template's `<start_of_turn>` markers as literal text instead of the control tokens
+    // they are, and prepends a second BOS on top of the one the template already emits.
+    // The model then sees a conversation with no turn structure, and answers often enough
+    // by writing a literal `<start_of_turn>model` — which the output filter holds back as
+    // a control pattern, so the user gets an empty reply. `build_prompt_tokens` picks the
+    // add_special/parse_special pair that matches how the prompt was rendered, and also
+    // handles the thinking activation, so the manual `<think>` append goes with it.
     let prompt_tokens = engine
-        .tokenize(&prompt)
-        .unwrap_or_else(|_| prompt.bytes().map(|b| b as i32).take(4096).collect());
+        .build_prompt_tokens(messages, show_thinking, None)
+        .unwrap_or_else(|_| {
+            let flat = messages
+                .iter()
+                .map(|(r, c)| format!("{}: {}", r, c))
+                .collect::<Vec<_>>()
+                .join("\n");
+            engine
+                .tokenize(&flat)
+                .unwrap_or_else(|_| flat.bytes().map(|b| b as i32).take(4096).collect())
+        });
 
     let recommended = engine.recommended_sampling();
     let mut sampling = build_sampling_params(args, recommended.as_ref());
@@ -474,7 +656,39 @@ async fn stream_turn_collecting(
     // can apply ANSI dim styling to the reasoning section.
     let mut in_thinking_display = show_thinking;
 
-    while let Some(token) = rx.recv().await {
+    // Ctrl+C stops the reply instead of killing the session. While the editor is reading
+    // the terminal is raw with ISIG off, so Ctrl+C arrives there as a byte and rustyline
+    // handles it; only during generation does it become a real SIGINT, which is exactly
+    // the window this covers. The listener is created once per turn rather than per token
+    // — a fresh one each iteration would re-register a receiver thousands of times, and
+    // creating it per turn also means a signal from an earlier turn cannot leak into this
+    // one. Dropping `rx` on the way out is what cancels the work: the engine sees its
+    // `send()` fail, preempts the request and frees the KV blocks.
+    let interrupt = tokio::signal::ctrl_c();
+    tokio::pin!(interrupt);
+    let mut cancelled = false;
+    let mut emitted: usize = 0;
+    let mut last_stop: Option<crate::scheduler::StopReason> = None;
+
+    loop {
+        let token = tokio::select! {
+            // Tokens win ties: a fast stream should never be starved by signal polling.
+            biased;
+            received = rx.recv() => match received {
+                Some(t) => t,
+                None => break,
+            },
+            _ = &mut interrupt => {
+                cancelled = true;
+                break;
+            }
+        };
+
+        emitted += 1;
+        if token.stop_reason.is_some() {
+            last_stop = token.stop_reason.clone();
+        }
+
         if !token.text.is_empty() {
             if first_token {
                 spinner.finish_and_clear();
@@ -516,7 +730,25 @@ async fn stream_turn_collecting(
         }
     }
 
-    Ok((response, token_count))
+    if cancelled {
+        // The spinner may still be spinning if nothing was generated yet.
+        spinner.finish_and_clear();
+        // Reset any dim styling left open by an interrupted <think> block, or the rest
+        // of the session would render dim.
+        if in_thinking_display {
+            print!("\x1b[0m");
+        }
+        let _ = stdout.lock().flush();
+        theme::eprint_styled(None, false, true, "\n  stopped\n");
+    }
+
+    Ok(Turn {
+        text: response,
+        tokens: emitted,
+        visible: token_count,
+        cancelled,
+        stop_reason: last_stop,
+    })
 }
 
 /// Run one inference turn streaming to stdout (no response collection — for one-shot mode).
@@ -525,21 +757,20 @@ async fn stream_turn(
     engine: &Arc<InferenceEngine>,
     messages: &[(String, String)],
 ) -> Result<()> {
-    let mut prompt = engine.apply_chat_template(messages).unwrap_or_else(|_| {
-        messages
-            .iter()
-            .map(|(r, c)| format!("{}: {}", r, c))
-            .collect::<Vec<_>>()
-            .join("\n")
-    });
-
-    if args.show_thinking {
-        prompt.push_str("<think>\n");
-    }
-
+    // Same prompt-building path as the REPL and the HTTP handlers — see the comment in
+    // `stream_turn_collecting` for why the manual render-then-tokenize is not equivalent.
     let prompt_tokens = engine
-        .tokenize(&prompt)
-        .unwrap_or_else(|_| prompt.bytes().map(|b| b as i32).take(4096).collect());
+        .build_prompt_tokens(messages, args.show_thinking, None)
+        .unwrap_or_else(|_| {
+            let flat = messages
+                .iter()
+                .map(|(r, c)| format!("{}: {}", r, c))
+                .collect::<Vec<_>>()
+                .join("\n");
+            engine
+                .tokenize(&flat)
+                .unwrap_or_else(|_| flat.bytes().map(|b| b as i32).take(4096).collect())
+        });
 
     let recommended = engine.recommended_sampling();
     let mut sampling = build_sampling_params(args, recommended.as_ref());
@@ -617,5 +848,37 @@ fn build_sampling_params(
         top_n_sigma: 0.0,
         min_keep: 0,
         logit_bias: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim_to_clean_boundary;
+
+    #[test]
+    fn an_interrupted_reply_is_cut_at_the_last_sentence() {
+        let cut = trim_to_clean_boundary(
+            "Bread is ancient. The Romans refined it. They introduced methods for baking larg",
+        );
+        assert_eq!(cut, "Bread is ancient. The Romans refined it.");
+    }
+
+    #[test]
+    fn a_reply_with_no_late_sentence_end_is_cut_at_the_last_word() {
+        // The only full stop sits in the first half, and cutting there would discard most
+        // of what the user read, so the word boundary wins instead.
+        let cut = trim_to_clean_boundary("Yes. Bread has been baked for millennia across ma");
+        assert_eq!(cut, "Yes. Bread has been baked for millennia across");
+    }
+
+    #[test]
+    fn a_single_unbroken_word_survives_whole() {
+        // There is no clean cut available; returning "" would drop the turn entirely.
+        assert_eq!(trim_to_clean_boundary("Constantinopl"), "Constantinopl");
+    }
+
+    #[test]
+    fn stopping_before_the_first_word_ends_keeps_nothing_to_push() {
+        assert_eq!(trim_to_clean_boundary("   "), "");
     }
 }

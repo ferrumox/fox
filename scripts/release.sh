@@ -34,11 +34,12 @@ step() { echo -e "${YELLOW}▶ $*${NC}"; }
 ok()   { echo -e "${GREEN}✓ $*${NC}"; }
 die()  { echo -e "${RED}✗ $*${NC}" >&2; exit 1; }
 
-# 1. Clean tree. `vendor/llama.cpp` is allowed to be dirty — it is a submodule that
-#    tracks a pinned commit and is routinely left modified by builds.
+# 1. Clean tree. No exception for `vendor/llama.cpp` any more: `.gitmodules` sets
+#    `ignore = dirty` for it, so the patch build.rs applies on every build no longer
+#    shows up here — while a change to the *pinned commit* still does, which is the
+#    thing that would actually matter to a release.
 step "árbol limpio"
-# git marca un submódulo modificado como ' m' o ' M' según qué haya cambiado dentro.
-DIRTY=$(git status --porcelain | grep -vE '^ [mM] vendor/llama\.cpp$' || true)
+DIRTY=$(git status --porcelain || true)
 [[ -z "$DIRTY" ]] || { echo "$DIRTY"; die "hay cambios sin comitear"; }
 ok "limpio"
 

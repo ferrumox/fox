@@ -1,3 +1,16 @@
 [submodule "vendor/llama.cpp"]
 	path = vendor/llama.cpp
 	url = https://github.com/ggml-org/llama.cpp.git
+	# `dirty`, not `all`: changes to the pinned commit are still reported — that is the
+	# thing worth noticing — while working-tree edits inside the submodule are not.
+	#
+	# Every build makes this submodule dirty on purpose. `build.rs::patch_vendored_llama`
+	# rewrites a HIP version guard in place so the ROCm build works, idempotently, on
+	# every build. Before that the same edit lived only in one machine's working tree and
+	# a fresh clone simply did not build.
+	#
+	# So the modification is expected, permanent and already explained in build.rs. What
+	# it was doing was drowning `git status`: a working tree that is never clean teaches
+	# people to skim past dirt, and it forced `scripts/release.sh` to special-case this
+	# one path in its clean-tree check.
+	ignore = dirty
