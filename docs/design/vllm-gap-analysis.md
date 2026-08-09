@@ -290,7 +290,7 @@ Shipped since this analysis was written:
   codes and retry by splitting the batch in half and decoding each half
   independently — llama.cpp's own documented mitigation for that code — recursing
   down to a single request before falling back to the existing `EngineError` path.
-  Observable via `ferrumox_decode_bisection_retries_total` + a per-event
+  Observable via `fox_decode_bisection_retries_total` + a per-event
   `tracing::warn!`.
 - ✅ **Reactive context-rolling on OOM** (0.18) — once bisection retry bottoms out at a
   single request and it still fails, `engine/run.rs` performs one targeted context roll

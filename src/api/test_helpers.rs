@@ -3,7 +3,7 @@
 // Handler-level integration tests import these via `use crate::api::test_helpers::*;`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::{
     body::Body,
@@ -71,7 +71,6 @@ pub fn make_test_state(name: &str, dir: &std::path::Path) -> (AppState, Arc<Engi
         system_prompt: None,
         started_at: 0,
         models_dir: dir.to_path_buf(),
-        digest_cache: Arc::new(Mutex::new(HashMap::new())),
         hf_token: None,
         api_key: None,
         tool_call_parser: "auto".to_string(),
@@ -134,7 +133,6 @@ pub fn make_test_state_with_queue_depth(
         system_prompt: None,
         started_at: 0,
         models_dir: dir.to_path_buf(),
-        digest_cache: Arc::new(Mutex::new(HashMap::new())),
         hf_token: None,
         api_key: None,
         tool_call_parser: "auto".to_string(),
@@ -192,7 +190,6 @@ pub fn make_test_state_speculative(
         system_prompt: None,
         started_at: 0,
         models_dir: dir.to_path_buf(),
-        digest_cache: Arc::new(Mutex::new(HashMap::new())),
         hf_token: None,
         api_key: None,
         tool_call_parser: "auto".to_string(),
@@ -251,7 +248,6 @@ pub fn make_test_state_thinking(name: &str, dir: &std::path::Path) -> (AppState,
         system_prompt: None,
         started_at: 0,
         models_dir: dir.to_path_buf(),
-        digest_cache: Arc::new(Mutex::new(HashMap::new())),
         hf_token: None,
         api_key: None,
         tool_call_parser: "auto".to_string(),

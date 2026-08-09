@@ -58,6 +58,13 @@ jobs:
     needs: verify-version
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    # On a tag push `github.ref_name` IS the tag, but on a manual re-run it is the
+    # branch the run was dispatched from — which would name the tarball after a
+    # branch and upload it to the wrong ref. `verify-version` already resolved this;
+    # the rest of the job never did, so the recovery path this workflow exists for
+    # was itself broken.
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     strategy:
       fail-fast: false
       matrix:
@@ -77,6 +84,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag || github.ref }}
           submodules: recursive
 
       - name: Install Rust stable
@@ -107,7 +115,7 @@ jobs:
       - name: Package tarball
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${TAG#v}"
           TARBALL="fox-${VERSION}-x86_64-unknown-linux-gnu${{ matrix.suffix }}.tar.gz"
           RELEASE_DIR="target/release"
           # Every shared library built beside the binaries. NOT a hand-written list of
@@ -140,7 +148,8 @@ jobs:
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          prerelease: ${{ contains(github.ref_name, '-rc') }}
+          tag_name: ${{ env.TAG }}
+          prerelease: ${{ contains(env.TAG, '-rc') }}
           # install.sh and install.ps1 ride along with every release. The README has
           # always advertised
           #   curl -fsSL .../releases/latest/download/install.sh | sh
@@ -151,3 +160,36 @@ jobs:
             ${{ env.ASSET_SHA256 }}
             install.sh
             install.ps1
+
+  # The release page carried no notes at all: `softprops` was only ever handed files,
+  # so GitHub published a bare list of six assets. Two of them are tarballs that differ
+  # by a `-vulkan` suffix and nothing on the page said which was which — the one without
+  # a suffix reads as the default. Someone reported `libggml-vulkan.so` missing from the
+  # release; it was in the other tarball.
+  #
+  # Runs after both builds and writes the body once. Two matrix jobs writing it would
+  # race, and the loser's version would be the one published.
+  notes:
+    needs: build
+    name: Release notes
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Build the body from the CHANGELOG
+        shell: bash
+        run: |
+          VERSION="${TAG#v}"; VERSION="${VERSION%%-rc*}"
+          python3 scripts/release_notes.py "$VERSION" > body.md
+          echo "--- release body ---"; cat body.md
+
+      - name: Publish the notes
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          prerelease: ${{ contains(env.TAG, '-rc') }}
+          body_path: body.md

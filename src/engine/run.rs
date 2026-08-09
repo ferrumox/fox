@@ -25,10 +25,15 @@ impl InferenceEngine {
             // Refresh gauges and propagate counter deltas every scheduling step.
             if let Some(m) = &engine.metrics {
                 use std::sync::atomic::Ordering;
+                let model = engine.model_label;
                 m.kv_cache_usage_ratio
+                    .with_label_values(&[model])
                     .set(engine.kv_cache.memory_usage() as f64);
-                m.queue_depth.set(engine.scheduler.queue_depth() as i64);
+                m.queue_depth
+                    .with_label_values(&[model])
+                    .set(engine.scheduler.queue_depth() as i64);
                 m.active_requests
+                    .with_label_values(&[model])
                     .set(engine.scheduler.active_requests() as i64);
 
                 let cur_hits = engine.scheduler.prefix_hits.load(Ordering::Relaxed);
@@ -36,10 +41,14 @@ impl InferenceEngine {
                 let dh = cur_hits.saturating_sub(last_prefix_hits);
                 let dm = cur_misses.saturating_sub(last_prefix_misses);
                 if dh > 0 {
-                    m.prefix_cache_hits_total.inc_by(dh);
+                    m.prefix_cache_hits_total
+                        .with_label_values(&[model])
+                        .inc_by(dh);
                 }
                 if dm > 0 {
-                    m.prefix_cache_misses_total.inc_by(dm);
+                    m.prefix_cache_misses_total
+                        .with_label_values(&[model])
+                        .inc_by(dm);
                 }
                 last_prefix_hits = cur_hits;
                 last_prefix_misses = cur_misses;
@@ -48,13 +57,18 @@ impl InferenceEngine {
                 let dp = cur_proposed.saturating_sub(last_spec_proposed);
                 let da = cur_accepted.saturating_sub(last_spec_accepted);
                 if dp > 0 {
-                    m.spec_tokens_proposed_total.inc_by(dp);
+                    m.spec_tokens_proposed_total
+                        .with_label_values(&[model])
+                        .inc_by(dp);
                 }
                 if da > 0 {
-                    m.spec_tokens_accepted_total.inc_by(da);
+                    m.spec_tokens_accepted_total
+                        .with_label_values(&[model])
+                        .inc_by(da);
                 }
                 if cur_proposed > 0 {
                     m.spec_acceptance_ratio
+                        .with_label_values(&[model])
                         .set(cur_accepted as f64 / cur_proposed as f64);
                 }
                 last_spec_proposed = cur_proposed;
@@ -63,7 +77,9 @@ impl InferenceEngine {
                 let cur_bisection_retries = engine.model.bisection_retry_count();
                 let db = cur_bisection_retries.saturating_sub(last_bisection_retries);
                 if db > 0 {
-                    m.decode_bisection_retries_total.inc_by(db);
+                    m.decode_bisection_retries_total
+                        .with_label_values(&[model])
+                        .inc_by(db);
                 }
                 last_bisection_retries = cur_bisection_retries;
             }

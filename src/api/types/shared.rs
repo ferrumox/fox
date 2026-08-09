@@ -62,6 +62,9 @@ impl Usage {
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: String,
+    /// Whether the primary model is resident right now. `status` is `"ok"` as soon as
+    /// the server can answer, which is deliberately not the same question.
+    pub model_loaded: bool,
     pub kv_cache_usage: f32,
     pub queue_depth: usize,
     pub active_requests: usize,

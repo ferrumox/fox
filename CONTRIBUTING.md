@@ -43,7 +43,21 @@ glslc  glslang-tools  libvulkan-dev  spirv-headers
 
 (llama.cpp's ggml-vulkan CMake wants both the Vulkan/`glslc` tooling **and**
 `SPIRV-Headers`.) These are all packaged on Ubuntu 24.04; 22.04 does not ship `glslc`
-easily. The reproducible way to build + run is [`Dockerfile.vulkan`](Dockerfile.vulkan):
+easily. `build.rs` checks for all three before switching the backend on, and builds
+CPU-only with an explanatory warning when any is missing — enabling `GGML_VULKAN`
+without them is a fatal CMake error, not a fallback. Two escape hatches:
+
+| Variable | Effect |
+|---|---|
+| `FOX_NO_VULKAN=1` | never build the Vulkan backend, however complete the toolchain looks |
+| `FOX_FORCE_VULKAN=1` | build it even if the check says a piece is missing |
+
+Note that installing a package does **not** make cargo re-run `build.rs`, so after
+`apt install spirv-headers` a plain rebuild reuses the previous answer. Rebuilding with
+`FOX_FORCE_VULKAN=1` changes the environment and re-runs the check.
+
+On Windows the same rule applies to the LunarG SDK: 1.3.246 and older ship `glslc` and
+the loader but no `SPIRV-HeadersConfig.cmake`, so they need a newer SDK. The reproducible way to build + run is [`Dockerfile.vulkan`](Dockerfile.vulkan):
 
 ```bash
 # Build the image (installs the toolchain above and compiles the Vulkan backend)
@@ -218,6 +232,10 @@ To add a new model:
 - **mpsc channel for token streaming** — decouples the engine loop from the HTTP handler. The handler detects client disconnects via `send().is_err()` without polling.
 
 ## Cutting a release
+
+Decide the bump before writing the entry: [COMPATIBILITY.md](COMPATIBILITY.md) says which
+surfaces are a promise and which are not, and therefore whether a change is a patch or a
+minor. A Tier 1 change in a patch release is the mistake that policy exists to catch.
 
 The version bump, the CHANGELOG entry and `make e2e` come first. **The tag comes last,
 immediately before pushing** — never earlier.

@@ -89,8 +89,8 @@ llama-3.2-1B on CPU (single-threaded Docker):
   on for workloads that echo their context (code edits, JSON transforms, RAG extraction,
   structured rewriting).
 - The same numbers are visible on a running server via Prometheus:
-  `ferrumox_spec_tokens_proposed_total`, `ferrumox_spec_tokens_accepted_total`, and the
-  `ferrumox_spec_acceptance_ratio` gauge.
+  `fox_spec_tokens_proposed_total`, `fox_spec_tokens_accepted_total`, and the
+  `fox_spec_acceptance_ratio` gauge.
 
 ---
 

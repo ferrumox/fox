@@ -7,7 +7,7 @@ use bytes::Bytes;
 use crate::api::shared::extractor::LenientJson;
 
 use crate::api::router::AppState;
-use crate::api::shared::digest::{get_digest, modified_at_rfc3339};
+use crate::api::shared::digest::{metadata_digest, modified_at_rfc3339};
 use crate::api::types::{
     CopyRequest, CreateRequest, DeleteRequest, OllamaDetails, OllamaModel, PsEntry, PsResponse,
     ShowRequest, ShowResponse, TagsResponse, VersionResponse,
@@ -39,7 +39,7 @@ pub async fn ollama_tags(State(state): State<AppState>) -> impl IntoResponse {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
-        let digest = get_digest(path, &state.digest_cache).await;
+        let digest = metadata_digest(path, meta);
         models.push(OllamaModel {
             name: stem.to_string(),
             size: meta.len(),
@@ -60,20 +60,19 @@ pub async fn ollama_tags(State(state): State<AppState>) -> impl IntoResponse {
 pub async fn ollama_ps(State(state): State<AppState>) -> Json<PsResponse> {
     let loaded = state.registry.loaded();
     let mut ps_entries = Vec::with_capacity(loaded.len());
+    // Read the directory once, not once per resident model.
+    let entries = list_models(&state.models_dir).unwrap_or_default();
 
     for (name, entry) in &loaded {
-        let file_info = list_models(&state.models_dir).ok().and_then(|entries| {
-            entries.into_iter().find(|(path, _)| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|stem| stem == name.as_str())
-                    .unwrap_or(false)
-            })
+        let file_info = entries.iter().find(|(path, _)| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|stem| stem == name.as_str())
+                .unwrap_or(false)
         });
 
         let (size, digest) = if let Some((path, meta)) = file_info {
-            let d = get_digest(&path, &state.digest_cache).await;
-            (meta.len(), d)
+            (meta.len(), metadata_digest(path, meta))
         } else {
             (0u64, "sha256:unknown".to_string())
         };
@@ -136,7 +135,7 @@ pub async fn ollama_show(
             let arch = parse_architecture(stem).unwrap_or("unknown");
             let quant = parse_quantization(stem).unwrap_or("unknown");
             let size_str = format_size(meta.len());
-            let digest = get_digest(&path, &state.digest_cache).await;
+            let digest = metadata_digest(&path, &meta);
 
             // Everything above is derived from the FILENAME. That is all fox can know
             // about a model that is not loaded, and it is why this endpoint used to
@@ -497,6 +496,46 @@ mod tests {
         let version = v["version"].as_str().unwrap();
         assert!(!version.is_empty());
         assert!(version.contains('.'));
+    }
+
+    /// `/api/tags` used to SHA-256 every GGUF in the models directory on the
+    /// request path, so a directory of real models wedged the endpoint for
+    /// ~a minute at 100% CPU — and every retry started the hash over, because
+    /// the cache was only written once a hash completed.
+    ///
+    /// A 16 GiB sparse file costs nothing to create but well over 5 s to read.
+    /// If this ever times out, digesting has crept back onto the request path.
+    #[tokio::test]
+    async fn test_api_tags_does_not_read_model_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _) = make_test_state("stub", dir.path());
+
+        let big = dir.path().join("huge-model.gguf");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(16 * 1024 * 1024 * 1024)
+            .unwrap();
+
+        let app = make_router(&state);
+        let started = std::time::Instant::now();
+        let resp = get_req(app, "/api/tags").await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(resp.status(), 200);
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "/api/tags took {elapsed:?} — it is reading model contents again"
+        );
+
+        let bytes = body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let huge = v["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == "huge-model")
+            .expect("the big model is listed");
+        assert!(huge["digest"].as_str().unwrap().starts_with("sha256:"));
     }
 
     #[tokio::test]

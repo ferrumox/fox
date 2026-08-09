@@ -1,16 +1,28 @@
 use std::sync::Arc;
 
 use crate::engine::InferenceEngine;
+use crate::metrics::Metrics;
 
 pub struct EngineEntry {
     pub engine: Arc<InferenceEngine>,
     /// Aborted when this entry is dropped (LRU eviction or explicit unload).
     pub(super) loop_handle: tokio::task::JoinHandle<()>,
+    /// Held so the entry can retire this model's series on the way out. Cloned
+    /// from the engine rather than reached through it: `Drop` must not depend on
+    /// the engine `Arc` still having other owners.
+    pub(super) metrics: Option<Arc<Metrics>>,
 }
 
 impl Drop for EngineEntry {
     fn drop(&mut self) {
         self.loop_handle.abort();
+        // Retire this model's metric series. Without it an evicted model's
+        // `fox_kv_cache_usage_ratio` would sit at its last value for the life of
+        // the process, and a dashboard would go on reporting a full KV cache for
+        // a model that no longer holds a single block.
+        if let Some(m) = &self.metrics {
+            m.forget_model(self.engine.model_label());
+        }
     }
 }
 
@@ -98,6 +110,9 @@ impl EngineEntry {
         Arc::new(Self {
             engine,
             loop_handle,
+            // Test engines are built with metrics disabled, so their label is
+            // `UNOBSERVED_MODEL_LABEL` and there is nothing to retire on drop.
+            metrics: None,
         })
     }
 }

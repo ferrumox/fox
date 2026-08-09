@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/ferrumox/fox/actions/workflows/ci.yml/badge.svg)](https://github.com/ferrumox/fox/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
-[![Version](https://img.shields.io/badge/version-0.20.5-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.21.0-green.svg)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://rustup.rs/)
 [![GitHub Stars](https://img.shields.io/github/stars/ferrumox/fox?style=social)](https://github.com/ferrumox/fox/stargazers)
 
@@ -550,6 +550,7 @@ build cover CPU, CUDA, ROCm, Vulkan and Metal.
 - **Discussions**: [GitHub Discussions](https://github.com/ferrumox/fox/discussions)
 - **Feature status**: [STATUS.md](STATUS.md)
 - **Changelog**: [CHANGELOG.md](CHANGELOG.md)
+- **Compatibility policy**: [COMPATIBILITY.md](COMPATIBILITY.md) — what fox promises not to break, and what it does not
 - **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 To run tests:

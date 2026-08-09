@@ -57,6 +57,9 @@ pub struct InferenceEngine {
     per_request_state: Arc<DashMap<u64, PerRequestState>>,
     /// Human-readable model identifier (basename of the loaded model file).
     model_name: String,
+    /// This engine's `model` label on every metric, interned once at construction
+    /// under the cardinality cap. See `crate::metrics::ModelLabels`.
+    model_label: &'static str,
     /// Prometheus metrics (optional — None disables recording).
     metrics: Option<Arc<Metrics>>,
     /// Whether the loaded model supports KV-cache sequence copying (llama_memory_seq_cp).
@@ -142,6 +145,16 @@ impl InferenceEngine {
                 )
             }
         });
+        // Resolved once, here, rather than at each observation: the `model` label
+        // is fixed for the life of an engine, and the per-token counter is far too
+        // hot to take an interner lock. Also the only place the cardinality cap is
+        // consulted — a model is admitted to /metrics when it is loaded, not when
+        // it is used.
+        let model_label = metrics
+            .as_ref()
+            .map_or(crate::metrics::UNOBSERVED_MODEL_LABEL, |m| {
+                m.model_label(&model_name)
+            });
         Self {
             model,
             scheduler,
@@ -149,6 +162,7 @@ impl InferenceEngine {
             next_request_id: AtomicU64::new(0),
             per_request_state: Arc::new(DashMap::new()),
             model_name,
+            model_label,
             metrics,
             supports_prefix_cache,
             supports_slot_reuse,
@@ -273,11 +287,18 @@ impl InferenceEngine {
         self.scheduler.submit(req)
     }
 
-    /// Record a rejected request in the `requests_rejected_total{reason}` metric.
+    /// Record a rejected request in `fox_requests_rejected_total{model,reason}`.
     pub fn record_rejection(&self, reason: &str) {
         if let Some(m) = &self.metrics {
-            m.requests_rejected_total.with_label_values(&[reason]).inc();
+            m.requests_rejected_total
+                .with_label_values(&[self.model_label, reason])
+                .inc();
         }
+    }
+
+    /// This engine's `model` label, for the registry to sweep on eviction.
+    pub fn model_label(&self) -> &'static str {
+        self.model_label
     }
 
     pub fn next_request_id(&self) -> u64 {

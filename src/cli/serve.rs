@@ -283,20 +283,27 @@ pub struct ServeArgs {
     pub moe_cpu: bool,
 }
 
-fn parse_kv_type(s: &str) -> u32 {
+// Both of these used to answer an unrecognised value with the default and no comment:
+// `type_kv = "turbo3"` in config.toml quantised nothing and said nothing, and the user
+// spent their time looking elsewhere. A silently ignored setting is worse than a
+// rejected one — the config file has no completion, no type checking and no feedback
+// except this.
+fn parse_kv_type(s: &str) -> Result<u32> {
     use crate::model_registry::kv_type;
     match s {
-        "q8_0" => kv_type::Q8_0,
-        "q4_0" => kv_type::Q4_0,
-        _ => kv_type::F16,
+        "f16" => Ok(kv_type::F16),
+        "q8_0" => Ok(kv_type::Q8_0),
+        "q4_0" => Ok(kv_type::Q4_0),
+        other => anyhow::bail!("unknown KV cache type '{other}' — expected f16, q8_0 or q4_0"),
     }
 }
 
-fn parse_split_mode(s: &str) -> u32 {
+fn parse_split_mode(s: &str) -> Result<u32> {
     match s {
-        "row" => 2,
-        "none" => 0,
-        _ => 1, // layer (default)
+        "layer" => Ok(1),
+        "row" => Ok(2),
+        "none" => Ok(0),
+        other => anyhow::bail!("unknown split mode '{other}' — expected layer, row or none"),
     }
 }
 
@@ -390,6 +397,17 @@ impl ServeArgs {
         if self.block_size == 0 {
             anyhow::bail!("block_size must be greater than 0");
         }
+        // Reject unknown enum-ish values here, at startup, rather than at the point of
+        // use — `validate()` runs before anything is loaded, so the message is the first
+        // thing the operator sees instead of the last.
+        parse_kv_type(&self.type_kv)?;
+        if let Some(t) = &self.type_k {
+            parse_kv_type(t)?;
+        }
+        if let Some(t) = &self.type_v {
+            parse_kv_type(t)?;
+        }
+        parse_split_mode(&self.split_mode)?;
         Ok(())
     }
 }
@@ -430,7 +448,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         tracing::warn!("{warning}");
     }
 
-    let split_mode = parse_split_mode(&args.split_mode);
+    let split_mode = parse_split_mode(&args.split_mode)?;
     // Use total VRAM across all GPUs when splitting across multiple GPUs.
     let gpu_memory_bytes = if split_mode != 0 {
         get_total_gpu_memory_bytes()
@@ -523,8 +541,8 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         gpu_memory_fraction: args.gpu_memory_fraction,
         metrics,
         keep_alive_secs: args.keep_alive_secs,
-        type_k: parse_kv_type(args.type_k.as_deref().unwrap_or(&args.type_kv)),
-        type_v: parse_kv_type(args.type_v.as_deref().unwrap_or(&args.type_kv)),
+        type_k: parse_kv_type(args.type_k.as_deref().unwrap_or(&args.type_kv))?,
+        type_v: parse_kv_type(args.type_v.as_deref().unwrap_or(&args.type_kv))?,
         main_gpu: args.main_gpu,
         split_mode,
         tensor_split: args

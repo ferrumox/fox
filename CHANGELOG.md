@@ -11,6 +11,241 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.21.0] - 2026-08-08
+
+Three changes about being able to tell what the server is doing: a number for the
+work its scheduler avoids, a document for what its interface promises, and a
+`model` label so its metrics say which model an observation belongs to. The last
+one renames every metric, which is why this is a minor rather than a patch.
+
+And then a fourth, found by pointing a client at a server with real models on it:
+the model listing endpoints were unusable on any machine with more than a few
+gigabytes of GGUFs. Fixing that changes what `digest` means, which is Tier 1, so
+it lands here rather than in a patch.
+
+### Changed
+
+- **BREAKING (Tier 2): the Prometheus metrics move from `ferrumox_*` to `fox_*`.**
+  The binary, the CLI, the docs and everything a user types say `fox`; the metrics
+  endpoint was the only place that said `ferrumox`. Renaming breaks every existing
+  dashboard, which is exactly why it happens now: after 1.0 the prefix is frozen and the
+  inconsistency would be permanent.
+
+  Migration: `s/ferrumox_/fox_/` in dashboards, alerts and recording rules. All thirteen
+  names change prefix only — type and meaning are identical.
+
+  Per [`COMPATIBILITY.md`](COMPATIBILITY.md) this is Tier 2: observable, changed on a
+  minor bump with a CHANGELOG entry and no promised deprecation window.
+
+- **Every metric now carries a `model` label.** Fox serves several models at once with
+  `--max-models`, and until now nothing on `/metrics` said which one was responsible: a
+  saturated KV cache, a deep queue and a bad p99 all looked like properties of the server
+  rather than of one model inside it.
+
+  The label **could not be added without a cap**. Model names are whatever the client asks
+  for — `fox pull` accepts arbitrary HuggingFace repos — so the label set is influenced
+  from outside the server, and an unbounded one turns `/metrics` into a memory leak that
+  every scrape then has to serialise. The cap is 32 distinct values per process; past that
+  everything collapses into `model="<other>"`, with a warning emitted once per process.
+  Serving is never degraded by this.
+
+  The cap counts models **ever seen**, not loaded at once: a load/evict/load cycle reuses
+  its slot instead of consuming a new one, so nobody can walk the limit upward by churning
+  models.
+
+  Evicting a model retires its series. Counters could have been left alone — a monotonic
+  total that stops advancing is still true — but the gauges could not:
+  `fox_kv_cache_usage_ratio` for an evicted model would sit at its last value forever, and
+  a dashboard would go on reporting a full KV cache for a model that no longer holds a
+  single block.
+
+  `scripts/e2e_smoke.py` read two of these metrics by line prefix and now sums the series
+  instead of keeping the last, which with more than one model loaded would have reported a
+  single model's drafting.
+
+  A side effect of labelling, checked against a real server: **a metric no longer appears
+  on `/metrics` until its first observation.** Previously, unlabelled, all thirteen were
+  registered at startup and always emitted at zero. Now a series exists once something
+  touches it, so a freshly started server shows only the three gauges the engine loop
+  refreshes, and `fox_requests_total` does not appear until the first request finishes.
+  This is normal Prometheus behaviour for labelled metrics, but a panel that assumed
+  "always present, possibly zero" now gets an empty result: use `or vector(0)` in those
+  queries.
+
+- **BREAKING (Tier 1): the `digest` in `/api/tags`, `/api/ps` and `/api/show` is derived
+  from the model file's name, size and mtime, not from its contents.** It is still
+  `sha256:<hex>` and still changes whenever the file is replaced, but it is now an opaque
+  identifier rather than a content hash.
+
+  This is the fix for the hang below, not a cosmetic change: a digest that is a content
+  hash cannot be produced without reading every byte of the file, and there is nowhere on
+  a listing request to put that work. Ollama can report a real hash because its blobs are
+  content-addressed and hashed once at pull; fox stores plain GGUF files in a directory
+  that users also drop models into by hand.
+
+  Nothing in fox resolves a model by digest — it identifies, it does not address — and
+  `/api/pull` already emitted `sha256:<filename>` rather than a content hash, so no fox
+  client could have been verifying one. Per [`COMPATIBILITY.md`](COMPATIBILITY.md),
+  changing a field's meaning is Tier 1 and belongs on a minor bump with an entry saying
+  so. This is that entry.
+
+### Fixed
+
+- **`GET /api/tags` no longer hangs with a core pinned at 100%.** It computed the SHA-256
+  of every `.gguf` in the models directory before it could answer: measured on a 27 GB
+  directory, 51.6 s for the first call. `/api/ps` and `/api/show` did the same.
+
+  What turned a slow endpoint into an apparently dead server is that the digest cache was
+  only written once a hash *finished*, and identical work in flight was never shared. Each
+  retry — a `curl` re-run, an Open WebUI refresh, a page reload — started a full re-hash of
+  the whole directory on another blocking thread. Retrying, the natural response to no
+  response, is what saturated the CPU. `GET /` stayed instant throughout, because it
+  touches no disk, which made the server look up rather than stuck.
+
+  The same directory now answers in 22 ms, and eight concurrent requests complete in 30 ms
+  total. `/api/ps` additionally re-read the models directory once per resident model; it
+  now reads it once.
+
+- **`GET /health` no longer loads a model to answer.** It called `get_or_load`, so the
+  liveness probe blocked for as long as a multi-gigabyte load took — `curl -m 3` against
+  a server whose model was not resident simply timed out — and it could *cause* a load,
+  which under the default `--max-models 1` evicts whatever is serving traffic. An
+  orchestrator polling `/health` during startup gets a timeout and restarts the process
+  before it ever finishes loading: the probe becomes the outage. Found while verifying an
+  unrelated fix on a server holding a 10 GB model.
+
+  It now reports residency instead of establishing it, answering in 6 ms, and does not
+  count as a use — a probe that refreshed the LRU would keep a model resident forever and
+  `--keep-alive-secs` would never fire. The response gains `model_loaded`, because
+  otherwise "not loaded yet" and "loaded and idle" are the same body; that state was
+  nearly unreachable while the handler loaded on demand and is now the normal one before
+  the first request.
+
+- **Diffusion models are refused at load instead of served as gibberish.** LLaDA, Dream,
+  RND1 and the rest do not generate left to right — they unmask a sequence over a fixed
+  number of steps, which is why llama.cpp ships a separate `diffusion` tool for them.
+  fox's decode loop is autoregressive, and loading one anyway did not fail: it produced
+  replies with mask tokens (`<|mask_start|>`) embedded in them, fragments out of order,
+  duplicated spans and truncation. Reported as an output-formatting bug, which is exactly
+  what it looks like from the client side. `llama_model_is_diffusion()` is now checked
+  after load and the model is rejected with an explanation.
+
+- **An unrecognised `--type-kv` or `--split-mode` value is an error, not a shrug.** Both
+  parsers answered anything they did not recognise with the default and no message, so
+  `type_kv = "turbo3"` in `config.toml` quantised nothing, said nothing, and left the
+  operator believing the setting had applied. A config file has no completion and no type
+  checking; this warning was the only feedback available and it was not being given.
+  Rejected at startup now, before anything loads, naming the accepted values.
+
+- **A missing GPU dependency no longer stops fox compiling at all.** `build.rs` enabled
+  the Vulkan backend on the strength of any single signal — `VULKAN_SDK` set, or `glslc`
+  on `PATH`, or `vulkan.h` present. ggml-vulkan then opens with
+  `find_package(Vulkan COMPONENTS glslc REQUIRED)` and `find_package(SPIRV-Headers CONFIG
+  REQUIRED)`, and a missing one of those is a fatal CMake error rather than a fallback.
+  So detecting *half* a toolchain did not produce a CPU build, it failed the whole cargo
+  build — and with no way to turn Vulkan off, the user could not build fox at all. Reported
+  from Windows with a LunarG SDK 1.3.246, which ships `glslc` and the loader but no
+  `SPIRV-HeadersConfig.cmake`.
+
+  All three pieces are now checked before the backend is switched on, on Linux and
+  Windows alike, and a partial toolchain produces a CPU build plus a warning naming what
+  is missing and how to install it. `FOX_NO_VULKAN=1` forces it off, `FOX_FORCE_VULKAN=1`
+  forces it on — the second doubling as the way to re-run the check, since installing a
+  package does not invalidate a build script.
+
+  `GGML_VULKAN=OFF` is now passed explicitly instead of being left unset. CMake caches the
+  switch in `target/`, so once any build had configured with it ON, every later build in
+  that tree inherited ON regardless — someone who hit this and then fixed their toolchain
+  would have kept failing, with `cargo clean` and a full llama.cpp rebuild as the apparent
+  only cure.
+
+- **Releases are published with notes.** `softprops/action-gh-release` was only ever
+  handed files, so every release page was a bare list of six assets and nothing else.
+  Two of those assets are tarballs differing by a `-vulkan` suffix, which meant the page
+  never said that a GPU build existed or which file to take — and the one *without* a
+  suffix reads as the default. It cost someone a bug report: `libggml-vulkan.so` looked
+  missing from the release, when it was in the other tarball all along.
+
+  The body is now this version's CHANGELOG section (`scripts/release_notes.py`) plus a
+  table of which download is which, how to verify it, and the note that `fox probe`
+  reports the backend actually in use. Written by a job that runs after both builds, so
+  the two matrix jobs cannot race over it.
+
+  Found alongside it: outside a tag push, `github.ref_name` is a *branch*, so the manual
+  `workflow_dispatch` re-run — which exists because GitHub silently fires no workflow when
+  more than three tags arrive at once — built tarballs named after a branch and uploaded
+  them to the wrong ref. The recovery path was broken in the situation it was written for.
+  Both jobs now resolve the tag once and the build checks out that tag.
+
+- **`modified_at` reported the wrong date.** The RFC 3339 formatter computed the calendar
+  by approximation — `year = 1970 + days/365`, `month = day_of_year/30 + 1`, 30-day months
+  — so it ignored leap years and drifted within every year: a file touched on 2025-08-04
+  was reported as 2025-08-20, and the error grows. It now uses an exact civil-from-days
+  conversion, checked against the real calendar day by day across 200 years. Affects
+  `modified_at` in `/api/tags` and `general.modified_at` in `/api/show`.
+
+### Added
+
+- **`COMPATIBILITY.md`** — what fox promises not to break, and what it does not. Fox is a
+  drop-in replacement for Ollama and an OpenAI-compatible server, so its interface is
+  consumed by Open WebUI, Continue.dev, the `ollama` CLI and the `openai` SDKs: software
+  fox does not control, which breaks silently and remotely when a response shape changes.
+  The CHANGELOG records what happened; the document of what is promised was missing.
+
+  The axis is not public versus private but **who breaks**. Tier 1 (contract): the 29 HTTP
+  routes, the user-facing subcommands, the documented flags, `config.toml`, `aliases.toml`,
+  the model store, and the release tarball layout — `fox` is linked `RPATH=$ORIGIN`, so
+  moving the `.so` files breaks every existing install, and that is Tier 1 even though it
+  is not code. Tier 2 (observable): metrics, `/slots`, `/props`, the body of `/health`, and
+  the diagnostic subcommands. Tier 3 (no commitment): undocumented environment variables,
+  the crate — which is not published to crates.io — the pinned llama.cpp commit, and
+  `perf-budgets.json`.
+
+  It states what does **not** count as breaking, which matters just as much: additions, and
+  any change in speed, batching or scheduling decisions with identical output. The
+  performance budgets watch those numbers; they do not promise them.
+
+  Three findings from reading the code to write it, all on the 1.0 checklist:
+  `/api/version` reports fox's own version rather than an Ollama one, so a client gating on
+  a version comparison compares against the wrong number; the metrics prefix was
+  `ferrumox_` while everything user-facing said `fox`; and no metric said which model was
+  responsible even though fox serves several at once. The last two are resolved above, in
+  this same version.
+
+  `scripts/check_docs_flags.py` now covers `COMPATIBILITY.md`: the flags and variables it
+  names are checked against `fox --help` and the source. A policy promising stability for a
+  misspelled flag promises nothing. The cost is that a deprecation example can no longer
+  invent a flag; that is noted in the script.
+
+- **Performance budgets for the scheduler** — `perf-budgets.json` at the repository root,
+  generated and enforced by `scheduler::budgets`. Five scenarios (8- and 16-client bursts
+  behind a shared prompt, admission pressure, a 3-turn chat, and a control of 4 disjoint
+  prompts), each in two arms: fox as shipped, and with `--kv-reuse` off.
+
+  These are **counts, not times**: prompt tokens handed to the model, peak KV blocks,
+  prefix hits and admitted requests, measured by driving `schedule_step` with no model
+  behind it. Deterministic on any machine, so the check is exact equality and an
+  *improvement* fails as loudly as a regression — the number belongs in the commit that
+  earned it. A millisecond gate on a shared runner would flake, and a check that flakes
+  gets ignored.
+
+  Runs inside `cargo test --all`, so it is already in `make ci` and in CI without touching
+  a workflow. To re-record after an intended change: `make budgets`.
+
+  What it is **not**: a regression net the existing tests lacked. Three regressions were
+  injected into the copy-from-a-live-sequence path — disabling it outright, removing the
+  donor deferral, and copying only half the shared prefix while leaving `prefix_hits`
+  intact — and the existing suite caught all three. What the file adds is the aggregate
+  magnitude, which no unit test expresses, at a scale (8 and 16 requests) none of them
+  reaches.
+
+  Building it produced a measurement that did not exist before: with a 512-block pool the
+  no-reuse arm admits 14 of 16 requests and the reuse arm admits 16 of 16. That is the
+  README's "sharing widens concurrency" claim, until now unmeasured anywhere. It is
+  pinned by `shared_prefix_admission_pressure_16_clients`.
+
+---
+
 ## [0.20.5] - 2026-08-04
 
 `fox run` has been sending the model malformed prompts since it was written. Fixing

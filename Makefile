@@ -25,7 +25,7 @@ BENCH_REQUESTS    ?= 50
 BENCH_PROMPT      ?= Write a short paragraph about the Rust programming language.
 BENCH_MAX_TOKENS  ?= 128
 
-.PHONY: help install-rust build run dev test bench download-model check ci setup docker docker-run
+.PHONY: help install-rust build run dev test budgets bench download-model check ci setup docker docker-run
 
 help:
 	@echo "Targets:"
@@ -35,6 +35,7 @@ help:
 	@echo "  make run             Build and start the server"
 	@echo "  make dev             Start with verbose logging (RUST_LOG=debug)"
 	@echo "  make test            Run unit tests"
+	@echo "  make budgets         Re-record perf-budgets.json (only for intended changes)"
 	@echo "  make check           Fast type-check without producing a binary"
 	@echo "  make ci              Run the full CI suite locally (fmt + clippy + tests)"
 	@echo "  make e2e             E2E smoke: real server + real model over HTTP (E2E_MODEL=...)"
@@ -233,6 +234,12 @@ dev: build
 
 test:
 	cargo test
+
+# Rewrite perf-budgets.json from the current scheduler. Only ever run this when a
+# change was *meant* to move the numbers — the diff is the performance review.
+budgets:
+	FOX_SKIP_LLAMA=1 FOX_UPDATE_BUDGETS=1 cargo test --lib scheduler::budgets
+	@git --no-pager diff --stat perf-budgets.json
 
 bench: build
 	@echo "Running benchmark against $(HOST):$(PORT)..."

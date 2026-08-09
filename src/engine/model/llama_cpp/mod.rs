@@ -616,6 +616,28 @@ impl LlamaCppModel {
         drop(moe_pattern_cstr);
         let model = NonNull::new(model).ok_or_else(|| diagnose_load_failure(model_path))?;
 
+        // Diffusion models (LLaDA, Dream, RND1 and friends) do not generate left to
+        // right. They start from a fully masked sequence and unmask it over a fixed
+        // number of steps, which is a different decode loop from top to bottom —
+        // llama.cpp ships a separate `diffusion` tool for exactly that reason.
+        //
+        // fox's engine is autoregressive only. Loading one anyway does not fail, it
+        // produces plausible-looking garbage: mask tokens leaking into the reply,
+        // fragments out of order, duplicated spans, truncation. That was reported as an
+        // output-formatting bug, which is what such a model looks like from the outside.
+        // Refuse instead, and say what the model is.
+        if unsafe { ffi::llama_model_is_diffusion(model.as_ptr()) } {
+            unsafe { ffi::llama_model_free(model.as_ptr()) };
+            anyhow::bail!(
+                "'{}' is a diffusion model, which fox cannot serve.\n\
+                 Diffusion models generate by iteratively unmasking a sequence rather than \
+                 one token after another, so fox's decode loop would emit mask tokens and \
+                 out-of-order text instead of a reply.\n\
+                 → Use llama.cpp's own `llama-diffusion-cli` for this model.",
+                model_path.display()
+            );
+        }
+
         let vocab = unsafe { ffi::llama_model_get_vocab(model.as_ptr()) };
         if vocab.is_null() {
             unsafe { ffi::llama_model_free(model.as_ptr()) };

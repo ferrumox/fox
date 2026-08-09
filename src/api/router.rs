@@ -6,9 +6,8 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::model_registry::ModelRegistry;
@@ -29,8 +28,6 @@ pub struct AppState {
     pub started_at: u64,
     /// Directory where `.gguf` model files are stored.
     pub models_dir: PathBuf,
-    /// Cache of SHA256 digests keyed by file path. Computed once per file.
-    pub digest_cache: Arc<Mutex<HashMap<PathBuf, String>>>,
     /// HuggingFace API token for authenticated model pulls.
     pub hf_token: Option<String>,
     /// Optional Bearer token required on every request (`--api-key` / `FOX_API_KEY`).
@@ -60,7 +57,6 @@ pub fn router(
         system_prompt,
         started_at,
         models_dir,
-        digest_cache: Arc::new(Mutex::new(HashMap::new())),
         hf_token,
         api_key,
         tool_call_parser,

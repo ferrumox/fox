@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "methodology": "Counts, not times. Each scenario drives `Scheduler::schedule_step` directly with no model behind it, so every figure is deterministic on any machine and the check is exact equality. `prefill_tokens` is the prompt work handed to the model, `peak_blocks` the high-water KV reservation, `prefix_hits` the admissions that found resident KV. The `baseline_no_reuse` arm is the same scenario with `--kv-reuse` off, which is what a server without fox's prefix work does; the ratio between the arms is the claim, the absolute numbers alone are not. These are regression tripwires for scheduler decisions, not latency claims about a running server — for those see scripts/ab_bench.sh and scripts/ab_shared_prefix.sh.",
+  "scenarios": {
+    "cold_unrelated_4_clients": {
+      "reuse": {
+        "prefill_tokens": 512,
+        "peak_blocks": 40,
+        "prefix_hits": 0,
+        "admitted": 4
+      },
+      "baseline_no_reuse": {
+        "prefill_tokens": 512,
+        "peak_blocks": 40,
+        "prefix_hits": 0,
+        "admitted": 4
+      }
+    },
+    "multiturn_chat_3_turns": {
+      "reuse": {
+        "prefill_tokens": 304,
+        "peak_blocks": 22,
+        "prefix_hits": 2,
+        "admitted": 3
+      },
+      "baseline_no_reuse": {
+        "prefill_tokens": 864,
+        "peak_blocks": 22,
+        "prefix_hits": 0,
+        "admitted": 3
+      }
+    },
+    "shared_prefix_admission_pressure_16_clients": {
+      "reuse": {
+        "prefill_tokens": 768,
+        "peak_blocks": 80,
+        "prefix_hits": 15,
+        "admitted": 16
+      },
+      "baseline_no_reuse": {
+        "prefill_tokens": 7392,
+        "peak_blocks": 490,
+        "prefix_hits": 0,
+        "admitted": 14
+      }
+    },
+    "shared_prefix_burst_16_clients": {
+      "reuse": {
+        "prefill_tokens": 768,
+        "peak_blocks": 80,
+        "prefix_hits": 15,
+        "admitted": 16
+      },
+      "baseline_no_reuse": {
+        "prefill_tokens": 8448,
+        "peak_blocks": 560,
+        "prefix_hits": 0,
+        "admitted": 16
+      }
+    },
+    "shared_prefix_burst_8_clients": {
+      "reuse": {
+        "prefill_tokens": 640,
+        "peak_blocks": 56,
+        "prefix_hits": 7,
+        "admitted": 8
+      },
+      "baseline_no_reuse": {
+        "prefill_tokens": 4224,
+        "peak_blocks": 280,
+        "prefix_hits": 0,
+        "admitted": 8
+      }
+    }
+  }
+}

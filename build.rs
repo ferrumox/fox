@@ -9,9 +9,12 @@
 //   - CUDA:  nvcc found in PATH or CUDACXX env var → builds libggml-cuda.so
 //   - ROCm:  hipcc found in PATH or HIPCC env var  → builds libggml-hip.so
 //   - Metal: macOS target                          → builds libggml-metal.dylib
-//   - Vulkan (Linux): glslc/VULKAN_SDK/vulkan.h    → builds libggml-vulkan.so
-//   - Vulkan (Windows): VULKAN_SDK env var          → builds ggml-vulkan.dll
+//   - Vulkan: loader + glslc + SPIRV-Headers       → builds libggml-vulkan.so / .dll
 //   No Cargo features needed; users just run `cargo build --release`.
+//
+// Vulkan needs all three pieces, not any one of them: ggml-vulkan asks CMake for each
+// with find_package(REQUIRED), so a partial toolchain fails the whole build instead of
+// falling back. FOX_NO_VULKAN=1 / FOX_FORCE_VULKAN=1 override the check.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -26,6 +29,86 @@ fn which_cmd(cmd: &str) -> Option<String> {
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
+}
+
+/// A `FOX_*` switch that is on for any value except `0` and the empty string.
+fn env_flag(name: &str) -> bool {
+    env::var(name).is_ok_and(|v| v != "0" && !v.is_empty())
+}
+
+/// Whether CMake's `find_package(SPIRV-Headers CONFIG REQUIRED)` is going to succeed.
+///
+/// ggml-vulkan needs SPIRV-Headers as a *config package*, not merely headers on the
+/// include path, and it ships separately from the Vulkan loader and glslc everywhere:
+/// `spirv-headers` on Debian/Ubuntu, and only in recent LunarG SDKs on Windows — a
+/// 1.3.246 SDK from 2023 has glslc, has the loader, and has no `SPIRV-HeadersConfig.cmake`
+/// anywhere in it.
+///
+/// This has to be checked *before* enabling the backend, because getting it wrong does
+/// not degrade to a CPU build. CMake aborts, the build script panics, and cargo fails —
+/// so a missing optional GPU dependency stops fox compiling at all. That is how a user
+/// with an old SDK ended up unable to build even the CPU backend, with no way to turn
+/// Vulkan off short of editing this file.
+fn spirv_headers_config_found() -> bool {
+    // Exactly what CMake's own error message tells you to set. If it is set, defer to
+    // CMake rather than second-guessing a path the user chose deliberately.
+    if env::var_os("SPIRV-Headers_DIR").is_some() || env::var_os("SPIRV_Headers_DIR").is_some() {
+        return true;
+    }
+
+    let mut prefixes: Vec<PathBuf> = Vec::new();
+    if let Some(sdk) = env::var_os("VULKAN_SDK") {
+        prefixes.push(PathBuf::from(sdk));
+    }
+    if let Ok(path) = env::var("CMAKE_PREFIX_PATH") {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        prefixes.extend(path.split(sep).filter(|s| !s.is_empty()).map(PathBuf::from));
+    }
+    prefixes.push(PathBuf::from("/usr"));
+    prefixes.push(PathBuf::from("/usr/local"));
+
+    // Where find_package(CONFIG) looks: <prefix>/(lib|lib/<arch>|share)/cmake/<name>/.
+    const LIBDIRS: &[&str] = &["lib", "lib64", "lib/x86_64-linux-gnu", "share", "Lib"];
+    const NAMES: &[&str] = &["SPIRV-HeadersConfig.cmake", "spirv-headers-config.cmake"];
+
+    prefixes.iter().any(|prefix| {
+        LIBDIRS.iter().any(|libdir| {
+            NAMES.iter().any(|name| {
+                prefix
+                    .join(libdir)
+                    .join("cmake")
+                    .join("SPIRV-Headers")
+                    .join(name)
+                    .exists()
+            })
+        })
+    })
+}
+
+/// Given that a Vulkan toolchain was found, decide whether to actually build the
+/// backend. Says why when the answer is no — a silent CPU-only build is its own bug
+/// report ("is it using my GPU?").
+fn enable_vulkan() -> bool {
+    if env_flag("FOX_NO_VULKAN") {
+        println!("cargo:warning=FOX_NO_VULKAN is set — skipping the Vulkan backend");
+        return false;
+    }
+    if env_flag("FOX_FORCE_VULKAN") || spirv_headers_config_found() {
+        return true;
+    }
+    for line in [
+        "Vulkan toolchain found, but SPIRV-Headers is not — building WITHOUT the Vulkan backend.",
+        "  ggml-vulkan does find_package(SPIRV-Headers CONFIG REQUIRED). Enabling it without",
+        "  that package does not fall back to CPU, it fails the entire build.",
+        "  Debian/Ubuntu:  apt install spirv-headers",
+        "  Windows:        install a current Vulkan SDK (1.3.246 and older do not ship it)",
+        "  Then rebuild with FOX_FORCE_VULKAN=1 — installing a package does not make cargo",
+        "  re-run this script, so a plain rebuild would silently reuse this same answer.",
+        "  FOX_NO_VULKAN=1 silences this if you meant to build for CPU.",
+    ] {
+        println!("cargo:warning={line}");
+    }
+    false
 }
 
 /// Local corrections applied to the vendored llama.cpp before it is built.
@@ -93,10 +176,16 @@ fn main() {
     for var in [
         "FOX_SKIP_LLAMA",
         "FOX_CPU_ALL_VARIANTS",
+        "FOX_NO_VULKAN",
+        "FOX_FORCE_VULKAN",
         "CUDACXX",
         "HIPCC",
         "VULKAN_SDK",
         "AMDGPU_TARGETS",
+        // Read while deciding whether SPIRV-Headers is findable.
+        "CMAKE_PREFIX_PATH",
+        "SPIRV-Headers_DIR",
+        "SPIRV_Headers_DIR",
     ] {
         println!("cargo:rerun-if-env-changed={var}");
     }
@@ -195,8 +284,7 @@ fn main() {
     // run already installed into OUT_DIR, which are copied out regardless. Turning
     // the flag back off therefore needs a `cargo clean` to fully take effect.
     // Harmless if you don't: ggml just keeps loading the best available variant.
-    let cpu_all_variants =
-        env::var("FOX_CPU_ALL_VARIANTS").is_ok_and(|v| v != "0" && !v.is_empty());
+    let cpu_all_variants = env_flag("FOX_CPU_ALL_VARIANTS");
     cmake_config.define(
         "GGML_CPU_ALL_VARIANTS",
         if cpu_all_variants { "ON" } else { "OFF" },
@@ -225,6 +313,14 @@ fn main() {
     } else {
         false
     };
+
+    // Say OFF up front so a later ON can override it on the command line. Leaving the
+    // switch simply unset is not neutral: CMake remembers it in CMakeCache.txt inside
+    // `target/`, so once a build has configured with GGML_VULKAN=ON, every later build
+    // in that tree inherits ON no matter what this script decides. Someone who hit the
+    // SPIRV-Headers failure and then fixed their environment would keep failing, and
+    // `cargo clean` — a full llama.cpp rebuild — would look like the only way out.
+    cmake_config.define("GGML_VULKAN", "OFF");
 
     if !cuda_enabled {
         match target_os.as_str() {
@@ -304,15 +400,38 @@ fn main() {
                 // ── Vulkan auto-detection (Linux) ──────────────────────────────
                 // Enable when ROCm is unavailable and the Vulkan toolchain is present.
                 // glslc (shader compiler) is required: apt install glslc libvulkan-dev
+                // ggml-vulkan opens with `find_package(Vulkan COMPONENTS glslc REQUIRED)`,
+                // so the shader compiler AND the loader/headers both have to be there.
+                // This used to accept any ONE of glslc, vulkan.h or VULKAN_SDK, and each
+                // of those alone configures straight into a fatal CMake error.
                 if !rocm_enabled {
-                    let has_vulkan = env::var("VULKAN_SDK").is_ok()
-                        || which_cmd("glslc").is_some()
-                        || std::path::Path::new("/usr/include/vulkan/vulkan.h").exists();
-                    if has_vulkan {
+                    let sdk = env::var_os("VULKAN_SDK").map(PathBuf::from);
+                    let glslc = which_cmd("glslc").is_some()
+                        || sdk
+                            .as_ref()
+                            .is_some_and(|p| p.join("bin").join("glslc").exists());
+                    let headers = std::path::Path::new("/usr/include/vulkan/vulkan.h").exists()
+                        || sdk
+                            .as_ref()
+                            .is_some_and(|p| p.join("include/vulkan/vulkan.h").exists());
+
+                    if glslc && headers {
+                        if enable_vulkan() {
+                            println!(
+                                "cargo:warning=Vulkan toolchain detected — building libggml-vulkan.so"
+                            );
+                            cmake_config.define("GGML_VULKAN", "ON");
+                        }
+                    } else if glslc || headers || sdk.is_some() {
+                        // Half a toolchain is the confusing case: enough for the old check
+                        // to turn the backend on, never enough for CMake.
+                        let missing = if glslc { "libvulkan-dev" } else { "glslc" };
                         println!(
-                            "cargo:warning=Vulkan toolchain detected — building libggml-vulkan.so"
+                            "cargo:warning=partial Vulkan toolchain ({missing} missing) — building without the Vulkan backend"
                         );
-                        cmake_config.define("GGML_VULKAN", "ON");
+                        println!(
+                            "cargo:warning=  Debian/Ubuntu: apt install glslc libvulkan-dev spirv-headers"
+                        );
                     }
                 }
             }
@@ -323,11 +442,16 @@ fn main() {
                 // Vulkan works on any modern GPU (NVIDIA, AMD, Intel) via DirectX 12 drivers.
                 // Requires CARGO_TARGET_DIR=C:\t (or similarly short) in the workflow to keep
                 // the vulkan-shaders-gen ExternalProject paths under Windows MAX_PATH.
+                // Having the SDK is not the same as having SPIRV-Headers — older LunarG
+                // SDKs ship glslc and the loader without it, and this used to enable the
+                // backend on the strength of VULKAN_SDK alone and fail the build outright.
                 if let Ok(vulkan_sdk) = env::var("VULKAN_SDK") {
-                    println!(
-                        "cargo:warning=Vulkan SDK found at {vulkan_sdk} — building ggml-vulkan.dll"
-                    );
-                    cmake_config.define("GGML_VULKAN", "ON");
+                    if enable_vulkan() {
+                        println!(
+                            "cargo:warning=Vulkan SDK found at {vulkan_sdk} — building ggml-vulkan.dll"
+                        );
+                        cmake_config.define("GGML_VULKAN", "ON");
+                    }
                 }
             }
             _ => {}

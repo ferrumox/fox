@@ -46,11 +46,7 @@ pub async fn auth_middleware(
 mod tests {
     use super::*;
     use axum::{body::Body, middleware, routing::get, Router};
-    use std::{
-        collections::HashMap,
-        path::PathBuf,
-        sync::{Arc, Mutex},
-    };
+    use std::{path::PathBuf, sync::Arc};
     use tower::ServiceExt;
 
     fn make_state(api_key: Option<&str>) -> AppState {
@@ -95,7 +91,6 @@ mod tests {
             system_prompt: None,
             started_at: 0,
             models_dir: PathBuf::from("/tmp"),
-            digest_cache: Arc::new(Mutex::new(HashMap::new())),
             hf_token: None,
             api_key: api_key.map(str::to_string),
             tool_call_parser: "auto".to_string(),

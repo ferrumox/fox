@@ -287,10 +287,15 @@ post(
 )
 proposed = accepted = 0.0
 for line in get("/metrics").splitlines():
-    if line.startswith("ferrumox_spec_tokens_proposed_total"):
-        proposed = float(line.split()[-1])
-    if line.startswith("ferrumox_spec_tokens_accepted_total"):
-        accepted = float(line.split()[-1])
+    if line.startswith("#"):
+        continue
+    # Summed rather than assigned: since 0.21 these carry a `model` label, so a
+    # server with more than one model loaded emits one series per model and
+    # taking the last would silently report a single model's drafting.
+    if line.startswith("fox_spec_tokens_proposed_total"):
+        proposed += float(line.split()[-1])
+    if line.startswith("fox_spec_tokens_accepted_total"):
+        accepted += float(line.split()[-1])
 check(
     "drafts proposed > 0",
     proposed > 0,

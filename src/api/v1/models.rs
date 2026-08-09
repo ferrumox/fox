@@ -14,8 +14,13 @@ use crate::api::types::{HealthResponse, ModelInfo, ModelsResponse};
 use crate::cli::list_models;
 
 pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    let entry = state.registry.get_or_load(&state.primary_model).await.ok();
-    let (kv_cache_usage, queue_depth, active_requests, model_name) = match entry {
+    // Reports residency, never establishes it. This used to call `get_or_load`, so a
+    // liveness probe blocked for as long as the model took to load — a `curl -m 3`
+    // against a freshly started server timed out — and could itself trigger a load,
+    // evicting whatever was serving traffic under the default `--max-models 1`. A probe
+    // that restarts the process it is meant to be watching is worse than no probe.
+    let entry = state.registry.resident(&state.primary_model);
+    let (kv_cache_usage, queue_depth, active_requests, model_name) = match &entry {
         Some(e) => (
             e.engine.kv_cache_usage(),
             e.engine.queue_depth(),
@@ -26,6 +31,10 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     };
     Json(HealthResponse {
         status: "ok".to_string(),
+        // Without this the not-yet-loaded case is indistinguishable from a loaded, idle
+        // one: same name, same zeroes. That state was nearly unreachable while this
+        // handler loaded on demand, and is now the normal one before the first request.
+        model_loaded: entry.is_some(),
         kv_cache_usage,
         queue_depth,
         active_requests,
@@ -140,6 +149,40 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["status"].as_str().unwrap(), "ok");
         assert_eq!(v["model_name"].as_str().unwrap(), "primary");
+        assert_eq!(v["model_loaded"], true);
+    }
+
+    /// A liveness probe must not load a model. It used to call `get_or_load`, so it
+    /// blocked for the length of a multi-gigabyte load — and could evict whatever was
+    /// serving traffic under `--max-models 1` — which turns an orchestrator's probe into
+    /// the thing that restarts the process.
+    #[tokio::test]
+    async fn test_health_does_not_load_the_model() {
+        let dir = tempfile::tempdir().unwrap();
+        // A model that exists on disk and is *not* resident: the old handler would have
+        // happily loaded it to answer.
+        std::fs::write(dir.path().join("dormant.gguf"), b"").unwrap();
+        let (mut state, _entry) = make_test_state("primary", dir.path());
+        state.primary_model = "dormant".to_string();
+        let resident_before = state.registry.loaded().len();
+
+        let app = make_router(&state);
+        let resp = get_req(app, "/health").await;
+
+        assert_eq!(resp.status(), 200);
+        let bytes = body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v["status"].as_str().unwrap(),
+            "ok",
+            "the server is still up"
+        );
+        assert_eq!(v["model_loaded"], false);
+        assert_eq!(
+            state.registry.loaded().len(),
+            resident_before,
+            "answering /health loaded a model"
+        );
     }
 
     #[tokio::test]

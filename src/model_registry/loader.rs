@@ -199,7 +199,7 @@ pub(super) async fn load_model(
         scheduler,
         kv_cache,
         name,
-        metrics,
+        metrics.clone(),
         EngineOptions {
             max_prefill_chunk,
             context_shift,
@@ -230,5 +230,6 @@ pub(super) async fn load_model(
     Ok(EngineEntry {
         engine,
         loop_handle,
+        metrics,
     })
 }

@@ -4,6 +4,8 @@
 // that doesn't fit waits in the queue (FIFO) until running requests finish.
 
 mod batch;
+#[cfg(test)]
+mod budgets;
 mod prompt_cache;
 mod schedule;
 mod slots;

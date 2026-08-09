@@ -179,7 +179,9 @@ impl InferenceEngine {
 
                 // Record per-token metrics.
                 if let Some(m) = &self.metrics {
-                    m.tokens_generated_total.inc();
+                    m.tokens_generated_total
+                        .with_label_values(&[self.model_label])
+                        .inc();
                 }
 
                 if is_done {
@@ -193,9 +195,13 @@ impl InferenceEngine {
                             Some(StopReason::EngineError) => "error",
                             None => "unknown",
                         };
-                        m.requests_total.with_label_values(&[reason_label]).inc();
+                        m.requests_total
+                            .with_label_values(&[self.model_label, reason_label])
+                            .inc();
                         let elapsed = req.submitted_at.elapsed().as_secs_f64();
-                        m.request_latency_seconds.observe(elapsed);
+                        m.request_latency_seconds
+                            .with_label_values(&[self.model_label])
+                            .observe(elapsed);
                     }
 
                     // Park the sequence so its KV stays resident and a later prompt

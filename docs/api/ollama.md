@@ -266,7 +266,7 @@ List all GGUF model files in the models directory with metadata.
 |-------|-------------|
 | `name` | Model identifier (filename stem without `.gguf`). Use this as the `model` field in requests. |
 | `size` | File size in bytes. |
-| `digest` | SHA-256 digest of the file. Cached after first computation. |
+| `digest` | Opaque model identifier, `sha256:<hex>`. Derived from the file's name, size and mtime — **not** a hash of its contents, so listing stays instant no matter how large the models are. Stable while the file is unchanged; changes when it is replaced. |
 | `details.family` | Model architecture (inferred from filename). |
 | `details.quantization_level` | Quantization type (inferred from filename). |
 | `modified_at` | File modification timestamp in ISO 8601 format. |

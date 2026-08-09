@@ -27,7 +27,12 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 FOX = sys.argv[1] if len(sys.argv) > 1 else str(ROOT / "target/debug/fox")
 
 # Files that document fox's own surface. Anything else quotes other tools' flags.
-DOC_GLOBS = ["docs/cli/*.md", "docs/configuration.md"]
+#
+# COMPATIBILITY.md is in scope because it is the one document whose whole value is that
+# the names in it are the real ones: a policy that promises stability for a flag spelled
+# wrong promises nothing. It also means an example there cannot invent a flag to
+# illustrate a deprecation — use a real one, or describe it without the leading dashes.
+DOC_GLOBS = ["docs/cli/*.md", "docs/configuration.md", "COMPATIBILITY.md"]
 
 # Flags that are real but not discoverable from `--help`: global cargo/make context in
 # examples, or flags of the subcommand the page is *about* being shown as prose.

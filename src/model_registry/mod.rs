@@ -243,6 +243,21 @@ impl ModelRegistry {
         &self.config
     }
 
+    /// The engine for `name` **only if it is already resident**. Never loads, and never
+    /// counts as a use.
+    ///
+    /// `/health` used to call `get_or_load`, which made a liveness probe both block for
+    /// the length of a multi-gigabyte load and be able to *cause* one — under the default
+    /// `--max-models 1`, evicting whatever was serving traffic. An orchestrator polling
+    /// `/health` during startup times out and restarts the process before it ever
+    /// finishes loading, which is a restart loop rather than a slow start.
+    ///
+    /// Deliberately does not touch `last_used`: a probe that counted as a use would keep
+    /// the model resident forever and `--keep-alive-secs` would never fire.
+    pub fn resident(&self, name: &str) -> Option<Arc<EngineEntry>> {
+        self.engines.get(name).map(|e| e.value().clone())
+    }
+
     pub fn loaded(&self) -> Vec<(String, Arc<EngineEntry>)> {
         self.engines
             .iter()

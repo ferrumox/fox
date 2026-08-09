@@ -280,6 +280,7 @@ Returns the current server status.
 ```json
 {
   "status": "ok",
+  "model_loaded": true,
   "kv_cache_usage": 0.12,
   "queue_depth": 2,
   "active_requests": 1,
@@ -290,7 +291,8 @@ Returns the current server status.
 
 | Field | Description |
 |-------|-------------|
-| `status` | Always `"ok"` if the server is running. |
+| `status` | Always `"ok"` if the server is running. This endpoint reports residency, it never loads a model to answer, so it stays fast while one is loading. |
+| `model_loaded` | Whether the active model is resident right now. `false` before the first request in lazy-loading mode, when the counters below are all zero because nothing is loaded rather than because nothing is busy. |
 | `kv_cache_usage` | Fraction of KV cache blocks currently occupied (0.0–1.0). High values indicate memory pressure. |
 | `queue_depth` | Number of requests waiting to be scheduled. |
 | `active_requests` | Number of sequences currently being decoded. |

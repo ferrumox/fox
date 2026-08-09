@@ -110,8 +110,8 @@ rejected drafts.
 - **S3 — metrics** ✅ (config already landed with S2): `speculative_decode_sync` reports
   how many drafts it proposed; the engine accrues lifetime `spec_proposed`/`spec_accepted`
   atomics (exposed via `spec_stats()`), and the run-loop metrics block propagates deltas
-  to Prometheus — `ferrumox_spec_tokens_proposed_total`,
-  `ferrumox_spec_tokens_accepted_total`, and the `ferrumox_spec_acceptance_ratio` gauge.
+  to Prometheus — `fox_spec_tokens_proposed_total`,
+  `fox_spec_tokens_accepted_total`, and the `fox_spec_acceptance_ratio` gauge.
 - **S4 — validation bench** ✅: `fox bench-spec` runs the same greedy generation with
   speculation off and on, on a repetitive workload (n-gram lookup's best case) and a
   prose workload (closer to its worst case), reporting tok/s, acceptance ratio, and the
