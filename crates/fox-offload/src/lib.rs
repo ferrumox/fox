@@ -21,8 +21,9 @@
 //!
 //! # What this crate adds on top of the paper
 //!
-//! 1. **Disjointness is checked, not asserted.** The paper states each strategy
-//!    guarantees disjoint access; that claim is what makes the kernel body safe.
+//! 1. **Disjointness is checked, not asserted.** Both the paper and #158076 state
+//!    that a strategy guarantees disjoint access, and that claim is the only thing
+//!    making the kernel body safe.
 //!    [`region::verify_disjoint`] enumerates a whole launch grid and fails if any
 //!    element is claimed twice or left unclaimed. Runs in `cargo test`, no GPU.
 //!

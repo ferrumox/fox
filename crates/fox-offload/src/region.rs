@@ -2,7 +2,14 @@
 //!
 //! The paper's `Region`/`PartitioningStrategy` idea, with one thing added.
 //!
-//! The paper's position is that each strategy *guarantees* disjoint access between
+//! Upstream has a version of the trait in review (rust-lang/rust#158076): an
+//! `unsafe trait` with `get`/`get_mut` over raw pointers, no concrete strategies
+//! beyond a `Dummy` test impl, and disjointness written down as a safety obligation
+//! on whoever implements it. This module keeps the same idea in safe code, ships
+//! strategies that are actually usable, and — the part neither the paper nor the PR
+//! has — makes the obligation checkable.
+//!
+//! Both the paper and the PR say each strategy *guarantees* disjoint access between
 //! threads, and that guarantee is the whole reason a kernel body needs no `unsafe`.
 //! It is stated in prose. A strategy with an off-by-one produces two threads
 //! writing the same cell — silent corruption on a GPU, the worst class of bug
