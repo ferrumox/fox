@@ -200,8 +200,10 @@ All acknowledged in the body, none in the abstract or conclusion:
 ## Where this leaves us
 
 **The opening we identified survives a full reading, and narrows usefully.**
-`Preload`/`PreloadMut` is a two-state model: on the device until dropped, with
-refcounting only to decide *when* to free a whole mapping. There is no partial
+`Preload`/`PreloadMut` is a two-state model: on the device until dropped. The refcount
+exists only on the immutable `Preload`, and only to decide *when* to free a whole
+mapping — for `PreloadMut` the paper says plainly that "the reference counter is
+irrelevant", since those handles cannot alias by design. There is no partial
 residency, no fixed-size blocks, no sharing of a common prefix between two separate
 logical buffers, no copy-on-write. For a mesh you upload once and download once, that
 is exactly right, and the paper's HPC framing makes it the correct design for its
