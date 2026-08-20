@@ -74,16 +74,17 @@ omptarget device 0 info: Creating new map entry with HstPtrBase=0x00007ffc3f4d44
                          TgtPtrBegin=0x000062bf9597f6e0, Size=1024, DynRefCount=1
 omptarget device 0 info: Entering OpenMP kernel at unknown:0:0 with 1 arguments:
 omptarget device 0 info: alloc(unknown)[1024]
-omptarget error: Host ptr 0x555555597280 does not have a matching target pointer.
+omptarget error: Host ptr 0x5d4dc9f01280 does not have a matching target pointer.
 omptarget fatal error 1: failure of target construct while offloading is mandatory
 ```
 
 ## The failing pointer is the kernel, not the argument
 
 This bit is easy to misread, so to be explicit: the address in the error is the
-kernel's `region_id`, not the mapped array. Under `setarch -R` the PIE base is
-`0x555555554000`, and `nm` puts `._RNvC6probe44fill.region_id` at `0x43280`. The sum is
-the reported address exactly. So this is `getTableMap()` in libomptarget failing to
+kernel's `region_id`, not the mapped array. Re-running under `setarch -R` to pin the
+PIE base at `0x555555554000` gives `Host ptr 0x555555597280`, and `nm` puts
+`._RNvC6probe44fill.region_id` at `0x43280`. `0x555555554000 + 0x43280` is that
+address exactly. So this is `getTableMap()` in libomptarget failing to
 find the kernel entry, and the data mapping above it succeeded.
 
 Everything that lookup needs looks right in the final binary:
