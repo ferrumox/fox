@@ -1,0 +1,18 @@
+[package]
+name = "fox-offload"
+version = "0.1.0"
+edition = "2021"
+description = "Portable GPU kernels for fox, on rustc's LLVM Offload backend"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = []
+# Compiles the `offload!` launch path. Needs a nightly rustc *and* a working
+# clang-linker-wrapper, which rustup does not ship yet — see
+# docs/design/rust-gpu-offload.md. Everything else here builds on stable.
+offload = []
+
+# Deliberately empty. Kernel code has to compile for a target whose entire
+# standard library is `core`; a dependency tree is how that stops being true.
+[dependencies]
