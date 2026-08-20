@@ -1,14 +1,31 @@
 # Draft: rust-lang/rust issue
 
 Not part of fox. Kept here so the analysis behind it stays with
-`rust-gpu-offload.md`. Paste the body below into a new issue on rust-lang/rust,
-then delete this file.
+`rust-gpu-offload.md`.
+
+**Do not file this yet.** A from-source build of rustc at the same commit
+(`f7d782a3b`), with the documented `--enable-llvm-offload --enable-clang
+--enable-lld` configuration, is still running. If a fully matched toolchain works,
+most of this report is about mixing rustup's `offload` component with apt.llvm.org's
+clang rather than about a defect, and only the two documentation items survive.
 
 **Title:** `std::offload`: kernels never launch, the host `__tgt_bin_desc` is registered empty
 
 ---
 
-I tried this code:
+The example in the dev guide does not build on current nightly, so this is a
+minimal one. Three separate reasons, all on `f7d782a3b`:
+
+- `#[offload_kernel]` expands to something referencing `std`, and the example is
+  `#![no_std]`, so the `HostMetadata` pass fails with ``cannot find `std` in the list
+  of imported crates``.
+- `assert_eq!(x[i], 2.5)` on the generic kernel's output gives `E0283: type
+  annotations needed`.
+- The AMD branch imports only `workgroup_id_x as block_idx_x` and
+  `workitem_id_x as thread_idx_x`, but the kernel body calls `block_dim_x()`, which
+  is never imported for `amdgpu` and does not exist in `core::arch::amdgpu` at all.
+
+So, the code I actually ran:
 
 ```rust
 #![cfg_attr(any(target_arch = "amdgpu", target_arch = "nvptx64"), no_std)]
@@ -54,8 +71,9 @@ RUSTFLAGS="-Zunstable-options -Zoffload=Host=$DEVICE_BIN -L native=$TOOLCHAIN_LI
   -Clink-arg=-lomptarget" cargo +nightly build --release
 ```
 
-and a final link through `clang-linker-wrapper` 23.1.0, since the `offload` rustup
-component ships libraries but no tools:
+and a final link through `clang-linker-wrapper` 23.1.0 from apt.llvm.org's
+`llvm-toolchain-noble-23`, since the `offload` rustup component ships libraries but no
+tools:
 
 ```
 clang-linker-wrapper --host-triple=x86_64-unknown-linux-gnu --linker-path=/usr/bin/cc \
@@ -139,6 +157,10 @@ Two things I tried, both by patching the linked binary rather than rebuilding ru
 - Swapping the two entries in `.init_array` so the wrapper registers first changes
   nothing.
 
+Adding the device runtime the way the dev guide's wrapper invocation does —
+`--should-extract=gfx1100 --device-linker=amdgcn-amd-amdhsa=-lompdevice` against the
+`libompdevice.a` in the rustup component, plus `-lomp` — also changes nothing.
+
 ## Two smaller things
 
 **The return value of `__tgt_target_kernel` is dropped.** In the generated code the
@@ -147,9 +169,9 @@ no host fallback. That is why the first experiment above produced silently wrong
 results instead of an error. Whatever happens with the descriptor, an offload that
 fails at runtime should probably not be indistinguishable from one that worked.
 
-**The example in `library/core/src/offload.md` does not compile.** It uses
-`thread_idx_x()`, `block_idx_x()` and `block_dim_x()`, and none of those exist on
-either target: `core::arch::amdgpu` has `workitem_id_x()`/`workgroup_id_x()` as safe
+**Neither documented example compiles.** Besides the dev guide one above,
+`library/core/src/offload.md` uses `thread_idx_x()`, `block_idx_x()` and
+`block_dim_x()`, and none of those exist on either target: `core::arch::amdgpu` has `workitem_id_x()`/`workgroup_id_x()` as safe
 fns and no workgroup-size query at all, while `core::arch::nvptx` has
 `_thread_idx_x()`/`_block_idx_x()`/`_block_dim_x()` as `unsafe` fns. Happy to send a
 PR for the doc if that is useful, though it is really the portability gap underneath
