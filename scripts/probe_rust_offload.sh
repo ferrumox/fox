@@ -178,9 +178,10 @@ else
 fi
 
 step "run"
-# Known failure as of 2026-08-20 even with the image present: the data region maps
-# the argument's stack address, then the kernel launch looks up a *different*
-# pointer in the data segment. That is a host-codegen bug in rustc, not packaging.
-# See docs/design/rust-gpu-offload.md.
+# Known failure as of 2026-08-20 even with the image present: the reported host
+# pointer is the kernel's region_id, so this is libomptarget failing to bind the
+# kernel entry, not a data-mapping failure. rustc registers an all-null
+# __tgt_bin_desc and its own source calls that a placeholder. See
+# docs/design/rust-gpu-offload.md.
 HSA_OVERRIDE_GFX_VERSION=11.0.0 LIBOMPTARGET_INFO=1 LD_LIBRARY_PATH="$TOOLCHAIN_LIB" \
   timeout 90 "$BIN" 2>&1 | head -12

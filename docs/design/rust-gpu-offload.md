@@ -44,7 +44,7 @@ to *compile*.
 | Device codegen → `nvptx64-nvidia-cuda`, `sm_120` | works — from the *same source* |
 | Host link (`-Zoffload=Host=`) | links, emits the `__tgt_*` runtime calls |
 | Device image reaches the binary | **yes**, with an LLVM 23 `clang-linker-wrapper` (see below) |
-| End-to-end execution | **no** — the launch is handed a different pointer than the one mapped |
+| End-to-end execution | **no** — the kernel entry is never bound; host registration is a placeholder |
 
 Both device passes need `-Zbuild-std=core` (the GPU targets have no prebuilt std),
 `-Zunstable-options`, and `lto = "fat"` on the host pass.
@@ -132,36 +132,85 @@ somewhere else. Two sources were tried:
 So the packaging blocker is closed locally. What it uncovered is a different and
 more interesting problem.
 
-## The real blocker: the launch is handed the wrong pointer
+## The real blocker: the kernel is never bound to its device entry
 
-With a real image embedded, the failure does not change — which rules out the empty
-descriptor as the cause. `LIBOMPTARGET_INFO=31` shows why:
+With a real image embedded the failure does not change, which rules out the empty
+descriptor as *the* cause. The error is:
 
 ```
-Creating new map entry with HstPtrBase=0x00007ffc3f4d4408, ...
-                           TgtPtrBegin=0x000062bf9597f6e0, Size=1024, DynRefCount=1
-Entering OpenMP kernel ... with 1 arguments:  alloc(unknown)[1024]
-omptarget error: Host ptr 0x58cf9cbfd280 does not have a matching target pointer.
+Entering OpenMP data region ... to(unknown)[1024]          <- succeeds
+Entering OpenMP kernel ... alloc(unknown)[1024]
+omptarget error: Host ptr 0x555555597280 does not have a matching target pointer.
 ```
 
-The data region maps `0x7ffc…` — the **stack** address of `let mut x = [0.0f32; 256]`
-— and the mapping succeeds. The kernel launch then looks up `0x58cf…`, an address in
-the program's own data segment. Two different pointers: rustc's host code registers
-one and launches with another.
+**That pointer is the kernel, not the data.** Run under `setarch -R`, the PIE base is
+`0x555555554000` and `nm` puts `._RNvC6probe44fill.region_id` at `0x43280`; the sum is
+exactly the reported address. So this is libomptarget's `getTableMap()` failing to
+find the *kernel entry*, not a data-mapping failure. (An earlier revision of this
+document said the launch was handed a different pointer than the one mapped. That was
+wrong: disassembling the final binary shows both `__tgt_target_data_begin_mapper` and
+`KernelArgs.ArgBasePtrs`/`ArgPtrs` pointing at the same two stack slots, both holding
+`&x`.)
 
-Tested and ruled out, so the report is narrow rather than vague:
+Everything the lookup needs looks correct:
 
-- Not a stale build (all three passes rebuilt from clean, image verified present).
-- Not the argument form — `*mut [f32; 256]` and `&mut [f32; 256]` fail identically.
-- Not a function boundary — declaring the array in the same function as the
-  `offload!` call fails identically.
-- Not the AMD plugin — libomptarget enumerates four devices, allocates on device 0
-  and reports the mapping table correctly. Device memory allocation works.
+| | |
+|---|---|
+| `llvm_offload_entries` in the binary | present, allocated, 56 bytes = one entry |
+| entry `Address` | `0x43280` — equals `region_id` |
+| entry `SymbolName` | `_RNvC6probe44fill` |
+| device image exports | `_RNvC6probe44fill`, `.kd`, `.region_id` |
 
-This is a defect in the offload host codegen, not in packaging, not in ROCm, and not
-in gfx1150-under-`HSA_OVERRIDE`. It is worth reporting on
-[rust-lang/rust#131513](https://github.com/rust-lang/rust/issues/131513) with exactly
-the above.
+So the host table is right, the names match, and the image is there. What is wrong is
+the registration. The binary contains **two** descriptors and **two** ctor pairs:
+
+| | rustc's, `0x43210` | wrapper's, `0x4eb80` |
+|---|---|---|
+| `NumDeviceImages` | `0` | `1` |
+| `DeviceImages` | `NULL` | `0x4eb60` |
+| `HostEntriesBegin`/`End` | `NULL`/`NULL` | `0x4fa38`/`0x4fa70` |
+
+rustc registers an all-null descriptor and then calls `__tgt_init_all_rtls()`,
+initialising every plugin before the real image is registered. That is not an
+accident, and `compiler/rustc_codegen_llvm/src/builder/gpu_offload.rs` says so
+outright — it builds the null struct unconditionally, with the correct form sitting
+next to it in a comment:
+
+```rust
+let const_struct = cx.const_struct(&[cx.get_const_i32(0), ptr_null, ptr_null, ptr_null], false);
+// @.omp_offloading.descriptor = ... { i32 1, ptr @.omp_offloading.device_images,
+//                                     ptr @__start_llvm_offload_entries, ptr @__stop_llvm_offload_entries }
+// @.omp_offloading.descriptor = ... { i32 0, ptr null, ptr null, ptr null }
+```
+
+and, immediately above the `__tgt_init_all_rtls` declaration:
+
+```rust
+// FIXME(offload): Drop this, once we fully automated our offload compilation pipeline,
+// since LLVM will initialize them for us if it sees gpu kernels being registered.
+```
+
+Two binary-patch experiments, so the conclusion is not just source reading:
+
+- **Neutralising rustc's ctor** (`ret` at its entry) removes the fatal error — and the
+  program prints `x[42]=0`, silently producing wrong results with no omptarget output
+  at all. Which exposes a second defect: rustc **ignores the return value** of
+  `__tgt_target_kernel`, so an offload that fails for any reason does not fall back
+  and does not complain. There is no host fallback branch after the call.
+- **Reordering `.init_array`** so the wrapper's registration runs first changes
+  nothing.
+
+So the host-side registration is a placeholder that the feature's own source says is
+waiting on the rest of the pipeline. That is consistent with rustup not shipping the
+linker wrapper: the host/link half is simply not finished yet, and no amount of
+getting the image into the binary compensates.
+
+Ruled out along the way, so a bug report can be narrow: not a stale build (all passes
+rebuilt clean, image verified in the final binary), not the argument form (`*mut` and
+`&mut` behave identically), not a function boundary (array declared at the call site
+behaves identically), and not the AMD plugin — libomptarget enumerates four devices,
+allocates on device 0, and prints a correct host-device mapping table, so device
+memory allocation works.
 
 ## Two gaps in the shipped feature
 
