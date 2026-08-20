@@ -27,7 +27,9 @@
 //! memory, and *that* is where the strategy's disjointness is what keeps the whole
 //! thing sound — hence the verifier.
 
+#[cfg(not(any(target_arch = "amdgpu", target_arch = "nvptx64")))]
 use alloc::vec;
+#[cfg(not(any(target_arch = "amdgpu", target_arch = "nvptx64")))]
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
@@ -110,6 +112,7 @@ pub trait PartitioningStrategy {
 pub struct Linear1D;
 
 impl PartitioningStrategy for Linear1D {
+    #[inline(always)]
     fn lane(len: usize, tid: ThreadId, grid: &GridDim) -> Lane {
         let n = grid.total_threads();
         if n == 0 {
@@ -144,6 +147,7 @@ impl PartitioningStrategy for Linear1D {
 pub struct Strided1D;
 
 impl PartitioningStrategy for Strided1D {
+    #[inline(always)]
     fn lane(len: usize, tid: ThreadId, grid: &GridDim) -> Lane {
         let n = grid.total_threads();
         if n == 0 {
@@ -154,7 +158,7 @@ impl PartitioningStrategy for Strided1D {
             return Lane::Empty;
         }
         // ceil((len - k) / n)
-        let count = ((len as u64 - k) + n - 1) / n;
+        let count = (len as u64 - k).div_ceil(n);
         Lane::Strided {
             start: k as usize,
             stride: n as usize,
@@ -277,6 +281,7 @@ pub enum DisjointError {
 /// that misses the one colliding index is worthless.
 ///
 /// Returns the number of threads examined.
+#[cfg(not(any(target_arch = "amdgpu", target_arch = "nvptx64")))]
 pub fn verify_disjoint<S: PartitioningStrategy>(
     len: usize,
     grid: &GridDim,

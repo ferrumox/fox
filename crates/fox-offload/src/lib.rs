@@ -49,13 +49,22 @@
 //! catches up.
 
 #![cfg_attr(not(test), no_std)]
+// Los intrínsecos de índice de hilo de `thread` viven tras estas puertas. Sólo se
+// activan al compilar PARA un dispositivo, así que el crate sigue construyéndose en
+// estable para el host.
+#![cfg_attr(target_arch = "amdgpu", feature(stdarch_amdgpu))]
+#![cfg_attr(target_arch = "nvptx64", feature(stdarch_nvptx))]
 #![deny(unsafe_code)]
 
+// `alloc` no existe en un target de GPU. Todo lo que lo usa —el pool de residencia,
+// el verificador de disjunción, el atajo de argmax en host— es de host por naturaleza.
+#[cfg(not(any(target_arch = "amdgpu", target_arch = "nvptx64")))]
 extern crate alloc;
 
 pub mod kernels;
 pub mod launch;
 pub mod region;
+#[cfg(not(any(target_arch = "amdgpu", target_arch = "nvptx64")))]
 pub mod resident;
 pub mod thread;
 

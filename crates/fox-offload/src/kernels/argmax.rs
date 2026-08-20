@@ -101,6 +101,7 @@ pub struct BlockArgmax;
 impl Kernel for BlockArgmax {
     type Args<'a> = ArgmaxArgs<'a>;
 
+    #[inline(always)]
     fn thread(args: &mut Self::Args<'_>, tid: ThreadId, grid: &GridDim) {
         let k = tid.linear(grid) as usize;
         if k >= args.partials.len() {
@@ -140,6 +141,7 @@ pub fn reduce_partials(partials: &[Candidate]) -> Candidate {
 ///
 /// The `grid` is a real launch shape, not a formality — running the same input
 /// under several shapes is what proves the reduction is order-independent.
+#[cfg(not(any(target_arch = "amdgpu", target_arch = "nvptx64")))]
 pub fn argmax_via_kernel(logits: &[f32], grid: &GridDim) -> i32 {
     use crate::launch::launch_cpu;
     use alloc::vec;
