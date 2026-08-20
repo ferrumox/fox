@@ -1,7 +1,8 @@
 # A close reading of *GPU Offload in Rust: Portable, Safe, and Fast*
 
 arXiv:2608.13759v1, 13 Aug 2026. Drehwald (Toronto / LLNL / Vector), Domínguez (URJC),
-Sala (LLNL), Aspuru-Guzik (Toronto), Doerfert (LLNL). Read in full on 2026-08-20.
+Sala (LLNL), Aspuru-Guzik (Toronto), Doerfert (LLNL). Read in full on 2026-08-20 —
+text first, then the figures in the PDF, which changed two of the conclusions below.
 
 Written to feed two things: the related-work section of anything we publish on typed
 device residency, and the decision about whether fox should ever own its kernel layer.
@@ -17,7 +18,7 @@ LLVM Offload, three offloading interfaces, and a partitioning abstraction that m
 abstract's "zero-overhead, multi-vendor GPU compilation framework" as a description of
 the *plumbing*, and it holds.
 
-Read it as a claim about GPU kernel performance in general and it does not, for four
+Read it as a claim about GPU kernel performance in general and it does not, for the
 reasons below.
 
 ## 1. The performance claim is demonstrated on the interface that does not carry the contribution
@@ -31,8 +32,11 @@ kernels in Rust" and that "most Rust offload users will start prototyping GPU
 applications with our convenient interface".
 
 Now look at what is measured. Figure 4 (H100) plots `Base_Seq`, **Rust Interface C**,
-`Base_CUDA`, `RAJA_CUDA`. Interface A is absent. It appears only in Figure 3 (MI250X),
+`Base_CUDA`, `RAJA_CUDA`. Interface A is absent — confirmed against the rendered figure,
+not just its legend text. It appears only in Figure 3 (MI250X),
 where the paper introduces it as "a smoke test" — and there it is "over 400× slower".
+Figure 3 makes that vivid: on a log axis topping out at 10^3.3, the Interface A bar reaches
+the ceiling on FIR and PRESSURE while Interface C sits two to three decades below.
 
 Interface C is the one where the programmer stages memory by hand with
 `preload_mut`/`drop`. That is, the headline numbers come from the interface whose
@@ -73,7 +77,52 @@ For an LLM inference engine this is the whole question. Decode is bandwidth-boun
 would tie trivially; prefill and attention are neither, and nothing here speaks to
 them.
 
-## 3. "Hand-optimized" is doing work the baselines do not support
+## 3. The evaluation publishes no numbers — only log-scale bars, and no variance at all
+
+This one is invisible from the text and obvious the moment you open the figures.
+
+There is **not a single numeric table in the evaluation**. Every result in §6 is a bar
+chart, and Figures 3 and 4 use a logarithmic vertical axis. The percentages quoted in
+prose ("between 11% faster and 46% slower") cannot be checked against anything, the
+per-kernel values cannot be extracted, and nobody can reproduce a comparison without
+re-running the whole suite.
+
+There are also **no error bars and no reported variance anywhere**. RAJAPerf loops each
+kernel "between 50 and 700 times" and reports the loop total, so there is repetition
+inside a measurement — but no spread across measurements, no standard deviation, no
+confidence interval, and no statement of how many times each configuration was run.
+
+Both matter more here than they would elsewhere, because the effect being claimed is
+small and the observed spread is not. The paper's own FIR/LTIMES data has Rust 44-46%
+slower than one compiler and 15-32% faster than another on the same kernels. When
+between-compiler variation on a single micro-kernel is that wide, a parity claim needs
+error bars to mean anything, and the reader is given none.
+
+Reading Figure 5 (RTX A2000) bar by bar also shows something the surrounding text does
+not say. The section discusses that figure entirely in terms of what algebraic floats
+buy — "2× speedup on FIR", "about 20%" on three others. But the figure shows plain Rust
+as the **tallest bar on most of the kernels plotted**, behind `Base_CUDA` and
+`RAJA_CUDA`, with algebraic floats closing part of that gap rather than opening a new
+lead. On FIR, plain Rust is roughly double `Base_CUDA` and algebraic floats bring it
+level. That is a legitimate result and it is plotted honestly; it simply is not what
+the paragraph about it describes. (Bar lengths read off the rendered figure — with no
+table published, that is the only way to read it, which is the point of this section.)
+
+## 4. The register numbers come from hardware that is not in the setup
+
+§6 states the machines plainly: "We ran the benchmarks on three different servers,
+using an AMD MI250X GPU, NVIDIA H100 GPU, and an NVIDIA RTX A2000 GPU."
+
+The Register Usage paragraph then reports: "On **RTX 2070**, the average register usage
+of Rust is 33, while the RAJA-CUDA solution averages 28".
+
+An RTX 2070 is Turing; an RTX A2000 is Ampere. Different architecture, different
+register file, different occupancy rules. Either it is a typo for A2000, or the
+register measurement was taken on an undeclared fourth machine. It is a small thing and
+almost certainly the former, but it is the kind of slip that makes a reviewer wonder
+what else in §6 was assembled from more than one run.
+
+## 5. "Hand-optimized" is doing work the baselines do not support
 
 The abstract says "native, hand-optimized CUDA and HIP C++ baselines". The baselines
 are RAJAPerf's `Base_CUDA` / `Base_HIP` and the RAJA backends. RAJAPerf's Base variants
@@ -89,7 +138,7 @@ it means the spread between three compilers on the same micro-kernel is roughly 
 which is the same magnitude as the effect being reported. Thirteen kernels at that
 noise level is a weak instrument for a parity claim.
 
-## 4. The one place the approach demonstrably loses is measured, then excluded from the headline figures
+## 6. The one place the approach demonstrably loses is measured, then excluded from the headline figures
 
 §6, Memory Transfer Sizes: Rust moves **less** data than RAJA on H100 — 53 transfers /
 423 MB H2D versus 55 / 468 MB, and 69 MB versus 99 MB D2H — and takes **46 ms versus
@@ -103,7 +152,7 @@ this 3× **does not appear in Figures 3 or 4 at all**. The convention is RAJAPer
 the authors', and they disclose the numbers plainly. But the reader who takes the
 figures as the result never sees the one axis where the approach is behind.
 
-## 5. Register pressure is dismissed on evidence that only covers the easy kernels
+## 7. Register pressure is dismissed on evidence that only covers the easy kernels
 
 33 registers average for Rust versus 28 for RAJA-CUDA on RTX 2070 — 18% more,
 attributed to bounds checking, since GPU code indexes explicitly rather than iterating.
@@ -115,7 +164,7 @@ cost nothing. But 18% is exactly the margin that decides occupancy on register-b
 kernels — tiled GEMM, fused attention — which is the class §3.3 gestures at and §6 does
 not contain. The dismissal is sound for what was measured and unsupported past it.
 
-## 6. Safety is relocated, not eliminated — and the residual obligation is never tested
+## 8. Safety is relocated, not eliminated — and the residual obligation is never tested
 
 The contributions list says the frontend eliminates "the need for user-written unsafe
 blocks in typical parallel workloads". §3.2 is more careful, and worth quoting:
@@ -149,7 +198,7 @@ Related, and smaller: the motivating example in §3.2 reads
 block, not an index. It is a typo, but it sits in the example whose purpose is to show
 why naive slice access is unsound.
 
-## 7. Compile time is asserted, not measured
+## 9. Compile time is asserted, not measured
 
 §2.1 tells us "Compile times in Rust are a major concern", and the design section then
 adopts a pipeline that runs the frontend twice. On the cost of the cross-pass
@@ -161,7 +210,7 @@ Expected. There is no compile-time measurement anywhere in the paper. For an aud
 the paper itself identifies as compile-time-sensitive, and for a design choice whose
 main cost is compile time, that is a missing table rather than a missing sentence.
 
-## 8. Scope limits the abstract does not carry
+## 10. Scope limits the abstract does not carry
 
 All acknowledged in the body, none in the abstract or conclusion:
 
