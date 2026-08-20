@@ -98,17 +98,52 @@ users to explore additional partitioning schemes."
 Not a drop-in. Someone else's PR is mid-review; this needs coordinating, not arriving
 with code. Worth doing only after A gets a reply.
 
-### D. The typed KV residency work
+### D. The thesis: ownership-typed paged device residency
 
-Parked deliberately. See the `kv-tipado-decision-pendiente` memory for the design, the
-decision rule agreed in advance, and the framing. Short version: classify fox's ~6
-KV-lifecycle bugs against an `Owned`/`Shared` API and see how many the types would have
-rejected. Four or five means the refactor justifies itself; one means drop it. Two days
-either way.
+This is the one idea in the whole thread with a life beyond fox, and it is parked in
+three phases rather than dropped. Naming matters here, because in conversation it kept
+getting called "the exercise" and disappearing.
 
-It buys **no speed**. It changes the cost of touching that subsystem, which today only
-the person who wrote the scheduler can do safely. And it is not free: rewriting a core
-API can introduce bugs of its own.
+**The idea.** The paper's contribution is deriving an invariant from a type you already
+have: `&T` maps to the device, `&mut T` maps both ways, no pragma. It applies that to a
+two-state model — on host, or on device until dropped. An inference server needs the
+model underneath instead: fixed-size blocks, refcounted, shared between sequences with a
+common prefix, copied only on write. `Owned<'p>` is writable; `Shared<'p>` has **no write
+method**, so writing to a shared block is not a mistake you can make, it is a program you
+cannot express. `Shared::make_mut` is the only path back to writable. Neither is `Copy`
+or `Clone` and both `Drop` into the pool, so you cannot forget to release or release
+twice.
+
+It buys **no speed**. What it changes is the cost of touching that subsystem, which today
+only the person who wrote the scheduler can do safely, because the rules live in
+comments. In an engine, KV lifecycle bugs are silent — wrong tokens, truncated replies,
+another user's conversation corrupted — so a class that keeps recurring is worth making
+inexpressible. And it is not free: rewriting a core API can introduce bugs of its own.
+
+**Phase 1 — the exercise. Two days. This is the gate.** Take fox's ~6 KV-lifecycle bugs
+from the history — prefix-cache leak, `seq_cp` crash, admission preempting, stale cells
+past the divergence point, `trim_sequence` reporting success without rewinding, duplicated
+shared-prefix accounting — and classify each one: would the types have rejected it at
+compile time? Decision rule, agreed before starting so it cannot be rationalised
+afterwards: **four or five means go; one means drop it.** Prior estimate, to validate
+rather than believe: the ordering constraint is caught outright, the recurrent rollback is
+caught as a *capability* rather than as that bug (`trim` only on `Rewindable` sequences),
+the accounting only partly.
+
+**Phase 2 — the refactor.** Only if phase 1 says go.
+
+**Phase 3 — the paper.** Optional, and only worth it for the credential — it will not win
+fox users. But it costs almost nothing extra, because **phase 1 produces the evaluation
+section as a side effect**: a type discipline plus real bugs it would have rejected is
+exactly what a PL paper's evaluation is. There is no choosing between doing the
+engineering and writing it up; it is the same work.
+
+**The paper cannot start before phase 1.** Writing an introduction for evidence you have
+not checked is how you end up committed to a claim that does not survive.
+
+Design, decision rule and framing in the `kv-tipado-decision-pendiente` memory. The
+runtime version already exists in `crates/fox-offload/src/resident.rs`, 27 tests, no GPU
+and no working offload required — it is a type system.
 
 ### E. Ship the two fixes
 
