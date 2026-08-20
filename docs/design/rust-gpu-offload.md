@@ -200,6 +200,25 @@ Two binary-patch experiments, so the conclusion is not just source reading:
 - **Reordering `.init_array`** so the wrapper's registration runs first changes
   nothing.
 
+### Not a mixed-toolchain artifact
+
+The first runs paired rustup's rustc and libomptarget with apt.llvm.org's
+`clang-linker-wrapper`, which is a fair thing to be suspicious of. Ruled out by
+building rustc from source at `f7d782a3b`, the commit this nightly is built from, with
+`--enable-llvm-offload --enable-clang --enable-lld`, and relinking using only that
+build's `clang-linker-wrapper`/`clang` (`23.1.0-rust-1.100.0-nightly`, LLVM
+`21cf2843…` — the same commit string embedded in rustc's own `device.bin`), its
+`libomptarget.so`/`libomp.so`/`libLLVM.so`, and `rust-lld` as `ld.lld`. Identical
+failure.
+
+The one piece still not from that build is `libompdevice.a`, because bootstrap's
+`llvm::OmpOffload` step fails here: it configures the amdgcn device runtime with
+`-DCMAKE_C_COMPILER=cc -DCMAKE_C_COMPILER_TARGET=amdgcn-amd-amdhsa` and dies on
+`Host compiler does not support '-fuse-ld=lld'` — gcc, pointed at an AMD GPU target,
+with no system lld. That is what PR #161118 is about ("we fail to build offload on a
+fresh os, since it picks gcc"), so it is a known problem rather than a new one. The
+host half of offload built and installed cleanly, which is what mattered here.
+
 So the host-side registration is a placeholder that the feature's own source says is
 waiting on the rest of the pipeline. That is consistent with rustup not shipping the
 linker wrapper: the host/link half is simply not finished yet, and no amount of

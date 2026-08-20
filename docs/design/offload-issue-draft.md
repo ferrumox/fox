@@ -3,11 +3,8 @@
 Not part of fox. Kept here so the analysis behind it stays with
 `rust-gpu-offload.md`.
 
-**Do not file this yet.** A from-source build of rustc at the same commit
-(`f7d782a3b`), with the documented `--enable-llvm-offload --enable-clang
---enable-lld` configuration, is still running. If a fully matched toolchain works,
-most of this report is about mixing rustup's `offload` component with apt.llvm.org's
-clang rather than about a defect, and only the two documentation items survive.
+Ready to file. The toolchain-mixing explanation was checked and ruled out — see
+"Reproduced with a fully matched toolchain" below.
 
 **Title:** `std::offload`: kernels never launch, the host `__tgt_bin_desc` is registered empty
 
@@ -160,6 +157,31 @@ Two things I tried, both by patching the linked binary rather than rebuilding ru
 Adding the device runtime the way the dev guide's wrapper invocation does —
 `--should-extract=gfx1100 --device-linker=amdgcn-amd-amdhsa=-lompdevice` against the
 `libompdevice.a` in the rustup component, plus `-lomp` — also changes nothing.
+
+## Reproduced with a fully matched toolchain
+
+Since the `offload` component ships no tools, the first runs mixed rustup's rustc and
+libomptarget with apt.llvm.org's `clang-linker-wrapper`, and "you mixed LLVM builds"
+would be a fair thing to suspect. So I built rustc from source at the same commit this
+nightly comes from (`f7d782a3b`) with `--enable-llvm-offload --enable-clang
+--enable-lld`, and relinked using only artifacts from that build:
+
+- `clang-linker-wrapper` and `clang`, `23.1.0-rust-1.100.0-nightly`, from
+  `rust-lang/llvm-project` at `21cf28432798952d942bacc6bcee3a328faa3638` — the same
+  commit string that appears inside the `device.bin` rustc produced
+- `libomptarget.so`, `libomp.so`, `libLLVM.so` from that build's `offload/` and
+  `llvm/` output
+- `ld.lld` = `rust-lld` from the toolchain, `LLD 23.1.0` at the same commit
+
+Same failure, byte for byte in behaviour. So this is not a mixed-toolchain artifact.
+
+One caveat, stated because it is the only piece that is not from that build:
+`libompdevice.a` still comes from the rustup component, because bootstrap's
+`llvm::OmpOffload` step fails on this machine — it configures the amdgcn device
+runtime with `-DCMAKE_C_COMPILER=cc -DCMAKE_C_COMPILER_TARGET=amdgcn-amd-amdhsa` and
+dies on `Host compiler does not support '-fuse-ld=lld'`. That looks like the problem
+#161118 is already about, so I have not filed it separately. The host half of offload
+built and installed fine.
 
 ## Two smaller things
 
