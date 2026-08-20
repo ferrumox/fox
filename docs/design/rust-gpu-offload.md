@@ -43,7 +43,7 @@ to *compile*.
 | Device codegen → `amdgcn-amd-amdhsa`, `gfx1100` | works — 3.4 KB offload image |
 | Device codegen → `nvptx64-nvidia-cuda`, `sm_120` | works — from the *same source* |
 | Host link (`-Zoffload=Host=`) | links, emits the `__tgt_*` runtime calls |
-| Device image embedded in the binary | **no** — see below |
+| Device image reaches the binary | **no** — emitted, then dropped as `SHF_EXCLUDE` |
 | End-to-end execution | **no** — fails at kernel launch |
 
 Both device passes need `-Zbuild-std=core` (the GPU targets have no prebuilt std),
@@ -97,10 +97,24 @@ is portable across a target family.
 
 ## What does not work, and why
 
-**The device image is never embedded in the host binary.** The linked executable
-imports `__tgt_register_lib`, `__tgt_target_kernel`, `__tgt_target_data_begin_mapper`
-and friends, but `readelf -SW` finds no offload section and `strings` finds no
-`gfx1100`. So the program registers an empty image, and at launch:
+**The device image is emitted, then deliberately dropped by the linker.** rustc's
+host pass does its job: `host.o` carries the image (the `OFFLOAD` magic and the
+string `gfx1100` are both in it) in a section named `.llvm.offloading`, alongside
+an allocated `llvm_offload_entries` table and a `.rodata..omp_offloading.descriptor`.
+
+The catch is the section's flags:
+
+```
+[1753] .llvm.offloading  LOOS+0xfff4c0b  ...  000d58  E
+```
+
+`E` is `SHF_EXCLUDE` — *the linker must not copy this section into an executable*.
+That is by design: `.llvm.offloading` exists to be consumed by
+`clang-linker-wrapper`, which is supposed to run as the link driver, extract the
+image, finish device linking, and emit a populated descriptor. rustc links with a
+plain `cc`/`rust-lld` instead, so the section is discarded and the descriptor stays
+all zeroes. The final binary therefore imports `__tgt_register_lib` and friends,
+registers an empty image, and dies at the first launch:
 
 ```
 omptarget device 0 info: Entering OpenMP data region ... to(unknown)[1024]
@@ -109,11 +123,22 @@ omptarget error: Host ptr 0x... does not have a matching target pointer.
 omptarget fatal error 1: failure of target construct while offloading is mandatory
 ```
 
-The embedding step is normally `clang-linker-wrapper`/`clang-offload-packager`, and
-the `offload` rustup component ships **only libraries** — no tools. That is what
-"partial offload component" means in
-[PR #160991](https://github.com/rust-lang/rust/issues/131513). Inferred, not
-observed: supplying the wrapper by hand may be enough to close this. Not attempted.
+Verified, not guessed: the final binary contains zero occurrences of the `OFFLOAD`
+magic and no `gfx1100`/`amdgcn` strings, while `host.o` contains both; and passing
+`host.o` again as a link argument fails with duplicate `main`/`probe3::fill`,
+proving it *is* the object being linked.
+
+The `offload` rustup component ships **only libraries** — no `clang-linker-wrapper`,
+no `clang-offload-packager`. That is what "partial offload component" means in
+[PR #160991](https://github.com/rust-lang/rust/issues/131513). ROCm's LLVM (in the
+`rocm/dev-ubuntu-24.04:7.2-complete` image) does carry those tools, but at a
+different LLVM version than rust's 23.1; whether they interoperate is untested and
+is the one remaining thing that could unblock execution locally.
+
+Note the image kind is `llvm ir`, not device ISA, so libomptarget JITs it at load
+time. The wrapper's job here is packaging and descriptor population, not codegen —
+which is why this looks closer to a missing build step than to missing
+functionality.
 
 Unrelated but worth recording: `libhsa-runtime64.so.1` (1.11.0, from Ubuntu) is
 present on this host, so the AMD plugin has something to load if we get that far.

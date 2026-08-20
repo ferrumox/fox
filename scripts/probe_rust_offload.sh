@@ -131,14 +131,22 @@ else
   bad "host link"; exit 1
 fi
 
-step "is the device image actually embedded?"
-# The runtime calls get emitted either way; without the image, __tgt_register_lib
-# registers nothing and the kernel launch fails on pointer mapping. Distinguishing
-# the two is the whole point of this check.
-if readelf -SW target/release/offload_probe 2>/dev/null | grep -qi 'llvm.offloading\|omp_offloading'; then
-  ok "offload section present"
+step "did the device image survive into the binary?"
+# rustc emits it into a .llvm.offloading section marked SHF_EXCLUDE, meaning the
+# linker must drop it; clang-linker-wrapper is supposed to consume that section and
+# populate the descriptor, and rustup does not ship it. So the runtime calls are
+# emitted either way and the binary registers an empty image. Grepping for the
+# section is not enough — check the image bytes actually made it in.
+HOSTO="$(ls -t target/release/build/offload_probe/*/out/host.o 2>/dev/null | head -1)"
+if [ -n "$HOSTO" ] && grep -qa 'gfx\|sm_' "$HOSTO" 2>/dev/null; then
+  ok "host.o carries the device image"
 else
-  bad "NO offload section — the image was not embedded (clang-linker-wrapper is not shipped by the offload component)"
+  bad "host.o has no device image (unexpected — the host pass regressed)"
+fi
+if grep -qa "$ARCH" target/release/offload_probe 2>/dev/null; then
+  ok "image present in the final binary — execution should work"
+else
+  bad "image dropped at link (SHF_EXCLUDE); needs clang-linker-wrapper, not shipped by rustup"
 fi
 
 step "run"
