@@ -132,22 +132,55 @@ else
 fi
 
 step "did the device image survive into the binary?"
-# rustc emits it into a .llvm.offloading section marked SHF_EXCLUDE, meaning the
-# linker must drop it; clang-linker-wrapper is supposed to consume that section and
-# populate the descriptor, and rustup does not ship it. So the runtime calls are
-# emitted either way and the binary registers an empty image. Grepping for the
-# section is not enough — check the image bytes actually made it in.
+# rustc emits it into a .llvm.offloading section flagged SHF_EXCLUDE, so a plain
+# linker is *required* to drop it. clang-linker-wrapper is what extracts it and
+# emits a host object with the image and a populated descriptor — and rustup ships
+# libraries only, no tools. Point FOX_OFFLOAD_WRAPPER at an LLVM 23 one to get past
+# this; ROCm's (LLVM 22) cannot read rust's output and fails silently under rustc.
+#
+#   curl -sL -o ct23.deb https://apt.llvm.org/noble/pool/main/l/llvm-toolchain-23/clang-tools-23_<ver>_amd64.deb
+#   dpkg-deb -x ct23.deb llvm23/     # plus libllvm23, libclang-cpp23, clang-23, lld-23
+#   export LD_LIBRARY_PATH=$PWD/llvm23/usr/lib/x86_64-linux-gnu
+#   export PATH=$PWD/llvm23/usr/lib/llvm-23/bin:$PATH
+#   export FOX_OFFLOAD_WRAPPER=$PWD/llvm23/usr/lib/llvm-23/bin/clang-linker-wrapper
 HOSTO="$(ls -t target/release/build/offload_probe/*/out/host.o 2>/dev/null | head -1)"
-if [ -n "$HOSTO" ] && grep -qa 'gfx\|sm_' "$HOSTO" 2>/dev/null; then
+if [ -n "$HOSTO" ] && grep -qa "$ARCH" "$HOSTO" 2>/dev/null; then
   ok "host.o carries the device image"
 else
   bad "host.o has no device image (unexpected — the host pass regressed)"
 fi
-if grep -qa "$ARCH" target/release/offload_probe 2>/dev/null; then
-  ok "image present in the final binary — execution should work"
+
+BIN=target/release/offload_probe
+if [ -n "${FOX_OFFLOAD_WRAPPER:-}" ] && [ -x "$FOX_OFFLOAD_WRAPPER" ]; then
+  step "re-link through clang-linker-wrapper"
+  # Driving the wrapper through `rustc -Clinker=` does not work: rustc adds
+  # --gc-sections / -nodefaultlibs / -fuse-ld=lld and the image is lost again.
+  # A manual final link over host.o is the recipe that produces a loadable image.
+  if "$FOX_OFFLOAD_WRAPPER" --host-triple=x86_64-unknown-linux-gnu \
+       --linker-path=/usr/bin/cc \
+       -L/usr/lib/gcc/x86_64-linux-gnu/13 -L/usr/lib/x86_64-linux-gnu -L"$TOOLCHAIN_LIB" \
+       "$(realpath "$HOSTO")" -lomptarget -Wl,-rpath,"$TOOLCHAIN_LIB" \
+       -o "$WORK/wrapped" >/dev/null 2>&1; then
+    ok "wrapper linked"
+    BIN="$WORK/wrapped"
+  else
+    bad "wrapper link failed (version mismatch? ROCm's LLVM 22 cannot read rust's LLVM 23 output)"
+  fi
 else
-  bad "image dropped at link (SHF_EXCLUDE); needs clang-linker-wrapper, not shipped by rustup"
+  printf '   SKIP  set FOX_OFFLOAD_WRAPPER to an LLVM 23 clang-linker-wrapper\n'
+fi
+
+step "is the image loadable from the final binary?"
+if grep -qa "$ARCH" "$BIN" 2>/dev/null; then
+  ok "image present in $BIN"
+else
+  bad "image dropped at link (SHF_EXCLUDE) — needs clang-linker-wrapper"
 fi
 
 step "run"
-HSA_OVERRIDE_GFX_VERSION=11.0.0 LIBOMPTARGET_INFO=1 timeout 90 ./target/release/offload_probe 2>&1 | head -12
+# Known failure as of 2026-08-20 even with the image present: the data region maps
+# the argument's stack address, then the kernel launch looks up a *different*
+# pointer in the data segment. That is a host-codegen bug in rustc, not packaging.
+# See docs/design/rust-gpu-offload.md.
+HSA_OVERRIDE_GFX_VERSION=11.0.0 LIBOMPTARGET_INFO=1 LD_LIBRARY_PATH="$TOOLCHAIN_LIB" \
+  timeout 90 "$BIN" 2>&1 | head -12

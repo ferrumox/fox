@@ -43,8 +43,8 @@ to *compile*.
 | Device codegen → `amdgcn-amd-amdhsa`, `gfx1100` | works — 3.4 KB offload image |
 | Device codegen → `nvptx64-nvidia-cuda`, `sm_120` | works — from the *same source* |
 | Host link (`-Zoffload=Host=`) | links, emits the `__tgt_*` runtime calls |
-| Device image reaches the binary | **no** — emitted, then dropped as `SHF_EXCLUDE` |
-| End-to-end execution | **no** — fails at kernel launch |
+| Device image reaches the binary | **yes**, with an LLVM 23 `clang-linker-wrapper` (see below) |
+| End-to-end execution | **no** — the launch is handed a different pointer than the one mapped |
 
 Both device passes need `-Zbuild-std=core` (the GPU targets have no prebuilt std),
 `-Zunstable-options`, and `lto = "fat"` on the host pass.
@@ -95,55 +95,73 @@ target runtime, exactly as the paper describes. Note `kind llvm ir` — final IS
 codegen happens at load time, which is why `-Ctarget-cpu` matters and why the image
 is portable across a target family.
 
-## What does not work, and why
+## The link step, solved
 
-**The device image is emitted, then deliberately dropped by the linker.** rustc's
-host pass does its job: `host.o` carries the image (the `OFFLOAD` magic and the
-string `gfx1100` are both in it) in a section named `.llvm.offloading`, alongside
-an allocated `llvm_offload_entries` table and a `.rodata..omp_offloading.descriptor`.
+`clang-linker-wrapper` is not optional and not a workaround: the paper states the
+flow is "two cargo commands and one `clang-linker-wrapper` invocation". rustc emits
+the image into a `.llvm.offloading` section flagged `SHF_EXCLUDE`, so a plain linker
+is *required* to drop it; the wrapper is what extracts it, compiles it for the
+device, and emits a host object with the image and a populated descriptor.
 
-The catch is the section's flags:
+The rustup `offload` component ships libraries only, so the tool has to come from
+somewhere else. Two sources were tried:
+
+- **ROCm 7.2's** (`/opt/rocm/llvm/bin/clang-linker-wrapper`, AMD clang 22.0.0git).
+  Runs standalone on the host, but cannot read rust's output:
+  `error: Invalid data was encountered while parsing the file`. The offload binary
+  header declares version 2; the LLVM 22 reader does not accept it. Worse, driven
+  through `rustc -Clinker=`, it swallows that failure and produces a binary with no
+  image rather than erroring.
+- **apt.llvm.org's `llvm-toolchain-noble-23`** — works. The packages are
+  23.1.0 (2026-08-18), the same LLVM rust's nightly is built against, and they
+  extract without root, the same trick used for the Vulkan SDK:
+
+  ```
+  curl -sL -o ct23.deb https://apt.llvm.org/noble/pool/main/l/llvm-toolchain-23/clang-tools-23_*.deb
+  dpkg-deb -x ct23.deb llvm23/      # also: libllvm23, libclang-cpp23, clang-23, lld-23
+  export LD_LIBRARY_PATH=$PWD/llvm23/usr/lib/x86_64-linux-gnu
+  export PATH=$PWD/llvm23/usr/lib/llvm-23/bin:$PATH
+  ```
+
+  Invoked by hand on rustc's `host.o`, it extracts the image, compiles it for
+  `gfx1100` and links. The resulting executable **does** contain the `OFFLOAD`
+  magic and the `gfx1100` string. Driving it through `rustc -Clinker=` does not yet
+  work — rustc adds `--gc-sections`, `-nodefaultlibs` and `-fuse-ld=lld` and the
+  image is lost again — so the working recipe is a manual final link.
+
+So the packaging blocker is closed locally. What it uncovered is a different and
+more interesting problem.
+
+## The real blocker: the launch is handed the wrong pointer
+
+With a real image embedded, the failure does not change — which rules out the empty
+descriptor as the cause. `LIBOMPTARGET_INFO=31` shows why:
 
 ```
-[1753] .llvm.offloading  LOOS+0xfff4c0b  ...  000d58  E
+Creating new map entry with HstPtrBase=0x00007ffc3f4d4408, ...
+                           TgtPtrBegin=0x000062bf9597f6e0, Size=1024, DynRefCount=1
+Entering OpenMP kernel ... with 1 arguments:  alloc(unknown)[1024]
+omptarget error: Host ptr 0x58cf9cbfd280 does not have a matching target pointer.
 ```
 
-`E` is `SHF_EXCLUDE` — *the linker must not copy this section into an executable*.
-That is by design: `.llvm.offloading` exists to be consumed by
-`clang-linker-wrapper`, which is supposed to run as the link driver, extract the
-image, finish device linking, and emit a populated descriptor. rustc links with a
-plain `cc`/`rust-lld` instead, so the section is discarded and the descriptor stays
-all zeroes. The final binary therefore imports `__tgt_register_lib` and friends,
-registers an empty image, and dies at the first launch:
+The data region maps `0x7ffc…` — the **stack** address of `let mut x = [0.0f32; 256]`
+— and the mapping succeeds. The kernel launch then looks up `0x58cf…`, an address in
+the program's own data segment. Two different pointers: rustc's host code registers
+one and launches with another.
 
-```
-omptarget device 0 info: Entering OpenMP data region ... to(unknown)[1024]
-omptarget device 0 info: Entering OpenMP kernel ... alloc(unknown)[1024]
-omptarget error: Host ptr 0x... does not have a matching target pointer.
-omptarget fatal error 1: failure of target construct while offloading is mandatory
-```
+Tested and ruled out, so the report is narrow rather than vague:
 
-Verified, not guessed: the final binary contains zero occurrences of the `OFFLOAD`
-magic and no `gfx1100`/`amdgcn` strings, while `host.o` contains both; and passing
-`host.o` again as a link argument fails with duplicate `main`/`probe3::fill`,
-proving it *is* the object being linked.
+- Not a stale build (all three passes rebuilt from clean, image verified present).
+- Not the argument form — `*mut [f32; 256]` and `&mut [f32; 256]` fail identically.
+- Not a function boundary — declaring the array in the same function as the
+  `offload!` call fails identically.
+- Not the AMD plugin — libomptarget enumerates four devices, allocates on device 0
+  and reports the mapping table correctly. Device memory allocation works.
 
-The `offload` rustup component ships **only libraries** — no `clang-linker-wrapper`,
-no `clang-offload-packager`. That is what "partial offload component" means in
-[PR #160991](https://github.com/rust-lang/rust/issues/131513). ROCm's LLVM (in the
-`rocm/dev-ubuntu-24.04:7.2-complete` image) does carry those tools, but at a
-different LLVM version than rust's 23.1; whether they interoperate is untested and
-is the one remaining thing that could unblock execution locally.
-
-Note the image kind is `llvm ir`, not device ISA, so libomptarget JITs it at load
-time. The wrapper's job here is packaging and descriptor population, not codegen —
-which is why this looks closer to a missing build step than to missing
-functionality.
-
-Unrelated but worth recording: `libhsa-runtime64.so.1` (1.11.0, from Ubuntu) is
-present on this host, so the AMD plugin has something to load if we get that far.
-Whether gfx1150-under-`HSA_OVERRIDE_GFX_VERSION=11.0.0` works through libomptarget
-is **untested** — we never reached a real launch.
+This is a defect in the offload host codegen, not in packaging, not in ROCm, and not
+in gfx1150-under-`HSA_OVERRIDE`. It is worth reporting on
+[rust-lang/rust#131513](https://github.com/rust-lang/rust/issues/131513) with exactly
+the above.
 
 ## Two gaps in the shipped feature
 
@@ -218,7 +236,7 @@ Two smaller pieces would support it:
 ## Decision
 
 **Do not wire anything into fox's engine.** The end-to-end path does not execute
-here, and even when it does, this is a platform bet rather than a speedup — see
+anywhere we can reach, and even when it does, this is a platform bet rather than a speedup — see
 `microbenchmarks-lie`: a 4.6× sampling micro-benchmark produced no measurable
 throughput change on real traffic.
 
@@ -226,10 +244,11 @@ What is defensible now is building the *library* half — the parts that need no
 so it is ready when the embedding step lands: the portable thread-index shim, the
 `Region`/partitioning layer with checked disjointness, the residency types, and a CPU
 oracle to test them against fox's existing `sample_greedy`. Re-run
-`scripts/probe_rust_offload.sh` on each nightly bump; when the "offload section
-present" check flips to PASS, the runtime half is unblocked.
+`scripts/probe_rust_offload.sh` on each nightly bump; the check that matters now is
+whether the mapped pointer and the launched pointer agree.
 
-The one hardware note: the discrete NVIDIA card in this machine is detached. The
-`nvptx64`/`sm_120` device pass already compiles, and NVIDIA is the better-supported
-libomptarget target — reattaching it is probably the cheapest way to reach a first
-real execution.
+The one hardware note: the discrete NVIDIA card in this machine is detached, so the
+only reachable runtime is the 890M. The `nvptx64`/`sm_120` device pass already
+compiles, and NVIDIA is the better-supported libomptarget target — but since the
+blocker is now host-side pointer bookkeeping rather than anything device-specific,
+reattaching the card would most likely reproduce the same error, not get past it.
