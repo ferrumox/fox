@@ -89,7 +89,7 @@ what it will look like to anyone who checks. Do not oversell it.
 analysis and establishes standing; the PR arriving behind it reads as "and here is the
 thing that broke me, fixed". Alone, it is a typo fix from a stranger.
 
-### C'. Fix the bug rather than only reporting it
+### C. Fix the bug rather than only reporting it
 
 The escalation of A, and the largest contribution available here by a wide margin: a docs
 fix corrects an example, this makes the feature execute. Prompt in
