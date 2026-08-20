@@ -3,10 +3,16 @@
 Not part of fox. Kept here so the analysis behind it stays with
 `rust-gpu-offload.md`.
 
-Ready to file. The toolchain-mixing explanation was checked and ruled out — see
-"Reproduced with a fully matched toolchain" below.
+Ready to file. Re-checked on 2026-08-20 against `f7d782a3b`, which is both the
+installed nightly and `master` HEAD. Duplicate search done: `does not have a
+matching target pointer` matches only #150391, `__tgt_register_lib` matches
+nothing open, and the tracking issue #131513 has no comments. The
+toolchain-mixing explanation was checked and ruled out — see "Reproduced with a
+fully matched toolchain" below.
 
-**Title:** `std::offload`: kernels never launch, the host `__tgt_bin_desc` is registered empty
+**Title:** std::offload: no offloaded kernel launches, the kernel's region_id has no matching target pointer
+
+Everything from the horizontal rule down is the issue body.
 
 ---
 
@@ -16,8 +22,9 @@ minimal one. Three separate reasons, all on `f7d782a3b`:
 - `#[offload_kernel]` expands to something referencing `std`, and the example is
   `#![no_std]`, so the `HostMetadata` pass fails with ``cannot find `std` in the list
   of imported crates``.
-- `assert_eq!(x[i], 2.5)` on the generic kernel's output gives `E0283: type
-  annotations needed`.
+- The kernel is generic and nothing constrains its type parameter at the launch site,
+  so `kernel = kernel` in the `offload!` invocation gives `E0283: type annotations
+  needed`. `kernel::<f64>` fixes it.
 - The AMD branch imports only `workgroup_id_x as block_idx_x` and
   `workitem_id_x as thread_idx_x`, but the kernel body calls `block_dim_x()`, which
   is never imported for `amdgpu` and does not exist in `core::arch::amdgpu` at all.
@@ -193,19 +200,28 @@ fails at runtime should probably not be indistinguishable from one that worked.
 
 **Neither documented example compiles.** Besides the dev guide one above,
 `library/core/src/offload.md` uses `thread_idx_x()`, `block_idx_x()` and
-`block_dim_x()`, and none of those exist on either target: `core::arch::amdgpu` has `workitem_id_x()`/`workgroup_id_x()` as safe
-fns and no workgroup-size query at all, while `core::arch::nvptx` has
-`_thread_idx_x()`/`_block_idx_x()`/`_block_dim_x()` as `unsafe` fns. Happy to send a
-PR for the doc if that is useful, though it is really the portability gap underneath
-that matters: a kernel that builds for both targets needs a `cfg` shim today. I can
-open that separately if you would rather keep this issue narrow.
+`block_dim_x()`, and none of those exist on either target: `core::arch::amdgpu` has
+`workitem_id_x()`/`workgroup_id_x()` as safe fns and no workgroup-size query at all,
+while `core::arch::nvptx` has `_thread_idx_x()`/`_block_idx_x()`/`_block_dim_x()` as
+`unsafe` fns. Happy to send a PR for the doc if that is useful, though it is really
+the portability gap underneath that matters: a kernel that builds for both targets
+needs a `cfg` shim today.
+
+Worth noting that un-`ignore`-ing that block would not have caught it. On the host
+target `#[offload_kernel]` replaces the body outright — `-Zunpretty=expanded` gives
+`fn kernel(_: *mut [f64; 256]) { ::core::panicking::panic("not implemented") }` — so a
+doctest compiles the example without ever type-checking a line of the kernel. I
+checked: the current broken example passes as a doctest, and so does one whose body is
+`let _z: u32 = "not a u32";`. Only a device-target build looks at the body.
 
 ## Possibly the same thing as #150391
 
 #150391 is filed about the missing debug locations, but the paste in it, from the
 rustc-dev-guide usage example, contains the same `does not have a matching target
 pointer` line and the same "value never came back" symptom (`The first element is zero
-0.000000`). The maptypes differ from mine (`tofrom` there, `to` + `alloc` here), so I
+0.000000`). The failing pointer there is not the mapped one either — `0x5817327328f1`
+against a mapping at `0x58177095b880` — which is what I would expect if it is this
+same lookup. The maptypes differ from mine (`tofrom` there, `to` + `alloc` here), so I
 am not certain it is one bug rather than two.
 
 It also looks like nothing executes an offloaded kernel in CI yet — #158817 says
@@ -215,7 +231,7 @@ It also looks like nothing executes an offloaded kernel in CI yet — #158817 sa
 ## Meta
 
 ```
-rustc 1.100.0-nightly (f7d782a3b 2026-08-19)
+rustc 1.100.0-nightly (f7d782a3b 2026-08-19)   # master HEAD at the time of writing
 rustup component add offload --toolchain nightly
 libomptarget from that component
 clang-linker-wrapper 23.1.0 from apt.llvm.org llvm-toolchain-noble-23

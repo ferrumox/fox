@@ -89,7 +89,31 @@ what it will look like to anyone who checks. Do not oversell it.
 analysis and establishes standing; the PR arriving behind it reads as "and here is the
 thing that broke me, fixed". Alone, it is a typo fix from a stranger.
 
-### C. Offer the strategies to PR #158076
+### C'. Fix the bug rather than only reporting it
+
+The escalation of A, and the largest contribution available here by a wide margin: a docs
+fix corrects an example, this makes the feature execute. Prompt in
+`rustc-offload-fix-prompt.md`.
+
+Most of the cost is already paid — `~/src/rust-offload/rust` holds LLVM, clang and lld
+built from source at the nightly's own commit, 9.1 GB and 27 minutes that do not need
+repeating. What is left is the bootstrap step that builds the amdgcn device runtime with
+gcc (PR #161118's known problem, fixable by pointing `build.cc`/`cxx` at the freshly built
+clang), then the patch itself, then re-running the probe.
+
+Two candidate fixes, both visible in `gpu_offload.rs`: emit the populated descriptor —
+whose correct form sits in a comment beside the null one — or stop registering from rustc
+entirely and leave it to the linker wrapper, which the file's own `FIXME` suggests is where
+they are heading. Try the first: it is additive.
+
+**It does not depend on A getting a reply**, which an earlier version of this document
+claimed. The real check is two minutes of searching for an open PR touching
+`register_offload`; on 2026-08-20 none of the five in-flight offload PRs did. File the
+report anyway because it costs an hour and blocks nothing — and if the patch then works,
+it belongs in that thread rather than behind it. A report carrying a working patch stops
+being a report.
+
+### D. Offer the strategies to PR #158076
 
 `Linear1D`, `Strided1D` and `verify_disjoint` fill exactly what that PR lacks. The paper
 even invites it: "By releasing our interface as a standalone crate, we hope to encourage
@@ -98,7 +122,7 @@ users to explore additional partitioning schemes."
 Not a drop-in. Someone else's PR is mid-review; this needs coordinating, not arriving
 with code. Worth doing only after A gets a reply.
 
-### D. The thesis: ownership-typed paged device residency
+### E. The thesis: ownership-typed paged device residency
 
 This is the one idea in the whole thread with a life beyond fox, and it is parked in
 three phases rather than dropped. Naming matters here, because in conversation it kept
@@ -145,7 +169,7 @@ Design, decision rule and framing in the `kv-tipado-decision-pendiente` memory. 
 runtime version already exists in `crates/fox-offload/src/resident.rs`, 27 tests, no GPU
 and no working offload required — it is a type system.
 
-### E. Ship the two fixes
+### F. Ship the two fixes
 
 Not part of this thread, but it is the only item with a user waiting at the other end.
 Every released version of fox, v0.21.0 included, still has the NaN bug, and the
