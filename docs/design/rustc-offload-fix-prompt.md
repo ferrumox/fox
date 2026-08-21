@@ -6,6 +6,13 @@ Companion to `rust-offload-contribution-prompt.md`, which covers filing the repo
 the docs PR, and the offer to PR #158076. This is the escalation of the same line:
 that one **reports** the bug, this one **fixes** it.
 
+> **REVISADO 2026-08-20, tarde. El encargo ha cambiado de forma.**
+>
+> La versión anterior decía «escribe el arreglo» y recomendaba el candidato (1). Las dos
+> cosas están superadas: **la PR #152777 ya lleva el arreglo**, y toma el candidato (2),
+> no el (1). Lo que queda por hacer es **probarla**, no reinventarla. Ver "Paso 0" y
+> "Dos candidatos", reescritos.
+
 ---
 
 Trabajo sobre `rust-lang/rust`. Objetivo concreto y comprobable: **hacer que un kernel
@@ -30,10 +37,19 @@ Busca en `rust-lang/rust` **PRs abiertas que toquen
 `compiler/rustc_codegen_llvm/src/builder/gpu_offload.rs`**, o que mencionen
 `register_offload`, `__tgt_bin_desc` o `__tgt_register_lib`.
 
-El 2026-08-20 había cinco PRs de offload en vuelo (#158032 selección de dispositivo,
-#161118 build del runtime, #158817 tests en CI, #158076 `Region`, #152011 LLVM-22) y
-**ninguna iba del descriptor host**. Si eso ha cambiado, **para y dímelo**: puede que el
-arreglo ya esté en camino y el trabajo sobre.
+**Este paso ya saltó, y por eso el documento está revisado.** La búsqueda se hizo el
+2026-08-20 por la tarde y apareció lo que la versión anterior daba por inexistente:
+
+| PR | Qué | Estado |
+|---|---|---|
+| **#152777** | **Borra `register_offload` entero**: el descriptor nulo, `__tgt_register_lib`, el `atexit`, la entrada en `llvm.global_ctors` y el `__tgt_init_all_rtls()`. Lo deja en `// Let LLVM handle it for us` + `return` | borrador de ZuseZ4, `S-waiting-on-author`, con conflictos, **sin tocar desde 2026-05-28** |
+| #149827 | Automatiza la invocación del `clang-linker-wrapper`, la otra mitad sin terminar | borrador del mismo autor, parado desde 2026-04-28 |
+
+Las otras cinco (#158032 selección de dispositivo, #161118 build del runtime, #158817
+tests en CI, #158076 `Region`, #152011 LLVM-22) siguen sin tocar el descriptor host.
+
+Vuelve a hacer la búsqueda igualmente: si la #152777 se ha movido, mergeado o cerrado, el
+trabajo de abajo cambia otra vez.
 
 ## El bug
 
@@ -85,25 +101,41 @@ además: build viejo, forma del argumento (`*mut` y `&mut` fallan igual), fronte
 función, orden de `.init_array`, y el plugin AMD (libomptarget enumera 4 dispositivos,
 reserva en el 0 y saca una tabla de mapeo correcta).
 
-## Dos candidatos de arreglo
+## Ya no hay que elegir candidato: upstream eligió el (2)
 
-**(1) Emitir el descriptor poblado.** Literalmente la forma del comentario: `i32 1`,
-`@.omp_offloading.device_images`, y los símbolos `__start`/`__stop_llvm_offload_entries`.
-Requiere que rustc conozca el símbolo de las imágenes de device en ese punto — comprueba si
-lo tiene o si hay que declararlo como `extern`.
+La versión anterior planteaba dos arreglos y recomendaba el **(1)** —emitir el descriptor
+poblado, la forma que está comentada en el propio fuente— por ser aditivo.
 
-**(2) Que rustc no registre nada** y deje el trabajo entero al `clang-linker-wrapper`, que
-ya emite su propio descriptor poblado y su propio ctor. El `FIXME` sugiere que es hacia
-donde van ellos. Ojo: al quitar `register_offload` se va también
-`__tgt_init_all_rtls()`, y **eso rompió** cuando lo probamos parcheando el binario — el
-programa dejó de fallar pero tampoco ejecutó el kernel y no imprimió nada de omptarget. O
-sea que si vas por (2), hay que ver quién inicializa los RTLs.
+**Eso está superado.** La #152777 toma el **(2)**: no registrar nada desde rustc y dejar el
+trabajo entero a LLVM y al `clang-linker-wrapper`. Implementar el (1) ahora sería inventar
+un arreglo con una forma que el mantenedor ya descartó a favor de otra.
 
-Prueba **(1) primero**: es aditivo y no quita nada que esté sosteniendo el tinglado.
+Queda una pregunta abierta, y es la que hay que responder. El documento anterior avisaba de
+que al quitar el registro se va también el `__tgt_init_all_rtls()`, y de que **cuando lo
+probamos parcheando el binario, el programa dejó de fallar pero tampoco ejecutó el kernel**:
+imprimió `x[42]=0` sin ninguna salida de omptarget.
 
-Dato para calibrar: parchear el binario ya enlazado no bastó ni quitando el ctor de rustc
-ni reordenando `.init_array`. Eso sugiere que el arreglo tiene que estar en la generación,
-no en el enlace.
+Ese experimento **no es concluyente sobre la #152777**, y la diferencia importa: nosotros
+neutralizamos el constructor en el binario **ya enlazado**, mientras que la PR elimina la
+emisión en **generación de código**. Si rustc nunca emite el descriptor nulo ni toca los
+RTLs, el ctor del wrapper puede quedar como único registrador y arrancar limpio. Es
+plausible y no está comprobado.
+
+## Lo que hay que hacer
+
+**Probar el enfoque de la #152777, no reescribirlo.** No hace falta pelearse con su rama,
+que tiene conflictos: el cambio es convertir `register_offload` en una función vacía.
+
+1. Aplícalo en el árbol local (ver abajo), reconstruye stage1, engánchalo con
+   `rustup toolchain link` y corre la sonda.
+2. **Si imprime `x[42]=84`**: es la mejor palanca posible para desatascar una PR parada
+   desde mayo. El entregable pasa a ser un comentario en la #152777 diciendo que arregla el
+   fallo, con el caso reproducible. No un PR propio.
+3. **Si no imprime**: también es información que el autor quiere, porque significa que su
+   enfoque no basta solo y falta decidir quién inicializa los RTLs. Documenta qué sale.
+
+Dato para calibrar, que sigue vigente: parchear el binario ya enlazado no bastó ni quitando
+el ctor de rustc ni reordenando `.init_array`. El arreglo tiene que estar en la generación.
 
 ## Lo que ya está construido y NO hay que repetir
 
