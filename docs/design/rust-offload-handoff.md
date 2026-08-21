@@ -1,7 +1,13 @@
 # Rust GPU offload — where this stands and what is left to decide
 
 Written 2026-08-20 at the end of a long session, so the next one can pick this up
-without re-deriving it. Read this first; the other three documents are the detail.
+without re-deriving it. Read this first; the other documents are the detail.
+
+**Revised 2026-08-21.** Two things happened after the first version was written, and
+both invert conclusions it stated confidently. The kernel *does* execute — there is no
+rustc bug, and finding 1 below is a correction rather than a finding. And the branch is
+now merged, rebased and pushed rather than sitting on one disk. Every section that
+changed says so inline; nothing was quietly deleted.
 
 Everything below was measured on this machine or read in the primary source. Where
 something is inferred it says so.
@@ -16,28 +22,48 @@ crate, and finding two real bugs in fox along the way.
 
 ## What exists
 
-All on branch `research/rust-gpu-offload`, **not pushed**, 12 commits, ~2,800 lines.
+All on branch `research/rust-gpu-offload`, rebased onto `develop` and **pushed**, 23
+commits carrying only offload work — the sixteen product commits it had accumulated now
+live in `develop` where they belong.
 
 | Artifact | What it is |
 |---|---|
 | `docs/design/rust-gpu-offload.md` | Feasibility, measured. How far rustc's offload gets here and exactly where it stops |
 | `docs/design/offload-paper-critique.md` | Close reading of the paper. Ten points, text and figures |
-| `docs/design/offload-issue-draft.md` | **Finished** bug report for rust-lang/rust. Not filed |
+| `docs/design/offload-issue-draft.md` | Bug report for rust-lang/rust. **Retired** — the cause it names is refuted. Never filed |
+| `docs/design/rustc-offload-fix-results.md` | The day the diagnosis collapsed. Three experiments, three wrong readings, and what it actually was |
+| `docs/design/offload-oracle-differential.md` | The crate's kernel run on the real GPU against its CPU oracle. 256 partials, zero divergence |
+| `docs/design/offload-pr-draft.md` | Documentation PR for `library/core/src/offload.md`. Ready, still valid |
 | `scripts/probe_rust_offload.sh` | Reproduces the whole pipeline and says where it breaks. Re-run on nightly bumps |
-| `crates/fox-offload/` | Workspace crate, 27 tests, zero dependencies, builds on stable |
+| `crates/fox-offload/` | Workspace crate, 32 tests + 11 compile-fail doctests, zero dependencies, builds on stable **and for `amdgcn`** |
 
-Separately, on `feature/prompt-cache-determinism` (also **not pushed**): the NaN sampling
-fix and the sampler's return to CI, 364 → 403 tests.
+The NaN sampling fix and the sampler's return to CI are no longer separate: that branch
+is merged into `develop` along with eighteen other commits. See F.
 
 ## The three findings that matter
 
-**1. rustc's GPU offload compiles for both vendors and does not execute.** AMD `gfx1100`
-and NVIDIA `sm_120` both build from the same source, and the release IR is clean. The
-kernel is never bound to its device entry: rustc registers an all-null `__tgt_bin_desc`
-and its own source calls that a placeholder. Reproduced with a fully matched toolchain
-built from source at the same commit, so it is not a mixed-LLVM artifact. Not fileable
-as "you broke it" — the feature's own docs say "not ready for usage" — but the specific
-failure is not reported anywhere.
+**1. ~~rustc's GPU offload does not execute.~~ It does. The fault was one layer below
+Rust.** This is the correction, and it is worth reading as one rather than as a fact,
+because the wrong version survived a full day of competent-looking evidence.
+
+The kernel runs on the stock rustup nightly, unpatched: `x[0]=0 x[42]=84 x[255]=510`,
+repeatedly, and under `OMP_TARGET_OFFLOAD=MANDATORY` so it cannot be the host quietly
+doing the work. What was broken is this machine's `libhsa-runtime64` — Ubuntu ships
+1.11.0 from April 2024, it does not recognise gfx1150, and it enumerates zero GPUs. With
+no devices there is no `TranslationTable`, and the launch fails with `does not have a
+matching target pointer`, which reads exactly like a codegen bug. Replacing HSA with
+1.18 from AMD's `.deb`s, no root required, fixes it; the same binary against the old
+runtime fails again, which is the control that closes it.
+
+The null `__tgt_bin_desc` is real and is still a placeholder in rustc's source. It is
+simply not the cause: experiment C removed it entirely, corrected a constructor ordering
+problem found on the way, and the failure did not change. Three candidate explanations
+were eliminated by experiment rather than by reading, which is the one part of the day
+that was done right.
+
+The lesson is cheap to state and was expensive to learn: **the control — does *any*
+offload work on this machine — was never run until the end.** A C++ OpenMP program would
+have answered it in five minutes on the first morning.
 
 **2. The paper's opening survives a close reading, and narrows.** `Preload`/`PreloadMut`
 is a two-state model; the refcount is on the immutable handle only and counts whole
@@ -46,6 +72,15 @@ for the HPC case they target, insufficient for serving. Upstream PR #158076 has 
 `Region` trait in review with no concrete strategies and disjointness as an unverified
 obligation. So the gap is real and smaller than it looked: concrete strategies plus a
 way to check the obligation.
+
+**3'. The crate's kernel was checked against its own CPU oracle on real hardware.**
+Unblocked by finding 1 and done the same evening. `BlockArgmax::thread`, one source
+compiled for `x86_64` and for `amdgcn`/`gfx1100`, on input chosen to hurt: negatives, a
+tie at 12.5, a NaN. All 256 partials agree one to one — not merely the winner — the
+tie-break rule and the never-let-NaN-win rule both hold on device, and
+`Candidate { index: u32, value: f32 }` crosses the device mapping intact. That last one
+is a small real data point on the ABI gap the paper acknowledges without implementing.
+This is the differential test the critique says nobody runs.
 
 **3. The exercise found two live bugs in fox, which is the actual return of the day.**
 A single NaN logit made `sample_greedy` emit an arbitrary token at `temperature = 0`,
@@ -63,15 +98,17 @@ Recorded because a future session will otherwise resurrect them.
 
 ## Decisions left, with honest verdicts
 
-### A. File the bug report
+### A. ~~File the bug report~~ — **dead, and this is the good outcome**
 
-Ready, 244 lines, checked against existing issues (the same error appears inside #150391
-but was filed as a diagnostics problem, so this is not a duplicate). Costs an hour of
-reading and pasting. **This is not a project — it is pressing a button on finished work.**
+There is no bug to report. The three drafts each carry a banner saying so and are kept as
+a record, not as work in progress. An hour's delay in pressing the button is the reason
+fox did not publish a false cause to a compiler team, which is a better result than the
+report would have been.
 
-What it actually buys is the reply: whether the host-side link automation is weeks or
-quarters away. That single fact gates everything else. If nothing else is planned, it is
-courtesy rather than strategy, and courtesy is a fine reason.
+What is worth keeping from it: the process notes cost real time to work out and transfer
+to anything filed later — rust-lang forbids LLM-authored issue bodies, the LLM disclosure
+goes inside `<!-- homu-ignore -->` so it stays out of git history, and duplicate checking
+is expected before filing.
 
 ### B. A documentation PR to rust-lang/rust
 
@@ -85,15 +122,21 @@ Small, verified by compiler error, uncontroversial, low risk. It is a real commi
 `rust-lang/rust` with your name in the history — and it is a documentation fix, which is
 what it will look like to anyone who checks. Do not oversell it.
 
-**Order matters: file the issue first, the PR second.** The issue carries a day of
-analysis and establishes standing; the PR arriving behind it reads as "and here is the
-thing that broke me, fixed". Alone, it is a typo fix from a stranger.
+**The ordering advice that used to be here is void** — it said to file the issue first
+so the PR would not arrive as a typo fix from a stranger, and there is no issue now. So
+it does arrive alone, and that is fine: it is a correct fix to an example that does not
+compile, offered on its own terms. This is the only rust-lang contribution left standing,
+and the branch is ready at `ManuelSLemos/rust:offload-doc-example`. One thing is missing:
+the LLM disclosure at the end, in your own words.
 
-### C. Fix the bug rather than only reporting it
+### C. ~~Fix the bug rather than only reporting it~~ — **dead, nothing to fix**
 
-The escalation of A, and the largest contribution available here by a wide margin: a docs
-fix corrects an example, this makes the feature execute. Prompt in
-`rustc-offload-fix-prompt.md`.
+This was the largest contribution available and it evaporated with finding 1: the feature
+already executes. `rustc-offload-fix-prompt.md` was run to completion and its answer is
+`rustc-offload-fix-results.md` — a negative result reached properly. What follows is left
+in place only because the toolchain notes at the end of that document are reusable, and
+because it is the clearest illustration in this thread of a plausible plan aimed at the
+wrong target.
 
 Most of the cost is already paid — `~/src/rust-offload/rust` holds LLVM, clang and lld
 built from source at the nightly's own commit, 9.1 GB and 27 minutes that do not need
@@ -120,7 +163,10 @@ even invites it: "By releasing our interface as a standalone crate, we hope to e
 users to explore additional partitioning schemes."
 
 Not a drop-in. Someone else's PR is mid-review; this needs coordinating, not arriving
-with code. Worth doing only after A gets a reply.
+with code. It used to be gated on A getting a reply — with A dead, nothing gates it, and
+it is now the most substantial open item in the thread. It is also stronger than it was
+yesterday: the strategies have been run on a real GPU (finding 3'), not only reasoned
+about.
 
 ### E. The thesis: ownership-typed paged device residency
 
@@ -143,6 +189,25 @@ only the person who wrote the scheduler can do safely, because the rules live in
 comments. In an engine, KV lifecycle bugs are silent — wrong tokens, truncated replies,
 another user's conversation corrupted — so a class that keeps recurring is worth making
 inexpressible. And it is not free: rewriting a core API can introduce bugs of its own.
+
+**Phase 1 — DONE, 2026-08-20, and the gate says no.** Twelve bugs classified in
+`docs/design/kv-typed-classification.md`: two would have failed to compile, six are
+catchable only as a class and only after a failing server had already revealed the
+invariant, four are not type-shaped at all. Against the rule below that is 17% at its
+strictest and 42% at its most generous, where the threshold was 60–70%.
+
+The finding underneath the count is the one that matters, and it is why the answer is
+"no" and not "maybe": **the `Owned`/`Shared` copy-on-write design proposed for phase 2
+catches none of them.** It protects writes through block handles, and nothing in fox
+writes through a block handle. Both bugs a type system would have stopped are in the
+*sequence* lifecycle. The blocks are budget; the sequence is what corrupts.
+
+So phase 2 is rejected, and the redirection was taken instead of proposed: `SeqId` ships
+on `feature/seq-id-phase1`, a newtype with two named constructors that makes a bare
+integer a type error where a sequence is expected. That is `a4171eb` made unwriteable.
+Phase 3 loses its evaluation section and with it its reason to exist.
+
+The original text of the gate follows, for the record.
 
 **Phase 1 — the exercise. Two days. This is the gate.** Take fox's ~6 KV-lifecycle bugs
 from the history — prefix-cache leak, `seq_cp` crash, admission preempting, stale cells
@@ -169,11 +234,15 @@ Design, decision rule and framing in the `kv-tipado-decision-pendiente` memory. 
 runtime version already exists in `crates/fox-offload/src/resident.rs`, 27 tests, no GPU
 and no working offload required — it is a type system.
 
-### F. Ship the two fixes
+### F. Ship the fixes — **half done**
 
-Not part of this thread, but it is the only item with a user waiting at the other end.
-Every released version of fox, v0.21.0 included, still has the NaN bug, and the
-recurrent-model prompt-reuse corruption fix is also unreleased.
+Not part of this thread, and still the only item with a user waiting at the other end.
+The nineteen commits are merged into `develop` and pushed, so they are no longer one
+disk away from being lost: eleven fixes, two features (`--n-gpu-layers` and the
+experimental `--mtp-model`), 446 tests green. What has *not* happened is a release, so
+every version a user can install — v0.21.0 included — still has the NaN bug and the
+recurrent-model prompt-reuse corruption. Two new CLI flags make it 0.22.0 rather than a
+patch release, and it needs `make e2e` against a real server and model before the tag.
 
 ## What not to do
 
@@ -181,6 +250,15 @@ recurrent-model prompt-reuse corruption fix is also unreleased.
   GEMM or tensor cores anywhere in the paper, shared memory explicitly left `unsafe`.
   And decode on the target hardware is bandwidth-bound, so a perfect kernel layer buys
   zero.
-- **Do not write a performance paper.** Nothing executes; any number would be invented.
-- **Do not treat the probe as maintenance.** It is one script. Run it when nightly moves;
-  when the image survives into the binary, the runtime half is unblocked.
+- **Do not write a performance paper.** This used to read "nothing executes; any number
+  would be invented". Kernels execute now, so the reason changes rather than the advice:
+  a numerically-correct argmax on a 890M says nothing about serving throughput, and the
+  hardware here is bandwidth-bound at decode. A number you can measure is not the same
+  as a number worth publishing.
+- **Do not treat the probe as maintenance.** It is one script. Its original purpose —
+  watch for the image surviving into the binary — is spent; what it is good for now is
+  catching a regression when nightly moves.
+- **Do not debug a toolchain before running the control.** Written down as a rule
+  because a day was spent on it: before believing that a compiler is broken, check that
+  *anything* of the same shape works on the machine. Here, a five-minute C++ OpenMP
+  program would have redirected the entire investigation on the first morning.
