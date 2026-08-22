@@ -165,6 +165,11 @@ fn patch_vendored_llama(llama_root: &Path) {
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(fox_stub)");
+    // Declared here, not next to the shim below: the stub path returns before that point,
+    // so a stub build would compile against an undeclared cfg and trip `unexpected_cfgs`.
+    // Positive form on purpose — every use site reads `#[cfg(fox_mtp)]` instead of
+    // negating both fox_stub and an opt-out.
+    println!("cargo:rustc-check-cfg=cfg(fox_mtp)");
 
     // Cargo only re-runs this script when something it was told to watch changes. Until
     // this list existed, only FOX_CPU_ALL_VARIANTS was declared, so flipping
@@ -178,6 +183,7 @@ fn main() {
         "FOX_CPU_ALL_VARIANTS",
         "FOX_NO_VULKAN",
         "FOX_FORCE_VULKAN",
+        "FOX_NO_MTP",
         "CUDACXX",
         "HIPCC",
         "VULKAN_SDK",
@@ -260,10 +266,18 @@ fn main() {
         .define("LLAMA_BUILD_TOOLS", "OFF")
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
         .define("LLAMA_BUILD_SERVER", "OFF")
-        .define("LLAMA_BUILD_COMMON", "OFF")
+        // common/ carries the MTP speculative driver (common/speculative.cpp), which fox
+        // wraps rather than reimplements — see csrc/mtp_shim.cpp. Measured cost of turning
+        // it on: 15s from scratch (32 files, 12 threads), zero network fetches (nlohmann,
+        // cpp-httplib, stb et al are vendored under vendor/llama.cpp/vendor/), and CMake
+        // generates common/build-info.cpp itself. FOX_NO_MTP=1 puts it back to OFF.
+        .define(
+            "LLAMA_BUILD_COMMON",
+            if env_flag("FOX_NO_MTP") { "OFF" } else { "ON" },
+        )
         // Standalone libmtmd (vision/multimodal) build, independent of the tools/
         // tree: it only links against ggml + llama (see tools/mtmd/CMakeLists.txt),
-        // so it builds cleanly with LLAMA_BUILD_TOOLS/LLAMA_BUILD_COMMON both OFF.
+        // so it builds cleanly with LLAMA_BUILD_TOOLS off.
         .define("LLAMA_BUILD_MTMD", "ON")
         // Upstream (post-2026-04) additions: the unified `app/` binary builds by default and
         // needs common/build-info headers we don't generate → turn it off. The web UI was
@@ -483,9 +497,13 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=ggml-base"); // shared: core ggml types
     println!("cargo:rustc-link-lib=dylib=ggml"); // shared: backend dlopen registry
     println!("cargo:rustc-link-lib=dylib=mtmd"); // shared: vision/multimodal (LLAMA_BUILD_MTMD)
-                                                 // NOTE: do NOT link ggml-cpu / ggml-metal / ggml-cuda explicitly.
-                                                 // With GGML_BACKEND_DL=ON they are MODULE libraries loaded at runtime via
-                                                 // dlopen. On macOS, cmake MODULEs use .so which the macOS linker rejects.
+    if !env_flag("FOX_NO_MTP") {
+        // shared: common/ (LLAMA_BUILD_COMMON), for the MTP speculative driver
+        println!("cargo:rustc-link-lib=dylib=llama-common");
+    }
+    // NOTE: do NOT link ggml-cpu / ggml-metal / ggml-cuda explicitly.
+    // With GGML_BACKEND_DL=ON they are MODULE libraries loaded at runtime via
+    // dlopen. On macOS, cmake MODULEs use .so which the macOS linker rejects.
 
     // ── Copy backend .so/.dylib files next to the fox binary ─────────────────
     // OUT_DIR is target/{profile}/build/ferrumox-<hash>/out — three levels up
@@ -518,9 +536,13 @@ fn main() {
                     // libllama.so.0 / libllama.so.0.9.7 (p.extension() returns
                     // the last component, not "so", for versioned names).
                     let so_ext = if target_os == "macos" { "dylib" } else { "so" };
+                    // `libllama.` keeps the dot so this does not sweep up unrelated
+                    // libllama-*.so; libllama-common is named explicitly because fox
+                    // links it for the MTP driver and it must sit beside the binary too.
                     let is_backend = fname.contains(&format!(".{so_ext}"))
                         && (fname.starts_with("libggml")
                             || fname.starts_with("libllama.")
+                            || fname.starts_with("libllama-common.")
                             || fname.starts_with("libmtmd")
                             || fname == format!("llama.{so_ext}"));
                     if is_backend {
@@ -574,6 +596,32 @@ fn main() {
     let mut include_paths = vec![llama_include.clone(), ggml_include];
     if ggml_build_include.exists() {
         include_paths.push(ggml_build_include);
+    }
+
+    // ── MTP shim ──────────────────────────────────────────────────────────────
+    // The NextN/MTP entry points fox needs for MTP speculative decoding live in
+    // `src/llama-ext.h`, outside any `extern "C"`, so they export C++-mangled symbols
+    // that bindgen's C parse of llama.h never sees. csrc/mtp_shim.cpp wraps them in
+    // `extern "C"` — see that file for why this beats naming mangled symbols from Rust.
+    // Unreachable under FOX_SKIP_LLAMA=1: that path returns above.
+    // FOX_NO_MTP=1 is the escape hatch, mirroring FOX_NO_VULKAN: llama-ext.h is staging,
+    // so an upstream signature change breaks compiling the shim. Without a way to turn it
+    // off, that would stop fox building at all over an optional speedup.
+    println!("cargo:rerun-if-changed=csrc/mtp_shim.cpp");
+    if env_flag("FOX_NO_MTP") {
+        println!("cargo:warning=FOX_NO_MTP is set — building without the MTP shim");
+    } else {
+        println!("cargo:rustc-cfg=fox_mtp");
+        let mut shim = cc::Build::new();
+        shim.cpp(true).std("c++17").file("csrc/mtp_shim.cpp");
+        for path in &include_paths {
+            shim.include(path);
+        }
+        // llama-ext.h is internal, so it sits in src/ rather than include/.
+        shim.include(llama_root.join("src"));
+        // common.h / speculative.h: the MTP driver fox wraps.
+        shim.include(llama_root.join("common"));
+        shim.compile("fox_mtp_shim");
     }
 
     let clang_args: Vec<String> = include_paths

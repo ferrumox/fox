@@ -35,6 +35,7 @@ struct ConfigFile {
     hf_token: Option<String>,
     alias_file: Option<String>,
     json_logs: Option<bool>,
+    n_gpu_layers: Option<i32>,
     main_gpu: Option<i32>,
     split_mode: Option<String>,
     tensor_split: Option<String>,
@@ -119,6 +120,7 @@ pub fn load_config_into_env() {
     set_if_unset("HF_TOKEN", cfg.hf_token);
     set_if_unset("FOX_ALIAS_FILE", cfg.alias_file);
     set_if_unset("FOX_JSON_LOGS", cfg.json_logs.map(|v| v.to_string()));
+    set_if_unset("FOX_N_GPU_LAYERS", cfg.n_gpu_layers.map(|v| v.to_string()));
     set_if_unset("FOX_MAIN_GPU", cfg.main_gpu.map(|v| v.to_string()));
     set_if_unset("FOX_SPLIT_MODE", cfg.split_mode);
     set_if_unset("FOX_TENSOR_SPLIT", cfg.tensor_split);

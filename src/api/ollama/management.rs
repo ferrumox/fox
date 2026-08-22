@@ -476,8 +476,10 @@ mod tests {
             main_gpu: 0,
             split_mode: 1,
             tensor_split: vec![],
+            n_gpu_layers: -1,
             moe_offload_cpu: false,
             mmproj: None,
+            mtp_model: None,
             lora_modules: Vec::new(),
             primary_model: None,
         };

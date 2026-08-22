@@ -100,6 +100,13 @@ pub struct RunArgs {
     #[arg(long, default_value = "0.0")]
     pub swap_fraction: f32,
 
+    /// Transformer layers to offload to the GPU. `-1` (default) offloads all of them,
+    /// `0` keeps the model on the CPU, anything in between splits it. Mirrors
+    /// `llama-server -ngl`. Needed when a model's weights do not fit in VRAM: with `-1`
+    /// such a model fails to load rather than running partly on the CPU.
+    #[arg(long, default_value = "-1", env = "FOX_N_GPU_LAYERS")]
+    pub n_gpu_layers: i32,
+
     /// Primary GPU index (0-based). Used when split_mode=none, or as main GPU for splits.
     #[arg(long, default_value = "0", env = "FOX_MAIN_GPU")]
     pub main_gpu: i32,
@@ -205,6 +212,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         args.gpu_memory_fraction,
         1,
         1,
+        args.n_gpu_layers,
         args.main_gpu,
         split_mode,
         &tensor_split_parsed,

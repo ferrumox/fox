@@ -11,6 +11,7 @@
 // wrong draft is simply rejected. See `docs/design/speculative-decoding.md` and
 // `docs/design/speculative-roadmap.md` (Level 2).
 
+use std::sync::atomic::{AtomicI32, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use super::model::Model;
@@ -25,6 +26,25 @@ pub trait Proposer: Send + Sync {
     /// proposer (the draft model) detect when a different request has taken over
     /// the single speculative "slot" and reset its own state accordingly.
     fn propose(&self, req_id: u64, seq: &[i32], draft_len: usize) -> Vec<i32>;
+
+    /// The KV sequence the request occupies, for proposers whose state is keyed by it.
+    ///
+    /// Separate from `req_id`: fox's request ids are monotonic and unique for the life
+    /// of the process, while `kv_seq_id` is a slot index that gets reused. The MTP
+    /// driver keys its per-sequence hidden-state carryover by the *llama.cpp* sequence,
+    /// so it has to be told which one, not which request.
+    fn set_kv_seq_id(&self, kv_seq_id: i32) {
+        let _ = kv_seq_id;
+    }
+
+    /// Report how many of the last `propose` call's tokens the target committed.
+    ///
+    /// Only the MTP proposer needs this: its drafts come from a stateful driver that
+    /// has to know where the sequence actually ended up. n-gram is stateless, and the
+    /// draft model resyncs from `seq` on the next call, so both ignore it.
+    fn accept(&self, n_accepted: usize) {
+        let _ = n_accepted;
+    }
 }
 
 /// Thin wrapper around `propose_ngram` implementing `Proposer` (0.15's proposer,
@@ -36,6 +56,71 @@ pub struct NgramProposer {
 impl Proposer for NgramProposer {
     fn propose(&self, _req_id: u64, seq: &[i32], draft_len: usize) -> Vec<i32> {
         propose_ngram(seq, self.ngram, draft_len)
+    }
+}
+
+/// Proposer backed by the model's own trained MTP head.
+///
+/// Unlike [`DraftModelProposer`] this holds no second model and no KV state of its own:
+/// the head reads the target's hidden states, and llama.cpp's driver — fed by
+/// `mtp_process` after every generation decode — owns whatever carryover it needs. So
+/// there is nothing here to resync when a different request takes over the speculative
+/// slot; the driver tracks that per sequence itself.
+pub struct MtpProposer {
+    model: Arc<dyn Model>,
+    /// The llama.cpp sequence the current request occupies. The driver keys its
+    /// hidden-state carryover by this, and `mtp_process` files those rows under the
+    /// sequence the batch actually used — so asking for a draft under any other id
+    /// returns nothing, or something that belongs to a different conversation.
+    kv_seq_id: AtomicI32,
+    /// The request currently holding the speculative slot, so a new one gets a `begin`.
+    last_req_id: Mutex<Option<u64>>,
+}
+
+impl MtpProposer {
+    pub fn new(model: Arc<dyn Model>) -> Self {
+        Self {
+            model,
+            kv_seq_id: AtomicI32::new(0),
+            last_req_id: Mutex::new(None),
+        }
+    }
+}
+
+impl Proposer for MtpProposer {
+    fn propose(&self, req_id: u64, seq: &[i32], draft_len: usize) -> Vec<i32> {
+        // The driver wants the sequence WITHOUT its last token, plus that token as
+        // `id_last` — llama-server keeps them apart the same way (`prompt.tokens` gets
+        // `{ids.begin(), ids.end() - 1}` while `slot.sampled = ids.back()`), because the
+        // last token has not been decoded yet: it goes into the next batch. Passing the
+        // full sequence here instead puts one extra token in front of every hidden row
+        // the driver pairs up, which reads as drafts that are almost always wrong.
+        let Some((&id_last, head)) = seq.split_last() else {
+            return Vec::new(); // nothing to continue from
+        };
+        // A new request on the speculative slot starts a new generation as far as the
+        // driver is concerned. `begin` is also where upstream checks that the prefill's
+        // hidden states actually reached the MTP context, and warns when they did not.
+        {
+            let mut last = self.last_req_id.lock().unwrap_or_else(|e| e.into_inner());
+            if *last != Some(req_id) {
+                *last = Some(req_id);
+                self.model
+                    .mtp_begin(self.kv_seq_id.load(AtomicOrdering::Relaxed), head);
+            }
+        }
+        let seq_id = self.kv_seq_id.load(AtomicOrdering::Relaxed);
+        self.model
+            .mtp_propose(seq_id, head.len() as i32, id_last, head, draft_len)
+    }
+
+    fn set_kv_seq_id(&self, kv_seq_id: i32) {
+        self.kv_seq_id.store(kv_seq_id, AtomicOrdering::Relaxed);
+    }
+
+    fn accept(&self, n_accepted: usize) {
+        let seq_id = self.kv_seq_id.load(AtomicOrdering::Relaxed);
+        self.model.mtp_accept(seq_id, n_accepted as u16);
     }
 }
 

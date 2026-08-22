@@ -7,7 +7,210 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [0.22.0] - 2026-08-22
+
+### Added
+
+- **`--n-gpu-layers`, so a model that does not fit can still use the GPU.**
+  `n_gpu_layers` was hard-coded to `-1` — every layer on the device — which is correct
+  on an iGPU, where unified memory means all layers always fit, and wrong on a discrete
+  card with a fixed VRAM budget. A model one gigabyte too large was refused outright
+  instead of running the layers that do fit on the GPU and the rest on the CPU, which
+  `llama-server` has always done with `-ngl`. Measured on an RTX 5060 Ti 16 GB:
+  Qwen3.8-27B-Q4_K_M needs 17402 MiB of weights against 15712 MiB free and would not
+  load at all; with `--n-gpu-layers` it serves. Only activations cross PCIe per token, a
+  few KB, so even a narrow link does not penalise the split — the cost is that CPU-side
+  layers run at system-RAM bandwidth. Verified on Vulkan and CPU as well as CUDA: `0`
+  keeps all 29 layers of Qwen2.5-7B on the CPU, `16` splits 16/29 onto a Radeon 890M.
+  The draft model deliberately keeps `-1`: it is only worth having if it is much faster
+  than the target, so offloading part of it would defeat speculation rather than
+  economise on VRAM.
+
+- **`--mtp-model`: MTP speculative decoding, EXPERIMENTAL and opt-in.** Qwen3.5/3.8 ship
+  a trained NextN head as a separate small GGUF, and llama.cpp already drives it in
+  `common/speculative.cpp`, so fox wraps that driver rather than porting its 444 lines of
+  hidden-state carryover — 15 s of extra compile time and no new dependencies. Four entry
+  points live in `src/llama-ext.h`, which declares itself staging and exports C++-mangled
+  symbols, so `csrc/mtp_shim.cpp` wraps them in `extern "C"`: an upstream signature
+  change then fails compiling that one file, with the real signature in the error,
+  instead of surfacing as an unresolved mangled symbol at link time. `FOX_NO_MTP=1` drops
+  the whole thing.
+
+  **It is currently slower than the n-gram proposer, warns loudly at load, and should not
+  be turned on except to work on it.** Acceptance is 4-17% against `llama-server`'s ~60%
+  with the same head. The main cause was found and fixed — drafting advanced the head's
+  KV past the target, so llama.cpp refused every verification decode, and checkpointing
+  the driver state around the draft took the trace from +1 token per step to +4/+5 — but
+  a second desync remains. `mtp_propose` documents the state, what was ruled out and with
+  which measurement, and how to diff the two engines' driver traces.
+
+  It is deliberately **not** documented under `docs/cli/`, which is what makes it exempt
+  from the Tier 1 flag promise in `COMPATIBILITY.md`: it may change shape or disappear in
+  any release while the desync is open. `--help` says the same.
+
+### Fixed
+
+- **One NaN logit made greedy sampling pick an arbitrary token.** `sample_greedy`
+  compared with `partial_cmp(..).unwrap_or(Ordering::Equal)` and fed that to
+  `max_by`, which replaces its accumulator whenever the comparison is not `Greater`.
+  An incomparable NaN therefore reported `Equal` and always displaced the running
+  maximum: `[5.0, NaN]` returned the NaN, and `[5.0, NaN, 1.0]` returned `2` —
+  neither the maximum nor the NaN. The NaN did not merely win, it wiped the best
+  candidate so far and everything after it competed from scratch, so a single NaN
+  anywhere in a 128K-wide vector was enough to emit an arbitrary token on the
+  `temperature <= 0` path, which is exactly the path callers use when they want
+  determinism. NaN logits are reachable through fp16 overflow, a bad quantisation or
+  corrupted KV. Now an explicit scan that skips NaN and warns with the count; the tie
+  rule is preserved exactly (`>=` keeps the last maximum, as `max_by` did), and an
+  all-NaN vector returns 0 like the empty case.
+
+- **The sampler was never compiled, let alone tested, in CI.** `sampling` was gated
+  behind `#[cfg(not(fox_stub))]` and `make ci` runs everything with
+  `FOX_SKIP_LLAMA=1`, so the module that decides which token every request emits was
+  excluded from every clippy and test run CI has ever done — which is how the NaN bug
+  above survived. The gate followed the module's only caller (`llama_cpp::batch`);
+  the module itself depends on `std::cmp::Ordering` and `rand` and nothing else.
+  Ungating it costs a `dead_code` allow in stub builds and buys 33 existing tests in
+  CI. The first clippy pass over this code flagged `!(l > threshold)` in
+  `select_top_n`; that negation is deliberate NaN handling and is now documented
+  rather than "fixed" — `l <= threshold` is false for NaN, which would admit one into
+  the candidate pool.
+
+- **Prompt reuse corrupted hybrid/recurrent models (Qwen3.5, Qwen3.8, Qwen3-Next,
+  Falcon-H1, Jamba).** After the first request, a repeated prompt was served from a
+  sequence that had never actually been rewound to the divergence point, and replies
+  came back truncated or as a bare EOS. Measured on Qwen3.8-27B: six identical
+  requests returned 64, 1, 1, 1, 1, 64 tokens.
+
+  The reuse decision trusted `Model::trim_sequence`'s return value to refuse an
+  impossible rollback. It does not: `llama_memory_recurrent::seq_rm` only range-checks
+  the distance while the sequence's tail cell is live, and after an earlier full clear
+  invalidates it, a partial rollback skips the check and reports success without
+  rewinding anything.
+
+  Reuse is now bounded before it is accepted, via `Model::rollback_budget()` —
+  `None` for attention caches, `Some(n_rs_seq)` for recurrent/hybrid ones. Two limits,
+  because they differ: a slot decoding in place keeps its per-token state snapshots and
+  gets the full budget, while a checkpoint restored with `state_seq_load` gets zero
+  (the blob carries the recurrent state but not the snapshot history a rewind indexes
+  into). Attention caches are unaffected — the check is a strict no-op for them.
+
+  Multi-turn reuse is preserved: a 173-token third turn still cached 151 tokens.
+  `--kv-reuse false`, the workaround, is no longer needed.
+
+- **`top_p: 1.0` cost 4.5x in the sampler.** An unrestricted `top_p` truncates nothing,
+  but the adaptive candidate pool tested its requirement as `covered >= top_p` — and a
+  float sum of probabilities never reaches exactly 1.0. So the pool grew 64 → 256 → …
+  through the whole vocabulary, paying a selection pass and an allocation per step, and
+  the result was then sorted in full: 248,320 entries per token on Qwen3.8-27B.
+
+  Measured on that model, decode: `top_p: 1.0` **5.6 → 25.2 tok/s**; `min_p: 0.05` with
+  `top_p: 1.0` (the worst case, which also hit the full sort) **5.2 → 25.7 tok/s**.
+  Unaffected controls stay put: handler defaults 25.0, `top_p: 0.95` 25.6.
+
+  Three changes, all semantics-preserving except where noted: the pool goes straight to
+  the whole vocabulary when nothing truncates rather than growing into it; `top_p >= 1.0`
+  no longer holds the growth loop open, so `min_p` alone sizes the pool; and the
+  descending sort is skipped when no truncation step will consume its ordering.
+
+  Behaviour note: with a fixed `seed` and no truncation active, a seed no longer maps to
+  the same token it did before — the draw now walks the pool in vocabulary order. The
+  distribution is identical and seeded runs remain reproducible.
+
+  This is why `fox bench` reported ~6 tok/s: it hardcodes `top_p: 1.0` and `top_k: 0`.
+  It now reports 24.9, against Ollama's 26.6 and llama-bench's 27.35 on the same model.
+
+- `golden.rs` did not compile: both `LlamaCppModel::load` call sites were missing the
+  `split_mode` argument. Pre-existing on this branch and invisible to `make ci`'s
+  stub-built jobs — exactly the breakage `check-real` exists to catch, which is only
+  useful if it is actually run.
+
+- **Tool calls already in the conversation were replayed in a syntax no model was
+  trained on.** A past call was flattened back into the prompt as
+  `[tool_call: name({...})]`. Models read their own history and imitate what they find
+  there, so from the second round trip onwards the model stopped emitting `<tool_call>`
+  blocks and answered with that literal text; the parser then had nothing to parse and
+  the client got prose where it expected a tool call. Past calls now render in whatever
+  format the model's template declares — `<tool_call>` blocks for Hermes/Qwen,
+  `[TOOL_CALLS][…]` for Mistral, the previous generic text where the model has no native
+  format, which is the right shape there because it is what fox's own injected tool
+  listing asks for. The Hermes rendering is byte-for-byte what the Qwen3 template emits
+  for the same message, so a replayed turn is indistinguishable from a fresh one. Found
+  by running a three-step agent: the first two calls worked, the third came back as text.
+
+- **Native tool-use templates never rendered, so `tools` silently vanished from the
+  prompt.** `json` is not one of minijinja's default features, so `tojson` was unknown to
+  the environment fox builds chat templates in. Every native tool-use template — Qwen,
+  Hermes, Mistral — lists its tools with `{{ tool | tojson }}`, so the render failed,
+  `render_chat_jinja` returned `None`, and the caller fell back to llama.cpp's built-in
+  format, which drops `tools` entirely. The failure was invisible: a request produced a
+  prompt of exactly the same length whether it carried one tool or six, and
+  `message.tool_calls` came back null with `finish_reason: "stop"`, with nothing in the
+  logs to say why. Measured with Qwen3-8B-Q4_K_M, `prompt_tokens` for the same request
+  went from 28 → 46 → 46 to 28 → 147 → 465 as the tool description grew. Both failure
+  paths now warn and say what the consequence is, and template handling moved to
+  `engine::model::chat_template`, which carries no llama.cpp dependency and so is tested
+  in CI.
+
+- **The prompt cache picked its checkpoint by insertion order.** N clients behind one
+  shared system prompt leave N checkpoints that all cover exactly that prefix and differ
+  only in the question after it. They tie on match length, so `take_best`'s `max_by_key`
+  kept whichever was stored first — and they are not interchangeable: whatever the chosen
+  entry holds beyond the match must be rolled back after restoring, and on a
+  hybrid/recurrent cache that rollback is refused past `--rs-rollback` snapshots, turning
+  the restore into a full re-prefill. The entry with the least dead tail now wins, with a
+  third tie-break on index so a full tie resolves the same way every run. On Qwen3.8-27B
+  with 8 clients over 5 identical runs, `cached_tokens` was 1470 or 1260 and refused
+  trims 2 or 4 depending on the run; both are now identical in 5/5.
+
+- **Recurrent and hybrid models reserved gigabytes of sequence state nobody used.**
+  `n_seq = max_batch_size.max(4) + 1` is cheap insurance on a standard model, where a
+  spare sequence costs a few MiB of KV. It is ruinous where every sequence carries a full
+  fixed-size recurrent state, which is reserved whether or not anything uses it. On
+  Qwen3.8-27B that is 748 MiB per sequence, so `--max-batch-size 1` and `--max-batch-size
+  4` reserved the same ~3.7 GB — and that reservation was the memory standing between fox
+  and eleven more layers of GPU residency on a 16 GB card. Recurrent state 3740 → 1496
+  MiB, GPU layers 40 → 51, throughput 6.5 → 8.6 t/s: arms alternated one server at a
+  time, disjoint ranges, with Ollama held as a drift control on the same model (8.7 → 8.8
+  across the two runs). Standard models keep the floor and the dense path is unchanged —
+  Qwen2.5-7B measures 214.8 t/s against 216.0/218.7 before, inside noise.
+
+- **`golden.rs` did not compile.** Both call sites were missing argument #10 of
+  `LlamaCppModel::load`, so neither `cargo check --all-targets` nor `make golden` could
+  run. Invisible to every job that sets `FOX_SKIP_LLAMA=1`, which is all of `make ci`
+  except `check-real` — exactly the breakage that target's own comment describes, and it
+  only helps if it is actually run.
+
+### Testing
+
+- **The benchmark harness answers the question it claims to answer, and its
+  environment gate stopped crying wolf.** `ab_bench.sh` fingerprinted which backend `.so`
+  got dlopen-ed, which is not the question: `libggml-cuda.so` loads even when
+  `CUDA_VISIBLE_DEVICES` is empty and contributes no device, so a CUDA arm and a Vulkan
+  arm at 53 vs 216 t/s fingerprinted identically. It now reports which devices llama.cpp
+  actually placed layers on. `check_bench_env.sh` used `pgrep -f`, which matches the
+  invoking shell's own command line, and reported fox and ollama as competitors when
+  nothing was running — three times in one session; it uses `pgrep -x` now. The gate also
+  checks the governor, what the CPU reaches *under load* (an idle reading says nothing on
+  a powersave laptop), free RAM, and anything else holding the GPU, and `--sample` emits
+  one line to record with every measurement so a number always travels with the state it
+  was taken in.
+
+- **Ollama's `delta.reasoning` counts toward TTFT.** Ollama spells the reasoning delta
+  `reasoning`, not `reasoning_content`, and sends `content: ""` alongside it — falsy, so
+  it did not rescue the lookup. Without it the first visible token was never seen and TTFT
+  measured the whole request: Qwen3.8-27B multi-turn read as 46 s per turn for Ollama
+  against 0.7 s for fox, a 4× "win" that was really prefill plus 96 decoded tokens with
+  no token ever counted. Any new engine goes in that list before its numbers are quoted.
+
+- e2e check 17: an identical prompt ×6 with EOG left **armed**. Check 1 covers the same
+  lifecycle but pins `min_tokens`, which suppresses EOG — and an immediate EOG is the
+  symptom, so it could never have caught this. The check asserts replies reach
+  `max_tokens` rather than merely exceeding one token; verified against the pre-fix
+  binary, which returned 24, 8, 3, 24, 1, 24 and would have passed a ">1 token" bar.
+- `scheduler::tests::{out_of_budget,in_budget,unbounded}_rollback_*`: deterministic
+  cover for the budget arithmetic, which the e2e cannot provide on the dense model the
+  suite normally runs.
 
 ---
 

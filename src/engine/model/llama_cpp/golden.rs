@@ -34,10 +34,11 @@ fn golden_model() -> Option<LlamaCppModel> {
         0.9,
         kv_type::F16,
         kv_type::F16,
-        0,
-        0,
-        &[],
-        false,
+        0,     // n_gpu_layers
+        0,     // main_gpu
+        1,     // split_mode — "layer", the CLI default
+        &[],   // tensor_split
+        false, // moe_offload_cpu
         None,  // mmproj_path
         &[],   // lora_modules
         false, // reranking — golden tests exercise generation,
@@ -660,10 +661,11 @@ fn golden_draft_model_speculative_matches_greedy() {
         0.9,
         kv_type::F16,
         kv_type::F16,
-        0,
-        0,
-        &[],
-        false,
+        0,     // n_gpu_layers
+        0,     // main_gpu
+        1,     // split_mode — "layer", the CLI default
+        &[],   // tensor_split
+        false, // moe_offload_cpu
         None,  // mmproj_path
         &[],   // lora_modules
         false, // reranking — golden tests exercise generation,

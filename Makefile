@@ -173,7 +173,7 @@ publish:
 
 # Soak test — sustained mixed traffic against a REAL server, then a verdict.
 #
-# Covers what nothing else does: `make e2e` is 22 checks over two minutes and every
+# Covers what nothing else does: `make e2e` is 23 checks over two minutes and every
 # other test starts from a fresh process, so a leak, a KV pool that never returns or
 # latency drift are all invisible. Traffic mixes conversations, one-off prompts and
 # clients that hang up mid-stream, because each shape has broken something before.

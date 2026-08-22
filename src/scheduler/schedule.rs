@@ -232,33 +232,119 @@ impl Scheduler {
             // a restore has no rollback to perform. Requiring the cache to strictly win
             // is what left Qwen3.5 with 20 slot hits, 20 refused trims and
             // `cached_tokens` 0 while a usable checkpoint sat in RAM unread.
-            let cache_floor = if self.prefix_reuse_enabled() {
-                choice.lcp
+            // Taking up an offer means rewinding the sequence from everything it holds
+            // back to the divergence point. On a bounded-rollback cache that distance
+            // has a hard limit, and it must be checked HERE: `trim_sequence` reports
+            // success for an over-long rollback once the sequence's tail has been
+            // invalidated, so the engine's after-the-fact guard never fires and the
+            // request silently decodes from a state it never rewound to. Measured on
+            // Qwen3.8-27B: slot holding 102 tokens, offer of 42, `n_rs_seq = 4` — a
+            // 60-token rollback reported `trimmed=true` and every later request
+            // returned a bare EOS. `usize::MAX` for attention caches makes this a no-op.
+            let budget = self.rollback_budget();
+            let slot_resident = slots.resident_len(choice.index);
+            let slot_lcp = if slot_resident.saturating_sub(choice.lcp) > budget {
+                debug!(
+                    request_id = req.id,
+                    seq_id = slots.seq_id_at(choice.index),
+                    offered = choice.lcp,
+                    slot_resident,
+                    budget,
+                    "declining slot offer — rewinding this far exceeds the cache's \
+                     rollback budget; prefilling from scratch"
+                );
+                0
             } else {
-                choice.lcp.saturating_sub(1)
+                choice.lcp
             };
-            let mut lcp = choice.lcp;
+
+            let cache_floor = if self.prefix_reuse_enabled() {
+                slot_lcp
+            } else {
+                slot_lcp.saturating_sub(1)
+            };
+            let mut lcp = slot_lcp;
+            // What the sequence will actually hold when the trim runs. A restore
+            // replaces the slot's KV wholesale, so on a hit this becomes the blob's
+            // extent rather than the slot's.
+            let mut resident_at_trim = slot_resident;
+            // …and how far back it may then be rewound. A sequence that has been
+            // decoding in place still has its per-token state snapshots, so it gets the
+            // full budget. A *restored* one does not: `state_seq_load` writes the
+            // recurrent state but not the snapshot history the rollback indexes into, so
+            // rewinding even one token off a fresh blob reads a snapshot belonging to
+            // whatever occupied those slots before. Measured on Qwen3.8-27B: restore a
+            // 43-token checkpoint, trim by 1, and the reply is a bare EOS.
+            let mut budget_at_trim = budget;
+
+            // llama-server's [TAG_PROMPT_LOGITS] guard (server-context.cpp:3356-3361):
+            // if the prompt is *entirely* resident there is nothing left to decode and
+            // no logits would be produced, so the divergence point steps one token back.
+            // That step-back is part of the rollback distance, so the budget has to be
+            // checked against this, not against the raw LCP.
+            let n_positions = req.n_positions();
+            let divergence = |lcp: usize| {
+                let n = lcp.min(n_positions);
+                if n > 0 && n == n_positions {
+                    n - 1
+                } else {
+                    n
+                }
+            };
+
             if allow_reuse {
                 if let Some(hit) = pcache
                     .as_mut()
                     .and_then(|c| c.take_best(&req.prompt_tokens, cache_floor))
                 {
-                    kv_restores.push((slots.seq_id_at(choice.index), hit.data));
-                    slots.set_resident(
-                        choice.index,
-                        req.prompt_tokens[..hit.resident.min(req.prompt_tokens.len())].to_vec(),
-                    );
-                    lcp = hit.matched;
+                    // On a bounded cache a restored blob may not be rewound AT ALL, so
+                    // the only sound checkpoint is one that lands exactly on the
+                    // divergence point — which is the multi-turn case it exists for,
+                    // where the next prompt extends the cached one. An unbounded
+                    // (attention) cache keeps the old behaviour: it reaches any position
+                    // by dropping cells, so a tied checkpoint is still worth restoring.
+                    //
+                    // Checked before the restore, not after: the blob is ~160 MB on a
+                    // 27B, far too expensive to write into the sequence and then discard.
+                    let restore_allowance = if budget == usize::MAX { usize::MAX } else { 0 };
+                    if hit.resident.saturating_sub(divergence(hit.matched)) <= restore_allowance {
+                        kv_restores.push((slots.seq_id_at(choice.index), hit.data));
+                        slots.set_resident(
+                            choice.index,
+                            req.prompt_tokens[..hit.resident.min(req.prompt_tokens.len())].to_vec(),
+                        );
+                        lcp = hit.matched;
+                        resident_at_trim = hit.resident;
+                        budget_at_trim = 0;
+                    } else {
+                        debug!(
+                            request_id = req.id,
+                            matched = hit.matched,
+                            resident = hit.resident,
+                            "declining prompt-cache checkpoint — a restored blob has no \
+                             snapshot history to rewind through"
+                        );
+                    }
                 }
             }
 
-            // Token-exact reuse, then llama-server's [TAG_PROMPT_LOGITS] guard
-            // (server-context.cpp:3356-3361): if the prompt is *entirely* resident
-            // there is nothing left to decode and no logits would be produced, so
-            // step one token back and recompute the final position.
-            let mut n_past = lcp.min(req.n_positions());
-            if n_past > 0 && n_past == req.n_positions() {
-                n_past -= 1;
+            // Token-exact reuse, stepped back by the [TAG_PROMPT_LOGITS] guard above.
+            let mut n_past = divergence(lcp);
+
+            // The rollback the engine will be asked for, measured against the FINAL
+            // divergence point — the `[TAG_PROMPT_LOGITS]` step-back above is part of
+            // the distance, so this cannot be checked before it. Beyond the budget the
+            // offer is dropped entirely: `n_past = 0` turns the queued trim into a full
+            // clear and the prompt is prefilled from scratch. Slower, never wrong.
+            if resident_at_trim.saturating_sub(n_past) > budget_at_trim {
+                debug!(
+                    request_id = req.id,
+                    resident_at_trim,
+                    n_past,
+                    budget = budget_at_trim,
+                    "declining reuse — the rollback it needs exceeds the cache's budget"
+                );
+                n_past = 0;
             }
 
             // Blocks are a budget, not addresses (see slots.rs): the request inherits

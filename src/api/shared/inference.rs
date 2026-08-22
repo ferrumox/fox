@@ -6,6 +6,7 @@ use crate::model_registry::EngineEntry;
 use crate::scheduler::SamplingParams;
 
 use crate::api::types::{OllamaOptions, ResponseFormat, Tool, ToolCall, ToolCallFunction};
+use crate::engine::model::NativeToolFormat;
 
 // ---------------------------------------------------------------------------
 // Message representation for template rendering
@@ -22,20 +23,56 @@ pub struct MessageForTemplate {
 
 /// Flatten a [`MessageForTemplate`] into a `(role, content)` tuple for
 /// `apply_chat_template` (llama.cpp FFI boundary accepts only string pairs).
-fn flatten_message_for_template(msg: &MessageForTemplate) -> (String, String) {
+///
+/// Past tool calls have to be replayed in the syntax the model was trained on:
+/// a multi-turn agent reads its own history and imitates whatever it finds there,
+/// so a made-up rendering teaches it to stop emitting real tool calls after the
+/// first round trip. `native` is the model's own tool-call format, if it has one.
+fn flatten_message_for_template(
+    msg: &MessageForTemplate,
+    native: Option<NativeToolFormat>,
+) -> (String, String) {
     match msg.role.as_str() {
         "assistant" if msg.tool_calls.is_some() => {
             let calls = msg.tool_calls.as_ref().unwrap();
-            let serialized = calls
-                .iter()
-                .map(|tc| {
-                    format!(
-                        "[tool_call: {}({})]",
-                        tc.function.name, tc.function.arguments
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
+            let serialized = match native {
+                // Byte-for-byte what a Hermes/Qwen template renders for this message.
+                Some(NativeToolFormat::Hermes) => calls
+                    .iter()
+                    .map(|tc| {
+                        format!(
+                            "<tool_call>\n{{\"name\": \"{}\", \"arguments\": {}}}\n</tool_call>",
+                            tc.function.name, tc.function.arguments
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                Some(NativeToolFormat::Mistral) => {
+                    let inner = calls
+                        .iter()
+                        .map(|tc| {
+                            format!(
+                                "{{\"name\": \"{}\", \"arguments\": {}}}",
+                                tc.function.name, tc.function.arguments
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("[TOOL_CALLS][{inner}]")
+                }
+                // No native format: fox's own generic listing tells the model to
+                // answer with JSON, so replay it in that same shape.
+                _ => calls
+                    .iter()
+                    .map(|tc| {
+                        format!(
+                            "[tool_call: {}({})]",
+                            tc.function.name, tc.function.arguments
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            };
             let content = match &msg.content {
                 Some(c) if !c.is_empty() => format!("{c}\n{serialized}"),
                 _ => serialized,
@@ -617,7 +654,11 @@ fn prepare_messages(
         }
     }
 
-    let flat: Vec<(String, String)> = messages.iter().map(flatten_message_for_template).collect();
+    let native = entry.engine.native_tool_call_format();
+    let flat: Vec<(String, String)> = messages
+        .iter()
+        .map(|m| flatten_message_for_template(m, native))
+        .collect();
 
     // Serialize tools once for the Jinja context (OpenAI-shaped `Tool` already
     // matches what native tool-use templates expect — no transform needed).
@@ -1271,10 +1312,40 @@ Let me know if you need anything else."#;
             }]),
             tool_call_id: None,
         };
-        let (role, content) = flatten_message_for_template(&msg);
+        let (role, content) = flatten_message_for_template(&msg, None);
         assert_eq!(role, "assistant");
         assert!(content.contains("get_weather"));
         assert!(content.contains("Madrid"));
+    }
+
+    #[test]
+    fn test_flatten_message_tool_call_replays_the_native_syntax() {
+        // A model reads its own past tool calls out of the history and copies the
+        // format it finds. Replaying them in anything other than the syntax it was
+        // trained on makes it emit plain text from the second turn onwards.
+        let msg = MessageForTemplate {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_abc".to_string(),
+                call_type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: "get_weather".to_string(),
+                    arguments: r#"{"city":"Madrid"}"#.to_string(),
+                },
+            }]),
+            tool_call_id: None,
+        };
+
+        let (_, hermes) = flatten_message_for_template(&msg, Some(NativeToolFormat::Hermes));
+        assert_eq!(
+            hermes,
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\":\"Madrid\"}}\n</tool_call>"
+        );
+
+        let (_, mistral) = flatten_message_for_template(&msg, Some(NativeToolFormat::Mistral));
+        assert!(mistral.starts_with("[TOOL_CALLS]["), "got: {mistral}");
+        assert!(mistral.contains("get_weather"));
     }
 
     #[test]
@@ -1285,7 +1356,7 @@ Let me know if you need anything else."#;
             tool_calls: None,
             tool_call_id: Some("call_abc".to_string()),
         };
-        let (role, content) = flatten_message_for_template(&msg);
+        let (role, content) = flatten_message_for_template(&msg, None);
         assert_eq!(role, "tool");
         assert_eq!(content, "Sunny, 22°C");
     }

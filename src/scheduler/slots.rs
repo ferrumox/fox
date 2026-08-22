@@ -216,6 +216,14 @@ impl SlotTable {
         self.slots[index].blocks.len()
     }
 
+    /// How many tokens this slot's KV currently holds — prompt *and* generated reply.
+    /// Taking up a slot's LCP offer means rolling the sequence back from here to the
+    /// divergence point, so this is the distance a bounded cache has to be checked
+    /// against before the offer is accepted.
+    pub(super) fn resident_len(&self, index: usize) -> usize {
+        self.slots[index].tokens.len()
+    }
+
     /// Hand the slot to `req_id`, yielding its `seq_id` and the blocks it already
     /// holds (which the request inherits rather than re-allocating). The resident
     /// token list is dropped: while `Busy`, the owning request is the source of

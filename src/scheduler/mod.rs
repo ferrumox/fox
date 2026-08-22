@@ -68,6 +68,9 @@ pub struct Scheduler {
     /// False only when a model cannot even reuse the KV a sequence already holds.
     /// Separate from `prefix_reuse` on purpose: see `set_slot_reuse`.
     slot_reuse: std::sync::atomic::AtomicBool,
+    /// How far the model's memory can be rewound, in tokens; `usize::MAX` means
+    /// unbounded. See `set_rollback_budget`.
+    rollback_budget: std::sync::atomic::AtomicUsize,
     /// Master switch for KV reuse (`--kv-reuse`). When false, finished sequences are
     /// always cleared and every prompt is prefilled from token 0 — the pre-0.19
     /// behaviour, kept as an escape hatch and as the A/B baseline arm.
@@ -149,6 +152,32 @@ impl Scheduler {
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// How many tokens a sequence may be rewound by. `usize::MAX` = unbounded.
+    pub fn rollback_budget(&self) -> usize {
+        self.rollback_budget
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Bound how far a slot or checkpoint hit may rewind the sequence it lands on.
+    ///
+    /// `None` (an attention KV cache) leaves it unbounded — any divergence point is
+    /// reachable by dropping cells. `Some(n)` (recurrent/hybrid) caps it at the
+    /// per-token state snapshots the context keeps (`--rs-rollback`).
+    ///
+    /// This is a *pre-flight* check by necessity. The design used to accept every
+    /// offer and rely on `Model::trim_sequence` returning false, but llama.cpp does
+    /// not reliably refuse: once a sequence's tail cell has been invalidated by an
+    /// earlier full clear, `llama_memory_recurrent::seq_rm` skips its range check and
+    /// reports success without rewinding. Measured on Qwen3.8-27B: a 60-token rollback
+    /// against `n_rs_seq = 4` returned `true` and every subsequent request answered
+    /// with a single EOS token.
+    pub fn set_rollback_budget(&self, budget: Option<usize>) {
+        self.rollback_budget.store(
+            budget.unwrap_or(usize::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
     pub fn new(kv_cache: Arc<KVCacheManager>, max_batch_size: usize) -> Self {
         Self::with_max_queue_depth(kv_cache, max_batch_size, 0)
     }
@@ -170,6 +199,7 @@ impl Scheduler {
             // constructors are called before the model is known.
             prefix_reuse: std::sync::atomic::AtomicBool::new(true),
             slot_reuse: std::sync::atomic::AtomicBool::new(true),
+            rollback_budget: std::sync::atomic::AtomicUsize::new(usize::MAX),
             prompt_cache: std::sync::Mutex::new(PromptCache::new(0)),
             slot_prompt_similarity: DEFAULT_SLOT_PROMPT_SIMILARITY,
             kv_reuse: true,
@@ -379,6 +409,71 @@ mod tests {
             batch.kv_trims.contains(&(0, 17)),
             "everything past the divergence point must be trimmed before prefill"
         );
+    }
+
+    /// Reuse a parked sequence and report what the request was allowed to skip.
+    ///
+    /// Same shape as `parked_sequence_is_reused_token_exactly`: an 18-token prompt is
+    /// parked holding 19 tokens (prompt + one generated), and re-sending it diverges at
+    /// 17 after the `[TAG_PROMPT_LOGITS]` step-back — a rollback of exactly 2.
+    fn skip_after_reusing_parked(budget: Option<usize>) -> usize {
+        let sched = Scheduler::new(test_kv(16), 8);
+        sched.set_rollback_budget(budget);
+
+        let tokens: Vec<i32> = (1..=18).collect();
+        run_and_park(&sched, 42, tokens.clone(), &[777]);
+        sched.schedule_step(); // retire the finished request
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        sched
+            .submit(InferenceRequest::new(
+                99,
+                tokens,
+                5,
+                SamplingParams::default(),
+                tx,
+            ))
+            .unwrap();
+        sched.schedule_step();
+
+        let running = sched.running_batch.lock().unwrap();
+        running
+            .iter()
+            .find(|r| r.id == 99)
+            .expect("99 running")
+            .skip_prefix_tokens
+    }
+
+    /// A recurrent/hybrid cache can only rewind as far as `--rs-rollback` snapshots.
+    /// An offer needing more than that must be declined outright, because llama.cpp
+    /// will NOT refuse it: `llama_memory_recurrent::seq_rm` skips its range check once
+    /// the sequence's tail cell has been invalidated and reports success without
+    /// rewinding. Measured on Qwen3.8-27B — a 60-token rollback against `n_rs_seq = 4`
+    /// returned true, and every request after it answered with a bare EOS.
+    #[test]
+    fn out_of_budget_rollback_declines_the_slot_offer() {
+        assert_eq!(
+            skip_after_reusing_parked(Some(1)),
+            0,
+            "a 2-token rollback against a 1-token budget must prefill from scratch"
+        );
+    }
+
+    /// The bound is a bound, not a ban: an offer that fits still reuses in full, so
+    /// multi-turn chat on a hybrid model keeps its prefix.
+    #[test]
+    fn in_budget_rollback_still_reuses_the_slot_offer() {
+        assert_eq!(
+            skip_after_reusing_parked(Some(2)),
+            17,
+            "a 2-token rollback against a 2-token budget is reusable"
+        );
+    }
+
+    /// Attention caches rewind to any position, so the budget must not touch them.
+    #[test]
+    fn unbounded_rollback_is_unaffected_by_the_budget_check() {
+        assert_eq!(skip_after_reusing_parked(None), 17);
     }
 
     /// Two prompts sharing a prefix: the newcomer reuses exactly the shared span.

@@ -136,7 +136,9 @@ impl InferenceEngine {
                 // skipping a prefix that is no longer where it thinks it is, so take the
                 // same escape hatch the prompt-cache restore failure uses: drop the
                 // sequence and prefill it from scratch. Slower, never wrong.
-                if !engine.model.trim_sequence(*seq_id, *keep_from) {
+                let trimmed = engine.model.trim_sequence(*seq_id, *keep_from);
+                tracing::debug!(seq_id, keep_from, trimmed, "KV trim applied");
+                if !trimmed {
                     tracing::warn!(
                         seq_id,
                         keep_from,
@@ -534,9 +536,17 @@ impl InferenceEngine {
                     );
                     seq.extend_from_slice(&request.prompt_tokens);
                     seq.extend_from_slice(&request.generated_token_ids);
+                    // Which llama.cpp sequence this request occupies — the MTP driver
+                    // keys its state by that, not by fox's request id.
+                    proposer.set_kv_seq_id(request.kv_seq_id);
                     let drafts = proposer.propose(only_id, &seq, draft_len);
                     let proposed = drafts.len();
                     let committed = model.speculative_decode_sync(only_id, &request, drafts)?;
+                    // `committed` is the accepted drafts plus one bonus token sampled
+                    // from the target. Reported inside spawn_blocking because a
+                    // stateful proposer makes an FFI call here, which must never run
+                    // on the async executor.
+                    proposer.accept(committed.len().saturating_sub(1));
                     anyhow::Ok((committed, proposed))
                 })
                 .await

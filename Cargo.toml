@@ -1,6 +1,6 @@
 [package]
 name = "ferrumox"
-version = "0.21.0"
+version = "0.22.0"
 edition = "2021"
 description = "fox — a fast local LLM inference server, drop-in compatible with the Ollama and OpenAI APIs"
 license = "MIT OR Apache-2.0"
@@ -51,7 +51,12 @@ dashmap = "6"
 toml = "0.8"
 bytes = "1"
 dirs = "5"
-minijinja = "2"
+# `json` is NOT a default feature, and without it the `tojson` filter is unknown.
+# Every native tool-use chat template (Qwen, Hermes, Mistral) renders its tool
+# listing with `{{ tool | tojson }}`, so leaving it out makes those templates fail
+# to render — and the caller silently falls back to llama.cpp's built-in format,
+# which drops `tools` entirely.
+minijinja = { version = "2", features = ["json"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 base64 = "0.22"
 

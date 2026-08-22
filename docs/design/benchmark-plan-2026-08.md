@@ -71,6 +71,59 @@ this template. fox is nonetheless ~2.7× ahead of `llama-server` on short-prompt
 multi-turn there — but for the fixed-cost reason below, not for any reuse. Treat every
 hybrid number in this document as provisional.
 
+**SUPERSEDED 2026-08-17 — reuse now works on hybrids, and it is measured.** The "20 slot
+hits, 20 refused trims, `cached_tokens` 0" above was not a template problem. It was a
+bug: the reuse decision trusted `trim_sequence`'s return value, and
+`llama_memory_recurrent::seq_rm` reports success without rewinding once a sequence's tail
+cell has been invalidated. Reuse is now bounded before it is accepted (see the CHANGELOG
+entry for `rollback_budget`), and `cached_tokens` on Qwen3.8-27B is no longer 0 — it is
+371 of a 392-token history by turn 5.
+
+#### Multi-turn on a hybrid — Qwen3.8-27B Q3_K_S, CUDA, fox vs Ollama 0.32.14
+
+TTFT p50 in ms, median of turns 1-5 across rounds; ranges are across-round spreads.
+Both arms: one engine live at a time, `n_ctx` 8192, thinking OFF, warmed before
+measuring, 6 turns, prompt growing 159 → ~400 tokens. RTX 5060 Ti 16 GB.
+
+| clients | turn 0 | turns 1-5 | within-conversation | fox advantage |
+|---|---|---|---|---|
+| **1 conversation** | | | | |
+| fox | 287 | **119** [69, 122] | 2.4× | — |
+| Ollama | 725 | 520 [458, 561] | 1.4× | **4.4×** |
+| **2 conversations** | | | | |
+| fox | 555 | **161** [122, 226] | 3.4× | — |
+| Ollama | 1611 | 2083 [1944, 2276] | **0.77× — worse** | **12.9×** |
+
+Ranges are disjoint in both blocks.
+
+Two separate findings, and they must not be merged:
+
+1. **Both engines reuse.** Ollama's TTFT is *flat* as the history grows 210 → 407 tokens
+   (512 ms throughout), which is only possible if it is not re-prefilling. What separates
+   them at one client is per-request fixed cost — 119 ms against 520 ms — not caching.
+   "Conversations get faster over time" is true for Ollama too, just less so (1.4× vs 2.4×).
+2. **The separation is concurrency.** Adding a second conversation costs fox 1.35×
+   (119 → 161) and Ollama 4× (520 → 2083), to the point that Ollama's later turns are
+   *slower than its own turn 0*. That is the continuous-batching claim, and it is where
+   the 12.9× comes from — not from prompt reuse.
+
+**Two conversations is the ceiling here, not a choice.** Qwen3.8-27B carries 748 MiB of
+recurrent state per sequence (measured: RS buffer 1496 MiB at `n_seq` 2, 2244 at 3, OOM at
+5). With 11.5 GB of weights on a 16 GB card only 2-3 slots fit, so this workload cannot be
+pushed to the concurrency levels the dense-model runs reach.
+
+**Method note — thinking mode.** Ollama runs Qwen3.8's thinking block by default and fox
+does not, and comparing them in different modes measured the mode: 10-20× for fox, because
+Ollama generated a reasoning preamble every turn *and* the driver fed that text back as
+the assistant message, which does not match the `<think>`-delimited form in Ollama's own
+KV, so its prefix diverged and it re-prefilled the whole history. Both arms are now forced
+to the same mode via `BENCH_EXTRA_BODY='{"reasoning_effort":"none"}'`. `"think": false` and
+`chat_template_kwargs.enable_thinking` are silently ignored by Ollama's OpenAI-compatible
+endpoint — only `reasoning_effort` works.
+
+Not compared here: `llama-server` and vLLM. `cached_tokens` is fox-only — Ollama does not
+populate `prompt_tokens_details`, so its reuse is inferred from flat TTFT, not read off.
+
 ### Where fox is behind, plainly
 
 - decode throughput: 1.06× behind at 4 clients after the sampler fix (was 1.10×)

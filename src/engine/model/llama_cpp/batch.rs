@@ -346,6 +346,12 @@ impl LlamaCppModel {
         let ctx = ctx_guard.as_ptr();
 
         let ret = unsafe { ffi::llama_decode(ctx, batch) };
+        // Keep the MTP driver in step with the target: it drafts from the hidden rows
+        // of this decode. No-op when no MTP head is attached.
+        #[cfg(fox_mtp)]
+        if ret == 0 {
+            unsafe { self.mtp_process(&batch) };
+        }
         if ret != 0 {
             unsafe { ffi::llama_batch_free(batch) };
             if let Some(split) = bisection_split(ret, requests.len()) {
@@ -591,6 +597,12 @@ impl LlamaCppModel {
         let ctx = ctx_guard.as_ptr();
 
         let ret = unsafe { ffi::llama_decode(ctx, batch) };
+        // Keep the MTP driver in step with the target: it drafts from the hidden rows
+        // of this decode. No-op when no MTP head is attached.
+        #[cfg(fox_mtp)]
+        if ret == 0 {
+            unsafe { self.mtp_process(&batch) };
+        }
         if ret != 0 {
             unsafe { ffi::llama_batch_free(batch) };
             if let Some(split) = bisection_split(ret, requests.len()) {
@@ -852,6 +864,12 @@ impl LlamaCppModel {
             .map_err(|e| anyhow!("lock poisoned: {}", e))?;
         let ctx = ctx_guard.as_ptr();
         let ret = unsafe { ffi::llama_decode(ctx, batch) };
+        // Keep the MTP driver in step with the target: it drafts from the hidden rows
+        // of this decode. No-op when no MTP head is attached.
+        #[cfg(fox_mtp)]
+        if ret == 0 {
+            unsafe { self.mtp_process(&batch) };
+        }
         if ret != 0 {
             unsafe { ffi::llama_batch_free(batch) };
             return Err(anyhow!("llama_decode (speculative) failed: {}", ret));

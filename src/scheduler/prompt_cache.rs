@@ -128,13 +128,35 @@ impl PromptCache {
         if !self.enabled() || prompt.is_empty() {
             return None;
         }
+        // Ties are the common case, not the exception: N clients arriving behind one
+        // shared system prompt leave N checkpoints that all cover exactly that prefix and
+        // differ only in the question tacked on after it. Any of them "matches" equally.
+        //
+        // They are not equally useful. Whatever the chosen entry holds *beyond* the match
+        // has to be rolled back after the restore, and on a hybrid/recurrent cache that
+        // rollback is refused past `--rs-rollback` snapshots — which turns the restore
+        // into a full re-prefill. So among equal matches, take the entry carrying the
+        // least dead tail.
+        //
+        // Picking arbitrarily (`max_by_key` keeps the first maximum, i.e. insertion
+        // order) is what made the burst non-deterministic: identical runs landed on 2 or
+        // 4 refused trims depending on which client's checkpoint each request happened to
+        // draw, and the wall time swung with it.
         let best = self
             .entries
             .iter()
             .enumerate()
-            .map(|(i, e)| (i, common_prefix_len(&e.tokens, prompt)))
-            .filter(|&(_, matched)| matched > min_matched)
-            .max_by_key(|&(_, matched)| matched);
+            .map(|(i, e)| (i, common_prefix_len(&e.tokens, prompt), e.tokens.len()))
+            .filter(|&(_, matched, _)| matched > min_matched)
+            .max_by(|a, b| {
+                // Longest match first; then the shortest resident tail; then the lowest
+                // index, so a full tie resolves the same way every run rather than by
+                // whichever entry was stored first.
+                a.1.cmp(&b.1)
+                    .then_with(|| b.2.cmp(&a.2))
+                    .then_with(|| b.0.cmp(&a.0))
+            })
+            .map(|(i, matched, _)| (i, matched));
 
         match best {
             Some((index, matched)) => {
@@ -220,6 +242,40 @@ mod tests {
         assert_eq!(c.len(), 1, "a rejected candidate stays cached");
         // One more token of coverage does clear the floor.
         assert!(c.take_best(&[1, 2, 3, 4, 5], 3).is_some());
+    }
+
+    #[test]
+    fn take_best_breaks_ties_on_the_shortest_dead_tail() {
+        // The shape a concurrent burst leaves behind: several checkpoints covering the
+        // same shared prefix [1,2,3], each with a different question after it. All match
+        // the incoming prompt equally, so the tie-break is the whole decision — and what
+        // the winner carries past the match is what has to be rolled back afterwards.
+        let mut c = PromptCache::new(1024);
+        c.store(vec![1, 2, 3, 7, 7, 7, 7], blob(10)); // stored first, longest tail
+        c.store(vec![1, 2, 3, 8], blob(10)); // shortest tail
+        c.store(vec![1, 2, 3, 9, 9], blob(10));
+
+        let hit = c.take_best(&[1, 2, 3, 4], 0).expect("hit");
+        assert_eq!(hit.matched, 3, "all three cover the same prefix");
+        assert_eq!(
+            hit.resident, 4,
+            "the entry with the least to roll back wins, not the one stored first"
+        );
+    }
+
+    #[test]
+    fn take_best_is_deterministic_across_equal_candidates() {
+        // Two entries that tie on match *and* on tail length: the choice must not depend
+        // on insertion order, or identical runs diverge — which is exactly how the burst
+        // benchmark ended up with 2 refused trims one run and 4 the next.
+        let pick = |order: [i32; 2]| {
+            let mut c = PromptCache::new(1024);
+            for q in order {
+                c.store(vec![1, 2, 3, q], blob(10));
+            }
+            c.take_best(&[1, 2, 3, 5], 0).expect("hit").resident
+        };
+        assert_eq!(pick([8, 9]), pick([9, 8]));
     }
 
     #[test]

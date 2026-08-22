@@ -39,6 +39,7 @@ pub async fn run_probe(args: ProbeArgs) -> Result<()> {
         0.9,                     // gpu_memory_fraction
         kv_type::F16,
         kv_type::F16,
+        -1,    // n_gpu_layers — all; probe reports metadata, it does not measure
         0,     // main_gpu
         0,     // split_mode = none
         &[],   // tensor_split

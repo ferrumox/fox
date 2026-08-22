@@ -7,13 +7,58 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 /// Sample the highest-probability token (deterministic).
+///
+/// Ties go to the **highest** token id, matching `Iterator::max_by`'s
+/// last-maximum rule, which this function used to be written in terms of and which
+/// callers at `temperature = 0` observe directly.
+///
+/// NaN never wins. That is not a refinement, it is a bug fix: `max_by` replaces its
+/// accumulator whenever the comparison is not `Greater`, and
+/// `partial_cmp(..).unwrap_or(Equal)` reports `Equal` for an incomparable NaN — so
+/// a NaN always displaced the running maximum, and every element after it competed
+/// from scratch. Measured against the old implementation:
+///
+/// ```text
+/// [5.0, NaN]       -> 1   the NaN itself
+/// [5.0, NaN, 1.0]  -> 2   neither the maximum nor the NaN
+/// ```
+///
+/// One NaN anywhere in a 128K-wide logit vector was enough to emit an essentially
+/// arbitrary token. NaN logits are reachable in practice — fp16 overflow, a bad
+/// quantisation, corrupted KV — so this was a live path, not a theoretical one.
+/// A vector that is *entirely* NaN has no meaningful answer; it returns 0, as the
+/// empty case does.
 pub(crate) fn sample_greedy(logits: &[f32]) -> i32 {
-    logits
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-        .map(|(i, _)| i as i32)
-        .unwrap_or(0)
+    let mut best = 0usize;
+    let mut best_logit = f32::NEG_INFINITY;
+    let mut have_candidate = false;
+    let mut nan_count = 0usize;
+
+    for (i, &l) in logits.iter().enumerate() {
+        if l.is_nan() {
+            nan_count += 1;
+            continue;
+        }
+        // `>=`, not `>`: keep the last maximum, so `[1.0, 1.0, 0.5]` picks 1.
+        if !have_candidate || l >= best_logit {
+            best = i;
+            best_logit = l;
+            have_candidate = true;
+        }
+    }
+
+    if nan_count > 0 {
+        // Worth a warning every time rather than once: the model is producing
+        // garbage, and which requests it happened on is the diagnostic.
+        tracing::warn!(
+            nan_count,
+            vocab = logits.len(),
+            picked = best,
+            "NaN logits in greedy sampling — ignored, but the forward pass is suspect"
+        );
+    }
+
+    best as i32
 }
 
 /// Apply repetition penalty in-place: divide positive logits and multiply negative ones.
@@ -129,9 +174,13 @@ fn select_top_n(logits: &[f32], n: usize) -> Vec<usize> {
     // NEG_INFINITY until the buffer fills, so every early element is taken.
     let mut threshold = f32::NEG_INFINITY;
     for (i, &l) in logits.iter().enumerate() {
-        // NaN compares false here and is therefore treated as smaller than everything,
-        // matching what `partial_cmp(...).unwrap_or(Equal)` did with it before.
-        if top.len() == n && !(l > threshold) {
+        // NaN compares false here and is therefore treated as smaller than everything.
+        // The negation is load-bearing and must not be rewritten as `l <= threshold`:
+        // that is false for NaN, which would *admit* a NaN into the candidate pool.
+        // Clippy cannot know which of the two a partial order was meant to pick.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        let below_threshold = !(l > threshold);
+        if top.len() == n && below_threshold {
             continue;
         }
         let pos = top.partition_point(|&(_, v)| v > l);
@@ -242,33 +291,67 @@ pub(crate) fn sample_token(logits: &[f32], p: SamplerParams<'_>) -> i32 {
         // (always inside any non-empty candidate pool) has probability
         // `exp(max_l - max_l)/sum == 1/sum`.
         let min_p_threshold = if min_p > 0.0 { min_p / sum } else { 0.0 };
-        let mut bound = 64usize.min(logits.len());
-        let idx = loop {
-            let cand: Vec<usize> = if bound < logits.len() {
-                select_top_n(&logits, bound)
-            } else {
-                (0..logits.len()).collect()
+        // `top_p >= 1.0` asks for the whole distribution and `min_p <= 0` removes the
+        // other reason the pool could stop early, so the answer is the entire
+        // vocabulary — known up front, not something to discover. The adaptive loop
+        // below would reach the same set by growing 64 → 256 → … → n, paying a
+        // `select_top_n` pass and a fresh allocation at every step and never once
+        // satisfying `covered >= 1.0` (a float sum of probabilities does not reach
+        // exactly 1.0). On Qwen3.8-27B's 248,320-entry vocabulary that is seven
+        // discarded passes per token, and `top_p: 1.0` is what `fox bench` and the
+        // OpenAI defaults both ask for.
+        if top_p_needed >= 1.0 && min_p <= 0.0 {
+            ((0..logits.len()).collect::<Vec<usize>>(), sum)
+        } else {
+            let mut bound = 64usize.min(logits.len());
+            let idx = loop {
+                let cand: Vec<usize> = if bound < logits.len() {
+                    select_top_n(&logits, bound)
+                } else {
+                    (0..logits.len()).collect()
+                };
+                if bound >= logits.len() {
+                    break cand;
+                }
+                let mut covered = 0.0f32;
+                let mut min_prob_in_pool = f32::INFINITY;
+                for &i in &cand {
+                    let prob = (logits[i] - max_l).exp() / sum;
+                    covered += prob;
+                    min_prob_in_pool = min_prob_in_pool.min(prob);
+                }
+                // `top_p == 1.0` truncates nothing, so it imposes no requirement on the
+                // pool and must not hold the loop open — `covered` is a float sum of
+                // probabilities and never reaches exactly 1.0, so testing it would grow
+                // the pool to the whole vocabulary no matter what the other filters
+                // wanted. Reaching here at all means some filter *does* truncate (the
+                // no-truncation case took the whole-vocabulary branch above), so this
+                // lets that filter alone decide how big the pool has to be: `min_p`
+                // with `top_p: 1.0` went from 5.2 to 25 tok/s on Qwen3.8-27B.
+                let top_p_satisfied = top_p_needed >= 1.0 || covered >= top_p_needed;
+                let min_p_satisfied = min_p <= 0.0 || min_prob_in_pool < min_p_threshold;
+                if top_p_satisfied && min_p_satisfied {
+                    break cand;
+                }
+                bound = (bound * 4).min(logits.len());
             };
-            if bound >= logits.len() {
-                break cand;
-            }
-            let mut covered = 0.0f32;
-            let mut min_prob_in_pool = f32::INFINITY;
-            for &i in &cand {
-                let prob = (logits[i] - max_l).exp() / sum;
-                covered += prob;
-                min_prob_in_pool = min_prob_in_pool.min(prob);
-            }
-            let top_p_satisfied = covered >= top_p_needed;
-            let min_p_satisfied = min_p <= 0.0 || min_prob_in_pool < min_p_threshold;
-            if top_p_satisfied && min_p_satisfied {
-                break cand;
-            }
-            bound = (bound * 4).min(logits.len());
-        };
-        (idx, sum)
+            (idx, sum)
+        }
     };
-    candidates.sort_by(|&a, &b| logits[b].partial_cmp(&logits[a]).unwrap_or(Ordering::Equal));
+    // Descending order exists solely so the truncation steps below can keep a *prefix*.
+    // When none of them will run, the pool goes to the weighted draw whole, and a draw
+    // over a fixed set is order-independent: the same tokens carry the same
+    // probabilities, so the distribution is identical either way. Sorting the entire
+    // vocabulary to then truncate nothing is the other half of the `top_p: 1.0` cost.
+    //
+    // Behaviour note: with a fixed `seed` this changes *which* token a given draw lands
+    // on (the linear walk over the pool now visits it in vocabulary order). Seeded
+    // reproducibility is intact — the order is deterministic — but a seed does not map
+    // to the same token it did before this change.
+    let truncates = min_p > 0.0 || top_n_sigma > 0.0 || top_p < 1.0;
+    if truncates {
+        candidates.sort_by(|&a, &b| logits[b].partial_cmp(&logits[a]).unwrap_or(Ordering::Equal));
+    }
     let mut probs: Vec<(usize, f32)> = candidates
         .iter()
         .map(|&i| (i, (logits[i] - max_l).exp() / exp_sum))
@@ -375,6 +458,41 @@ mod tests {
     #[test]
     fn greedy_handles_single_token() {
         assert_eq!(sample_greedy(&[42.0f32]), 0);
+    }
+
+    #[test]
+    fn greedy_handles_empty_logits() {
+        assert_eq!(sample_greedy(&[]), 0);
+    }
+
+    #[test]
+    fn greedy_all_negative_infinity_keeps_the_last() {
+        // `max_by` returned the last element here; the rewrite must not change it.
+        assert_eq!(sample_greedy(&[f32::NEG_INFINITY; 3]), 2);
+    }
+
+    #[test]
+    fn greedy_ignores_a_nan_instead_of_picking_it() {
+        assert_eq!(sample_greedy(&[5.0, f32::NAN]), 0);
+        assert_eq!(sample_greedy(&[f32::NAN, 5.0]), 1);
+    }
+
+    #[test]
+    fn greedy_nan_does_not_destroy_the_running_maximum() {
+        // The regression that motivated the fix: the old implementation returned 2
+        // here — neither the maximum nor the NaN, just whatever followed it.
+        assert_eq!(sample_greedy(&[5.0, f32::NAN, 1.0]), 0);
+        assert_eq!(sample_greedy(&[1.0, f32::NAN, 5.0, 2.0]), 2);
+    }
+
+    #[test]
+    fn greedy_all_nan_returns_zero() {
+        assert_eq!(sample_greedy(&[f32::NAN; 4]), 0);
+    }
+
+    #[test]
+    fn greedy_nan_does_not_disturb_tie_breaking() {
+        assert_eq!(sample_greedy(&[1.0, f32::NAN, 1.0, 0.5]), 2);
     }
 
     // -----------------------------------------------------------------------
@@ -561,6 +679,88 @@ mod tests {
             "tokens outside top-K window should never be sampled; got {:?}",
             seen
         );
+    }
+
+    /// Base params for the pool-size regression tests below: every filter disabled, so
+    /// the sampler must draw from the entire vocabulary.
+    fn unfiltered(seed: u64) -> SamplerParams<'static> {
+        SamplerParams {
+            temperature: 1.0,
+            top_p: 1.0,
+            top_k: 0,
+            min_p: 0.0,
+            repetition_penalty: 1.0,
+            repeat_last_n: -1,
+            top_n_sigma: 0.0,
+            min_keep: 0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            logit_bias: None,
+            generated_ids: &[],
+            seed: Some(seed),
+            token_count: 0,
+        }
+    }
+
+    /// `top_p = 1.0` with no other filter truncates NOTHING, so the whole vocabulary
+    /// stays reachable — including the tail.
+    ///
+    /// This guards the shortcut that makes that case fast. The adaptive candidate pool
+    /// starts at 64 and grows only while a filter still demands more; with no filter
+    /// demanding anything, a plausible-looking "optimisation" is to stop at the first
+    /// bound, which would silently make every token past the 64th unsamplable. The
+    /// vocabulary here is uniform, so a correct sampler reaches deep into it.
+    #[test]
+    fn unfiltered_sampling_can_reach_beyond_the_initial_pool() {
+        let logits = vec![0.0f32; 1000]; // uniform: every token equally likely
+        let deepest = (0u64..200)
+            .map(|seed| sample_token(&logits, unfiltered(seed)))
+            .max()
+            .expect("200 draws");
+        assert!(
+            deepest >= 64,
+            "the pool must span the vocabulary when nothing truncates; deepest={deepest}"
+        );
+    }
+
+    /// The same shortcut must not cost the tail its weight: on a uniform vocabulary the
+    /// draws should spread across it, not cluster in whatever prefix the pool started at.
+    #[test]
+    fn unfiltered_sampling_spreads_across_the_vocabulary() {
+        let logits = vec![0.0f32; 1000];
+        let seen: std::collections::HashSet<i32> = (0u64..200)
+            .map(|seed| sample_token(&logits, unfiltered(seed)))
+            .collect();
+        let beyond_pool = seen.iter().filter(|&&t| t >= 64).count();
+        assert!(
+            beyond_pool > 100,
+            "a uniform vocabulary should be sampled broadly; only {beyond_pool} of \
+             {} distinct draws landed past the initial pool",
+            seen.len()
+        );
+    }
+
+    /// `min_p` with `top_p = 1.0` still truncates exactly.
+    ///
+    /// This pair used to be the sampler's worst case: `top_p`'s pool requirement was
+    /// tested as `covered >= 1.0`, which a float sum of probabilities never reaches, so
+    /// the pool grew to the whole vocabulary and was then fully sorted — 5.2 tok/s
+    /// against 25 on Qwen3.8-27B. `top_p = 1.0` now imposes no requirement, leaving
+    /// `min_p` to size the pool; this asserts the truncation it performs is unchanged.
+    #[test]
+    fn min_p_truncates_with_top_p_disabled() {
+        // Token 3 dominates; min_p = 0.9 keeps only tokens within 90% of its probability.
+        let logits = vec![0.0f32, 0.0, 0.0, 20.0];
+        for seed in 0u64..40 {
+            let t = sample_token(
+                &logits,
+                SamplerParams {
+                    min_p: 0.9,
+                    ..unfiltered(seed)
+                },
+            );
+            assert_eq!(t, 3, "min_p must still drop the tail when top_p is 1.0");
+        }
     }
 
     #[test]

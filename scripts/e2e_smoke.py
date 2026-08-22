@@ -722,5 +722,59 @@ check(
     f"usage={usage}",
 )
 
+
+# ── 17) identical prompt ×6, with EOS left ARMED ─────────────────────────────
+# Check 1 covers the same donate→hit lifecycle but pins `min_tokens`, which
+# suppresses EOG — and suppressing EOG is exactly what hid this bug. A sequence
+# reused at a divergence point it was never actually rewound to answers with an
+# immediate end-of-generation, and `min_tokens` masks that into a full-length reply.
+# So this check deliberately runs WITHOUT `min_tokens`: a 1-token reply must be
+# allowed to surface.
+#
+# Found on Qwen3.8-27B (`qwen35`, hybrid) 2026-08-17: from the third identical
+# request on, every reply was a bare EOS. Root cause was reuse being accepted for a
+# rollback the recurrent cache could not perform — `llama_memory_seq_rm` reports
+# success without rewinding once a sequence's tail cell has been invalidated, so the
+# engine's after-the-fact `trim_sequence` guard never fired.
+#
+# NOTE ON MODELS: this only reproduces on a hybrid/recurrent architecture (Qwen3.5,
+# Qwen3.8, Qwen3-Next, Falcon-H1, Jamba). On the dense model this suite usually runs
+# it is a cheap regression guard, not a reproduction — the deterministic coverage of
+# the budget arithmetic lives in `scheduler::tests::*_rollback_*`.
+#
+# WHAT TO ASSERT: "reached max_tokens", not "returned more than one token". A
+# poisoned sequence does not reliably stop dead on its prefill token — measured
+# against the pre-fix binary, six identical requests returned 24, 8, 3, 24, 1, 24.
+# A ">1 token" bar passes 5 of those 6 and would have shipped the bug.
+#
+# THRESHOLD: 5 of 6 rather than 6 of 6, because a real EOS can legitimately land
+# early — measured at 0.33% per request on this suite's model, which over 6 requests
+# would otherwise flake. The gap is wide either way: healthy is 6/6, the pre-fix
+# binary scored 3/6 on the same prompt.
+print("17) identical prompt ×6 with EOS armed (reuse must not poison the sequence)")
+CAP = 64
+full = 0
+lengths = []
+for i in range(6):
+    st, r = post(
+        "/v1/chat/completions",
+        {
+            "model": MODEL,
+            "messages": [
+                {"role": "user", "content": "Describe the water cycle in detail."}
+            ],
+            "max_tokens": CAP,
+        },
+    )
+    n = r.get("usage", {}).get("completion_tokens", 0) if st == 200 else 0
+    lengths.append(n)
+    if n >= CAP:
+        full += 1
+check(
+    f"at least 5 of 6 identical repeats generate the full {CAP} tokens",
+    full >= 5,
+    f"lengths={lengths}",
+)
+
 print(f"\n{'=' * 50}\nRESULT: {ok_count} passed, {fail_count} failed")
 sys.exit(1 if fail_count else 0)

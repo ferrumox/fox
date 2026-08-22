@@ -4,16 +4,20 @@ A living inventory of **everything fox does** and an honest assessment of **what
 and what doesn't**. Use it to decide what to fix, in what order, and to track progress
 per release.
 
-- **Tracks through:** 0.20.2 (branch `feature/0.20`); `main`/`develop` are at 0.13.0
-  as of this writing — 0.14 through 0.20.2 are done and closed but not yet merged up
-  (deliberate, releases are being cut gradually). This file describes the code, not
+- **Tracks through:** 0.22.0 (branch `release/0.22.0`). `main` is at v0.21.0 and
+  `develop` carries 0.22.0's nineteen commits; the backlog this line used to describe —
+  0.14 through 0.20.2 done but unmerged — is closed. This file describes the code, not
   what's tagged.
 - **0.19 in one line:** a llama-server gap audit
   ([`llama-server-gap-analysis.md`](docs/design/llama-server-gap-analysis.md)), the KV
   reuse rework it motivated (34× mean / 94× p90 on a multi-conversation working set),
   shared-prefill forking for `n>1` (3.4×), and the API-parity and correctness fixes the
   audit exposed along the way.
-- **Last updated:** 2026-08-02
+- **0.22 in one line:** the fixes that had accumulated unreleased since 0.21.0 —
+  greedy sampling's NaN, the sampler's absence from CI, prompt reuse on
+  hybrid/recurrent models, `top_p: 1.0`, native tool-call replay — plus
+  `--n-gpu-layers` and an experimental, opt-in `--mtp-model`.
+- **Last updated:** 2026-08-22
 - **Companion:** [Model-architecture correctness rework](docs/design/model-architecture-rework.md)
   — the design that resolved most of the ❌/⚠️ items below (see "Known issues" for what's
   still open). [`docs/design/vllm-gap-analysis.md`](docs/design/vllm-gap-analysis.md) is the
@@ -275,6 +279,9 @@ Mapped to the fix in the [design doc](docs/design/model-architecture-rework.md).
 | 12 | ✅ Resolved | `/v1/completions` ignored nearly every sampling parameter and returned the wrong response shape | **0.19** — see the APIs table |
 | 13 | ✅ Resolved | Ollama timings were constants: `load_duration`/`prompt_eval_duration` literally `0`, `total_duration` == `eval_duration` | **0.19** — all four measured |
 | 14 | ✅ Resolved | An intermittent `make e2e` failure (~1 run in 52), unexplained across two sessions | **0.19** — **it was the test.** Checks 1 and 9 asserted `finish == "length"` while sending `max_tokens: 12` with no `temperature` (stochastic 0.8 default) and no `min_tokens`, so an early EOS failed them. Measured, not waited for: 600 requests in check 9's concurrent shape gave 2 early stops (0.33% each) → ~1 failing run in 43, against the 1-in-~52 observed. Fixed with `min_tokens: 12`; verified 600/600 under identical conditions. Two sessions went into this because the first instinct was to suspect the code under change rather than the test verifying it |
+| 15 | ❌ Open | **No VRAM headroom accounting when choosing GPU layers.** `--n-gpu-layers` (added 2026-08-16 — before it, `n_gpu_layers` was hard-coded to `-1` and a model one gigabyte too large simply refused to load) leaves the choice entirely to the operator, and a value that loads cleanly can still abort the *process* on the first large prompt: CUDA graph instantiation allocates after load, and when nothing is left llama.cpp aborts inside `ggml_cuda_graph_evaluate_and_capture` with no recoverable return code. Measured on Qwen3.8-27B/CUDA, RTX 5060 Ti 16 GB: `--n-gpu-layers 51` loads, serves 48-token replies, reports 15838 MiB of 15849 used — and then core-dumps on a 3011-token prompt (`cudaGraphInstantiate: out of memory`). 46 layers is stable at 14586 MiB. Same class as item 8's prefill `GGML_ASSERT`: an unrecoverable abort where a graceful degrade was possible | **Not scheduled.** The fix is an auto-fit: pick the layer count by trying, mirroring `shrink_n_ctx`'s existing "ask llama.cpp by trying, don't predict" loop one level up, and reserve headroom rather than filling VRAM to the last MiB. Ollama's `common_params_fit_impl` does exactly this on the same model and hardware — it iterates 17934 → 14551 → 14287 MiB and deliberately stops with 1273 MiB free. `--n-gpu-layers` should become the manual override, not the only way to answer the question |
+| 16 | ✅ Resolved | **`n_seq_max` floor made recurrent/hybrid models reserve state nobody asked for.** `n_seq = max_batch_size.max(4) + 1` is cheap insurance on a standard model but ruinous where every sequence carries a full fixed-size recurrent state: on Qwen3.8-27B (arch `qwen35`) that is 748 MiB per sequence, so `--max-batch-size 1` and `--max-batch-size 4` both reserved ~3.7 GB, and the floor alone was the memory standing between fox and five more offloaded layers | **2026-08-16** — floor skipped when `llama_model_is_recurrent \|\| llama_model_is_hybrid`; standard models keep it. Recurrent state 3740 → 1496 MiB, GPU layers 40 → 51, throughput 6.5 → 8.6 t/s (+32%, disjoint ranges, arms alternated, Ollama held as the drift control at 8.7 → 8.8 across both runs). Dense regression check: Qwen2.5-7B 214.8 t/s vs 216.0/218.7 before, within noise |
+| 17 | ❌ Open | **MTP speculative decoding has never actually drafted.** The head's `llama_decode` returns `-1` on every call (`FOX_MTP_VERBOSE=10`: `spec draft: llama_decode[0] returned -1`, repeated once per step), so the head never runs and returns a frozen candidate set — asked to count from one to twenty it proposes `'system'`, `'以及'`, `' \`'` every single step, identical across positions and prompts. This reframes the numbers already recorded in the startup warning: the ~5% (and ~2.5% re-measured 2026-08-16) acceptance was never a measure of draft *quality* — it is the rate at which a fixed, context-blind candidate list happens to coincide with the target's output. llama-server reaches ~60% with the very same head file, so neither the head nor its quantization is at fault | **Not scheduled.** Two hypotheses were tested and both eliminated: (a) *wrong head artifact* — Ollama's `qwen3.8:27b-mtp-q4_K_M` has no separate head to borrow, it embeds the NextN block in the base GGUF as `blk.64.nextn.*` (66 layers vs fox's 65), and its 0.93 GB `projector` layer is the CLIP vision encoder, not an MTP head; (b) *per-draft checkpoint desyncing the head* — removing the `save_state`/`restore_state` pair around `mtp_propose` left acceptance unchanged at ~2.5%. The live question is why the head's batch is rejected as invalid: `llama_decode` returns `-1` for a malformed input batch, not for KV pressure (that is `1`). The mechanism is known: `common_speculative_impl_draft_mtp` writes its draft tokens into the MTP context's KV and only removes them under `chain_heads` (chained heads, step35-style). Qwen3.8 has **one** head, so that path never runs and the next `process()` fails with `inconsistent sequence positions` — which is the `-1`. The `save_state`/`restore_state` pair fox wraps around `mtp_propose` cannot help: that impl does not override `get_state`/`set_state` (only eagle3 does, common/speculative.cpp:861/878) so the dispatcher returns false and the pair is a no-op — removing it changed nothing, as expected. The fix is llama-server's (server-context.cpp:2967-3015): snapshot and restore the MTP **context**, not the driver — `spec_ckpt.update_dft(ctx_dft, id, PARTIAL_ONLY)` before, `load_dft` after, and `common_context_seq_rm(ctx_dft, id, ckpt.pos_max + 1, -1)` **immediately after drafting and before the target decodes**. Trimming after verification instead is the wrong point in the cycle and is what an earlier note misread as "trimming tanked acceptance". `MtpState.ctx` is already at hand in `src/engine/model/llama_cpp/mod.rs`, and `trim_sequence` on the same file is the call pattern |
 
 **Bottom line:** the serving skeleton (batching, preemption, paged KV/CoW, prefix
 caching, UTF-8/stop handling, multi-GPU, both APIs, CLI, ops) is solid, and the original
@@ -288,8 +295,14 @@ prefix cache. Items 8-10 (backpressure, tool calling, draft-model speculation) a
 `docs/design/mla-recurrent-kv-sizing.md`), and reactive context-rolling plus a
 process-crash fix in prefill batching (0.18, see
 `docs/design/reactive-context-rolling.md`). What's left is genuine remaining
-correctness debt with no work scheduled (the `REASONING_FORMATS` registry's narrow
-coverage) — `docs/design/vllm-gap-analysis.md`'s feature-gap list is now fully closed;
+correctness debt with no work scheduled: the `REASONING_FORMATS` registry's narrow
+coverage, and item 15 — GPU-layer selection has no headroom accounting, so an operator
+value that loads can still abort the process on the first large prompt. Note the shape
+of item 15 against item 16 right above it: the same session produced a real win by
+*removing* a hard-coded guess (the `n_seq_max` floor) and a real crash by *requiring*
+one (the operator's layer count). Both point the same way — ask llama.cpp by trying,
+which is already this codebase's stated principle for `n_ctx` and not yet for anything
+else. Meanwhile, `docs/design/vllm-gap-analysis.md`'s feature-gap list is now fully closed;
 its one remaining row (beam search) was investigated and reclassified as a deliberate
 non-goal (2026-08-01): llama.cpp removed its beam-search API in 2024, vLLM itself
 demoted beam search out of its fast serving path, and no major LLM API exposes

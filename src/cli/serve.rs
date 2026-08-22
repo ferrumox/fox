@@ -165,6 +165,24 @@ pub struct ServeArgs {
     #[arg(long, env = "FOX_MMPROJ")]
     pub mmproj: Option<String>,
 
+    /// EXPERIMENTAL, opt-in, and currently SLOWER than the default n-gram proposer —
+    /// do not enable it except to work on it. Acceptance is 4-17% against
+    /// `llama-server`'s ~60% with the same head, because a second driver desync
+    /// remains unfixed; the server warns about this at load. Deliberately absent from
+    /// `docs/cli/`, so it carries no Tier 1 compatibility promise and may change or be
+    /// removed in any release.
+    ///
+    /// Name/path of the multi-token-prediction head GGUF paired with the main model
+    /// (published as `mtp-<model>.gguf`), enabling MTP speculative decoding. Requires
+    /// `--speculative true`; a value set without it is ignored, with a startup warning.
+    /// Unlike `--draft-model` this is not a second model that generates on its own: it
+    /// is a trained NextN block reading the target's hidden states, which is why it is
+    /// expected to beat n-gram drafting on text that does not repeat once the desync is
+    /// fixed. A head belonging to a different model is rejected at load time by
+    /// hidden-state width.
+    #[arg(long, env = "FOX_MTP_MODEL")]
+    pub mtp_model: Option<String>,
+
     /// Named LoRA adapters to load alongside the primary model, so a client can
     /// select one by name in the `model` field (OpenAI/Ollama) instead of the
     /// base model — e.g. `--lora-modules support-es=adapters/es.gguf,legal=
@@ -259,6 +277,17 @@ pub struct ServeArgs {
     /// Omit to run without authentication.
     #[arg(long, env = "FOX_API_KEY")]
     pub api_key: Option<String>,
+
+    /// Transformer layers to offload to the GPU. `-1` (default) offloads all of them,
+    /// `0` keeps the model on the CPU, and anything in between splits it: the first N
+    /// layers run on the GPU and the rest on the CPU. Mirrors `llama-server -ngl`.
+    ///
+    /// Set this when a model's weights do not fit in VRAM. With the default `-1` such a
+    /// model fails to load outright — llama.cpp is asked for every layer, and refuses.
+    /// Only activations cross PCIe per token, a few KB, so a narrow link does not
+    /// penalise the split; the cost is that CPU-side layers run at system-RAM bandwidth.
+    #[arg(long, default_value = "-1", env = "FOX_N_GPU_LAYERS")]
+    pub n_gpu_layers: i32,
 
     /// Primary GPU index (0-based) used when split_mode=none, or as the main GPU for splits.
     #[arg(long, default_value = "0", env = "FOX_MAIN_GPU")]
@@ -529,6 +558,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         spec_draft_len: args.spec_draft_len,
         draft_model: args.draft_model,
         mmproj: args.mmproj,
+        mtp_model: args.mtp_model,
         lora_modules: args
             .lora_modules
             .as_deref()
@@ -551,6 +581,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             .map(parse_tensor_split)
             .unwrap_or_default(),
         moe_offload_cpu: args.moe_cpu,
+        n_gpu_layers: args.n_gpu_layers,
     };
 
     let registry = std::sync::Arc::new(ModelRegistry::new(registry_cfg, aliases));

@@ -1,8 +1,8 @@
 use std::ffi::CString;
 use std::os::raw::c_char;
 
+use crate::engine::model::chat_template;
 use anyhow::{anyhow, Result};
-use minijinja::{context, Environment};
 
 use crate::engine::ffi;
 
@@ -105,29 +105,8 @@ impl LlamaCppModel {
     ) -> Option<String> {
         let env = self
             .chat_env
-            .get_or_init(|| {
-                let template = self.raw_chat_template()?;
-                // Some GGUF conversions store a legacy template NAME (e.g. "vicuna",
-                // "chatml") in `tokenizer.chat_template` instead of real Jinja source —
-                // a pre-Jinja convention meant for llama.cpp's own name-based classifier
-                // (see `apply_chat_template_impl` below, which correctly handles it).
-                // Trusting a bare name as Jinja doesn't error — minijinja renders any
-                // string with no `{{`/`{%` tags as literal text — so the entire prompt
-                // silently becomes that one word. Require actual template syntax before
-                // committing to the Jinja path.
-                if !template.contains("{{") && !template.contains("{%") {
-                    return None;
-                }
-                let mut env = Environment::new();
-                // Chat templates lean on Python string methods (.strip(), .split(), …).
-                env.set_unknown_method_callback(
-                    minijinja_contrib::pycompat::unknown_method_callback,
-                );
-                env.add_template_owned("chat", template).ok()?;
-                Some(env)
-            })
+            .get_or_init(|| chat_template::build_env(self.raw_chat_template()?))
             .as_ref()?;
-        let tmpl = env.get_template("chat").ok()?;
 
         let bos = {
             let id = unsafe { ffi::llama_vocab_bos(self.vocab) };
@@ -135,26 +114,7 @@ impl LlamaCppModel {
         };
         let eos = self.token_to_piece_impl(self.eos_token).unwrap_or_default();
 
-        let msgs: Vec<minijinja::Value> = messages
-            .iter()
-            .map(|(role, content)| context! { role => role, content => content })
-            .collect();
-
-        // A template that doesn't reference `tools` (the vast majority of models)
-        // simply ignores this context key — no behavior change for them.
-        let tools_value = tools
-            .map(minijinja::Value::from_serialize)
-            .unwrap_or(minijinja::Value::UNDEFINED);
-
-        tmpl.render(context! {
-            messages => msgs,
-            add_generation_prompt => true,
-            enable_thinking => enable_thinking,
-            bos_token => bos,
-            eos_token => eos,
-            tools => tools_value,
-        })
-        .ok()
+        chat_template::render(env, messages, enable_thinking, &bos, &eos, tools)
     }
 
     /// Build the final prompt token ids for a chat request. Prefers the model's

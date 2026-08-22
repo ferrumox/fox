@@ -66,6 +66,13 @@ pub struct RegistryConfig {
     /// whatever model is currently loaded. A mismatched pairing (mmproj for a
     /// different architecture) fails at load time rather than corrupting output.
     pub mmproj: Option<String>,
+    /// Name/path of the multi-token-prediction head GGUF paired with the main model
+    /// (`mtp-*.gguf`), enabling MTP speculative decoding. Like `draft_model` and
+    /// `mmproj`, one global pairing against whichever model is loaded. Only takes
+    /// effect when `speculative` is also true. Unlike `draft_model`, the head is not a
+    /// standalone model: it is a trained NextN block that reads the target's hidden
+    /// states, so a head belonging to another model is rejected at load time by width.
+    pub mtp_model: Option<String>,
     /// Named LoRA adapters `(name, path, scale)` loaded alongside the primary
     /// model. A client selects one by naming it in the `model` field instead
     /// of the base model name — resolved the same way as `draft_model`/`mmproj`
@@ -89,6 +96,10 @@ pub struct RegistryConfig {
     pub type_k: u32,
     /// Value cache element type. See `kv_type` constants.
     pub type_v: u32,
+    /// Transformer layers to offload to the GPU. `-1` (the default) means all of them;
+    /// `0` keeps the model entirely on the CPU. Any value in between splits it, which is
+    /// the only way to run a model whose weights do not fit in VRAM.
+    pub n_gpu_layers: i32,
     /// Primary GPU index (0-based). Used when split_mode=NONE, or as the main GPU for splits.
     pub main_gpu: i32,
     /// How to distribute the model across GPUs: 0=none, 1=layer (default), 2=row.

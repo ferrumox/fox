@@ -137,6 +137,12 @@ impl ModelRegistry {
             None => None,
         };
 
+        // Same again for the paired MTP head.
+        let mtp = match &self.config.mtp_model {
+            Some(name) => Some(self.resolve_model_name(name)?.1),
+            None => None,
+        };
+
         // Resolve each configured LoRA adapter's path the same way (direct file
         // path or a `models_dir` match) — the operator-chosen adapter `name` and
         // `scale` pass through unchanged.
@@ -147,8 +153,9 @@ impl ModelRegistry {
         }
 
         // Load the model (FFI is blocking, so we use spawn_blocking inside).
-        let entry =
-            Arc::new(load_model(&stem, &path, &self.config, draft, mmproj, lora_modules).await?);
+        let entry = Arc::new(
+            load_model(&stem, &path, &self.config, draft, mmproj, mtp, lora_modules).await?,
+        );
         self.engines.insert(stem.clone(), entry.clone());
         // Remember where it came from, so it stays reachable by name even when its
         // file lives outside `models_dir`. Deliberately NOT removed on unload: the
@@ -514,11 +521,13 @@ mod tests {
             keep_alive_secs,
             type_k: 1,
             type_v: 1,
+            n_gpu_layers: -1,
             main_gpu: 0,
             split_mode: 1,
             tensor_split: vec![],
             moe_offload_cpu: false,
             mmproj: None,
+            mtp_model: None,
             lora_modules: Vec::new(),
             primary_model: None,
         }

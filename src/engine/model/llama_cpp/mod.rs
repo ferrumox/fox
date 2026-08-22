@@ -429,17 +429,54 @@ pub struct LlamaCppModel {
     /// with a paired mmproj GGUF. `None` for the overwhelming majority of models —
     /// every multimodal code path is gated on this being `Some`.
     pub(super) mtmd_ctx: Option<NonNull<ffi::mtmd_context>>,
+    /// Multi-token-prediction head and driver, present only when this model was given a
+    /// paired MTP GGUF via [`LlamaCppModel::enable_mtp`]. `None` for every other model,
+    /// and every MTP code path is gated on this being `Some` — same shape as `mtmd_ctx`.
+    #[cfg(fox_mtp)]
+    pub(super) mtp: Option<MtpState>,
     /// Named LoRA adapters loaded alongside this model (`--lora-modules`),
     /// keyed by the operator-chosen name a client selects via the `model`
     /// field. Value is the loaded adapter handle plus its configured default
     /// scale. Empty for the overwhelming majority of models.
     pub(super) lora_adapters:
         std::collections::HashMap<String, (NonNull<ffi::llama_adapter_lora>, f32)>,
+    /// How far this context's memory can be rewound, in tokens. `None` for an
+    /// attention-only KV cache (any position is reachable); `Some(n_rs_seq)` for a
+    /// recurrent or hybrid one, whose per-token state snapshots are the only route
+    /// back. Captured at load because it is a context parameter, not a model property.
+    /// See [`Model::rollback_budget`] for why this must be checked up front.
+    pub(super) rollback_budget: Option<usize>,
+}
+
+/// The MTP head loaded alongside a model, plus llama.cpp's speculative driver over it.
+///
+/// Owns both the head's weights and its context; the target model owns the context they
+/// were linked to. Dropped before the target's context and weights — see
+/// `Drop for LlamaCppModel`.
+#[cfg(fox_mtp)]
+pub(super) struct MtpState {
+    /// Weights of the MTP head — a second, small GGUF (`mtp-*.gguf`), owned here.
+    model: NonNull<ffi::llama_model>,
+    /// The head's context: `ctx_type = MTP`, `ctx_other` = the target's context.
+    ctx: NonNull<ffi::llama_context>,
+    /// llama.cpp's own driver (`common/speculative.cpp`) over (target ctx, MTP ctx).
+    /// Behind a mutex for the same reason the target context is: llama.cpp drives it
+    /// from one decode loop, and `LlamaCppModel` is shared across threads by fiat
+    /// (`unsafe impl Send`/`Sync` below).
+    pub(super) driver: std::sync::Mutex<crate::engine::ffi_mtp::MtpDriver>,
 }
 
 #[cfg(not(fox_stub))]
 impl Drop for LlamaCppModel {
     fn drop(&mut self) {
+        // The MTP driver holds both contexts, so it goes first — before the head's own
+        // context and weights, and well before the target's context is freed below.
+        #[cfg(fox_mtp)]
+        if let Some(mtp) = self.mtp.take() {
+            drop(mtp.driver);
+            unsafe { ffi::llama_free(mtp.ctx.as_ptr()) };
+            unsafe { ffi::llama_model_free(mtp.model.as_ptr()) };
+        }
         // mtmd holds no ownership over the llama model/context (it only borrows a
         // `llama_model*` at init and a `llama_context*` per eval call), but free it
         // first regardless, before either of the resources it borrowed goes away.
@@ -473,6 +510,7 @@ impl LlamaCppModel {
         gpu_memory_fraction: f32,
         type_k: u32,
         type_v: u32,
+        n_gpu_layers: i32,
         main_gpu: i32,
         split_mode: u32,
         tensor_split: &[f32],
@@ -555,8 +593,16 @@ impl LlamaCppModel {
         let path_c = CString::new(path_cstr)?;
 
         let mut model_params = unsafe { ffi::llama_model_default_params() };
-        // Offload all layers to GPU (-1 = all). On CPU-only builds llama.cpp ignores this.
-        model_params.n_gpu_layers = -1;
+        // How many transformer layers go to the GPU; -1 = all (the default). On CPU-only
+        // builds llama.cpp ignores this.
+        //
+        // This used to be hard-coded to -1, which was safe while fox only ever targeted
+        // iGPUs: with unified memory "all layers" always fit, so there was nothing to
+        // decide. It stops being safe on a discrete GPU with a fixed VRAM budget — a
+        // model one gigabyte too large then fails to load outright instead of putting the
+        // layers that do fit on the GPU and the rest on the CPU, which is what
+        // `llama-server -ngl N` has always done.
+        model_params.n_gpu_layers = n_gpu_layers;
         model_params.main_gpu = main_gpu;
         model_params.split_mode = split_mode as ffi::llama_split_mode;
 
@@ -663,7 +709,38 @@ impl LlamaCppModel {
 
         let mut ctx_params = unsafe { ffi::llama_context_default_params() };
         // n_seq_max controls how many concurrent sequences the KV cache tracks.
-        let n_seq = (max_batch_size as u32).max(4) + 1; // +1: dedicated embeddings slot (last id)
+        //
+        // The floor of 4 is cheap insurance on a standard model — a spare sequence costs
+        // a few MiB of KV, and having some slack avoids pathological single-slot
+        // configurations. It is ruinous on a recurrent or hybrid one, where every
+        // sequence carries a full fixed-size state whether or not anything uses it.
+        //
+        // Measured on Qwen3.8-27B (arch `qwen35`) on 2026-08-16: 748 MiB of recurrent
+        // state per sequence. The floor alone therefore reserved ~3.7 GB even when the
+        // user asked for a single slot — `--max-batch-size 1` and `--max-batch-size 4`
+        // allocated exactly the same amount — and that was the memory standing between
+        // fox and roughly five more layers of GPU residency on a 16 GB card.
+        //
+        // The scheduler sizes its slot table from `max_batch_size` alone, so dropping the
+        // floor keeps the context and the scheduler in agreement rather than breaking it.
+        let recurrent_state = unsafe {
+            ffi::llama_model_is_recurrent(model.as_ptr())
+                || ffi::llama_model_is_hybrid(model.as_ptr())
+        };
+        // +1: dedicated embeddings slot (last id)
+        let n_seq = if recurrent_state {
+            max_batch_size as u32 + 1
+        } else {
+            (max_batch_size as u32).max(4) + 1
+        };
+        if recurrent_state {
+            tracing::info!(
+                n_seq,
+                max_batch_size,
+                "recurrent/hybrid architecture — skipping the n_seq floor, each sequence \
+                 carries a full recurrent state"
+            );
+        }
 
         // Resolve effective per-sequence context: use the user's explicit limit, or
         // auto-detect from the model's trained context length (llama_model_n_ctx_train).
@@ -863,8 +940,279 @@ impl LlamaCppModel {
             grammars: dashmap::DashMap::new(),
             decode_bisection_retries: std::sync::atomic::AtomicU64::new(0),
             mtmd_ctx,
+            #[cfg(fox_mtp)]
+            mtp: None,
             lora_adapters,
+            // `recurrent_state` is the same predicate that dropped the n_seq floor
+            // above: those are exactly the caches whose rollback is bounded, and
+            // `n_rs_seq` (from `--rs-rollback`) is the bound.
+            rollback_budget: recurrent_state.then_some(rs_rollback as usize),
         })
+    }
+
+    /// Load a paired multi-token-prediction head and build llama.cpp's speculative
+    /// driver over this model's context.
+    ///
+    /// The head is a second, small GGUF published alongside the model (`mtp-*.gguf`),
+    /// holding the trained NextN block. It gets its own context — `ctx_type = MTP`,
+    /// `ctx_other` pointing at this model's context — and llama.cpp's own driver
+    /// (`common/speculative.cpp`) runs the actual drafting.
+    ///
+    /// Every precondition the driver asserts on is checked here first. Upstream states
+    /// them as `GGML_ASSERT`, which aborts the process — a mismatched head would take
+    /// the whole server down instead of failing one model load.
+    #[cfg(fox_mtp)]
+    pub fn enable_mtp(&mut self, mtp_path: &std::path::Path, n_draft_max: i32) -> Result<()> {
+        use crate::engine::ffi_mtp::MtpDriver;
+
+        let path_c = std::ffi::CString::new(mtp_path.to_string_lossy().as_bytes())
+            .map_err(|_| anyhow!("MTP head path contains a NUL byte: {}", mtp_path.display()))?;
+
+        let mut model_params = unsafe { ffi::llama_model_default_params() };
+        // The head is tiny (a couple of GB at most) and has to run wherever the target
+        // runs — splitting it across devices would only add transfers.
+        model_params.n_gpu_layers = -1;
+
+        let mtp_model = unsafe { ffi::llama_model_load_from_file(path_c.as_ptr(), model_params) };
+        let mtp_model = NonNull::new(mtp_model)
+            .ok_or_else(|| anyhow!("failed to load MTP head: {}", mtp_path.display()))?;
+
+        // Guard rails, in the order the driver would have asserted them.
+        let free_model = || unsafe { ffi::llama_model_free(mtp_model.as_ptr()) };
+
+        let n_layer_nextn = unsafe { ffi::llama_model_n_layer_nextn(mtp_model.as_ptr()) };
+        if n_layer_nextn < 1 {
+            free_model();
+            return Err(anyhow!(
+                "{} carries no trained NextN block (n_layer_nextn = {n_layer_nextn}) — \
+                 this is not an MTP head",
+                mtp_path.display()
+            ));
+        }
+
+        let n_embd_head = unsafe { ffi::llama_model_n_embd_out(mtp_model.as_ptr()) };
+        let n_embd_tgt = unsafe { ffi::llama_model_n_embd(self._model.as_ptr()) };
+        if n_embd_head != n_embd_tgt {
+            free_model();
+            return Err(anyhow!(
+                "MTP head width {n_embd_head} does not match the target model's {n_embd_tgt} — \
+                 {} belongs to a different model",
+                mtp_path.display()
+            ));
+        }
+
+        let ctx_guard = self
+            ._ctx
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {}", e))?;
+        let ctx_tgt = ctx_guard.as_ptr();
+
+        // The MTP context has to mirror the target's, not start from llama.cpp's
+        // defaults. It decodes the same batches the target does, so a narrower ubatch or
+        // a different kv_unified makes `llama_decode` on it fail outright — observed as
+        // `llama_decode(ctx_dft) head=0 failed rc=-1` in the driver's own trace, with
+        // drafts collapsing to ~12% acceptance. llama-server derives these from the
+        // target's parameters for the same reason (server-context.cpp, the branch that
+        // builds ctx_dft with `ctx_type = MTP`).
+        let mut ctx_params = unsafe { ffi::llama_context_default_params() };
+        ctx_params.ctx_type = ffi::llama_context_type_LLAMA_CONTEXT_TYPE_MTP;
+        // Links the two: the driver reads the target's hidden states through this.
+        ctx_params.ctx_other = ctx_tgt;
+        ctx_params.n_ctx = unsafe { ffi::llama_n_ctx(ctx_tgt) };
+        ctx_params.n_batch = unsafe { ffi::llama_n_batch(ctx_tgt) };
+        ctx_params.n_ubatch = unsafe { ffi::llama_n_ubatch(ctx_tgt) };
+        ctx_params.n_seq_max = unsafe { ffi::llama_n_seq_max(ctx_tgt) };
+        // The head owns no recurrent state to roll back — upstream sets this to 0
+        // explicitly, and it is not the target's `--rs-rollback`.
+        ctx_params.n_rs_seq = 0;
+        ctx_params.kv_unified = kv_unified_setting(); // must match the target's
+        ctx_params.flash_attn_type = -1; // LLAMA_FLASH_ATTN_TYPE_AUTO (see load())
+        ctx_params.offload_kqv = true;
+        let n_threads = resolve_n_threads(); // see load() for why
+        ctx_params.n_threads = n_threads;
+        ctx_params.n_threads_batch = n_threads;
+
+        let mtp_ctx = unsafe { ffi::llama_init_from_model(mtp_model.as_ptr(), ctx_params) };
+        let Some(mtp_ctx) = NonNull::new(mtp_ctx) else {
+            free_model();
+            return Err(anyhow!(
+                "llama_init_from_model failed for the MTP context (likely OOM)"
+            ));
+        };
+
+        // Set before the driver is built, so its constructor's own traces are covered.
+        if let Ok(v) = std::env::var("FOX_MTP_VERBOSE") {
+            if let Ok(v) = v.parse::<i32>() {
+                crate::engine::ffi_mtp::set_log_verbosity(v);
+            }
+        }
+
+        let driver =
+            unsafe { MtpDriver::new(ctx_tgt, mtp_ctx.as_ptr(), n_draft_max, ctx_params.n_seq_max) };
+        let Some(driver) = driver else {
+            unsafe { ffi::llama_free(mtp_ctx.as_ptr()) };
+            free_model();
+            return Err(anyhow!("llama.cpp declined to build the MTP driver"));
+        };
+
+        drop(ctx_guard);
+        self.mtp = Some(MtpState {
+            model: mtp_model,
+            ctx: mtp_ctx,
+            driver: std::sync::Mutex::new(driver),
+        });
+        tracing::warn!(
+            path = %mtp_path.display(),
+            n_draft_max,
+            "MTP head loaded — EXPERIMENTAL and currently SLOWER than the n-gram proposer. \
+             The head drafts and the target verifies correctly (output is unaffected), but \
+             acceptance measured ~5% against llama-server's ~60% with the same head, because the \
+             head's own draft tokens desync its KV — see mtp_propose for the diagnosis \
+             and what a fix needs. Prefer --speculative true \
+             without --mtp-model until that is closed. Trace with FOX_MTP_VERBOSE=10."
+        );
+        Ok(())
+    }
+
+    /// Feed a batch the target just decoded to the MTP driver, so it can capture the
+    /// hidden rows it drafts from. No-op when no MTP head is attached.
+    ///
+    /// Must be called after every *generation* decode on the target context — prefill,
+    /// plain decode and speculative verification — and after none of the others. The
+    /// draft model's own decodes, rerank scoring and embedding extraction all run on
+    /// this same context but are not part of the generated sequence; feeding them here
+    /// would describe a sequence that never happened.
+    ///
+    /// # Safety
+    /// `batch` must be the batch just passed to `llama_decode` on this model's context.
+    #[cfg(fox_mtp)]
+    pub(super) unsafe fn mtp_process(&self, batch: &ffi::llama_batch) {
+        let Some(mtp) = self.mtp.as_ref() else {
+            return;
+        };
+        let Ok(mut driver) = mtp.driver.lock() else {
+            return; // poisoned: drafting is optional, generation is not
+        };
+        driver.process(batch as *const _);
+    }
+
+    /// Tell the MTP driver a new generation is starting on `seq_id` with `prompt`.
+    ///
+    /// Also upstream's own diagnostic: `begin` compares the MTP context's position with
+    /// the prompt length and warns when the prefill hidden states never arrived, which
+    /// is the difference between useful drafts and noise. Visible with `FOX_LLAMA_LOG=1`.
+    #[cfg(fox_mtp)]
+    pub(super) fn mtp_begin(&self, seq_id: i32, prompt: &[i32]) {
+        let Some(mtp) = self.mtp.as_ref() else {
+            return;
+        };
+        if let Ok(mut driver) = mtp.driver.lock() {
+            driver.begin(seq_id, prompt);
+        }
+    }
+
+    /// Draft up to `draft_len` tokens for `seq_id` from the MTP head.
+    ///
+    /// Empty when no head is attached, or when the driver has nothing to offer yet —
+    /// e.g. before it has seen a decode for this sequence. An empty draft costs the
+    /// caller nothing but an ordinary single-token decode.
+    ///
+    /// KNOWN LIMITATION — acceptance is ~5-17% here against llama-server's ~60%.
+    ///
+    /// Drafting advances the head's own KV by the tokens it proposes, so the verification
+    /// batch that follows starts at a position the head has already consumed and llama.cpp
+    /// refuses that decode: "inconsistent sequence positions ... required that X < Y"
+    /// (X = 33 against Y = 30, visible with `FOX_MTP_VERBOSE=10`).
+    ///
+    /// Checkpointing the driver's state around the draft — what this function does, and
+    /// what llama-server does for the same reason — fixed the worst of it: the driver's
+    /// own trace went from `hist size` advancing by exactly 1 per step (i.e. no draft ever
+    /// accepted after the first) to +4/+5 per step. It is not the whole story: those
+    /// decode failures still appear in the trace, so a second desync remains somewhere
+    /// between fox's batches and what the driver expects, and end-to-end this is still
+    /// slower than the n-gram proposer.
+    ///
+    /// Ruled out along the way, with measurements rather than reasoning: a partial
+    /// `llama_memory_seq_rm` does not undo the draft on this hybrid context (tried both
+    /// after drafting and after verification, position mismatch unchanged); marking
+    /// `logits=1` on every prompt position changes nothing (`need_embd()` is false for
+    /// MTP and llama-server never uses `need_embd_nextn()`); and the earlier suspects —
+    /// a fixed seq_id, the missing `begin()`, the draft prompt carrying one token too
+    /// many — were all real bugs but each only moved acceptance a few points.
+    ///
+    /// Next thing to try: capture the driver trace from llama-server and fox for the same
+    /// prompt and diff the per-step call sequence, rather than reasoning about it — the
+    /// two logs are directly comparable once `FOX_MTP_VERBOSE=10` and
+    /// `LLAMA_LOG_VERBOSITY=10` are set.
+    #[cfg(fox_mtp)]
+    pub(super) fn mtp_propose(
+        &self,
+        seq_id: i32,
+        n_past: i32,
+        id_last: i32,
+        seq: &[i32],
+        draft_len: usize,
+    ) -> Vec<i32> {
+        let Some(mtp) = self.mtp.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(mut driver) = mtp.driver.lock() else {
+            return Vec::new();
+        };
+
+        // Checkpoint the head's state, draft, then put the state back.
+        //
+        // Drafting advances the head's own KV by the tokens it proposes, leaving it ahead
+        // of the target; the verification batch that follows then starts at a position the
+        // head has already consumed and llama.cpp refuses the decode outright. A partial
+        // `llama_memory_seq_rm` does not undo it here (hybrid context), which is why
+        // llama-server checkpoints the draft context around the step rather than trimming
+        // it — `common_speculative_get_state`/`set_state`, server-context.cpp:2368,3326.
+        //
+        // NOTE (2026-08-16): removing this checkpoint was tried, on the reading that
+        // llama-server's get_state/set_state are slot checkpointing for the prompt cache
+        // (its per-step cycle really is draft:2997 → verify → accept:3888) and that
+        // `common_speculative_accept` already trims the head's KV to the accepted tokens.
+        // It changed nothing — acceptance stayed at ~2.5%. The reason is upstream of both
+        // readings: the head's `llama_decode` returns -1 on every call, so it never runs at
+        // all and emits a frozen candidate set ('system', '以及', ' `') no matter the prompt.
+        // Whatever acceptance has ever been measured here was coincidence, not drafting.
+        // Fix the decode first; only then is the checkpoint question even answerable.
+        let saved = driver.save_state(seq_id);
+
+        let mut out = vec![0i32; draft_len];
+        let drafted = driver
+            .draft(seq_id, n_past, id_last, seq, &mut out)
+            .to_vec();
+
+        if saved {
+            driver.restore_state(seq_id);
+        }
+
+        drafted
+    }
+
+    /// Tell the MTP driver how many of its drafted tokens the target accepted.
+    #[cfg(fox_mtp)]
+    pub(super) fn mtp_accept(&self, seq_id: i32, n_accepted: u16) {
+        let Some(mtp) = self.mtp.as_ref() else {
+            return;
+        };
+        if let Ok(mut driver) = mtp.driver.lock() {
+            driver.accept(seq_id, n_accepted);
+        }
+    }
+
+    /// Whether an MTP head is attached and available for drafting.
+    pub(super) fn has_mtp(&self) -> bool {
+        #[cfg(fox_mtp)]
+        {
+            self.mtp.is_some()
+        }
+        #[cfg(not(fox_mtp))]
+        {
+            false
+        }
     }
 
     /// Create a new context from this model's weights with different KV cache types.
@@ -948,6 +1296,13 @@ impl LlamaCppModel {
             // bench-kv compares KV cache types, not vision/LoRA; the original
             // instance (if any) keeps ownership of its mtmd context and adapters.
             mtmd_ctx: None,
+            #[cfg(fox_mtp)]
+            mtp: None,
+            rollback_budget: unsafe {
+                ffi::llama_model_is_recurrent(model.as_ptr())
+                    || ffi::llama_model_is_hybrid(model.as_ptr())
+            }
+            .then_some(rs_rollback as usize),
             lora_adapters: std::collections::HashMap::new(),
         })
     }
@@ -960,6 +1315,32 @@ unsafe impl Sync for LlamaCppModel {}
 
 #[cfg(not(fox_stub))]
 impl Model for LlamaCppModel {
+    fn has_mtp(&self) -> bool {
+        LlamaCppModel::has_mtp(self)
+    }
+
+    #[cfg(fox_mtp)]
+    fn mtp_begin(&self, seq_id: i32, prompt: &[i32]) {
+        LlamaCppModel::mtp_begin(self, seq_id, prompt)
+    }
+
+    #[cfg(fox_mtp)]
+    fn mtp_propose(
+        &self,
+        seq_id: i32,
+        n_past: i32,
+        id_last: i32,
+        seq: &[i32],
+        draft_len: usize,
+    ) -> Vec<i32> {
+        LlamaCppModel::mtp_propose(self, seq_id, n_past, id_last, seq, draft_len)
+    }
+
+    #[cfg(fox_mtp)]
+    fn mtp_accept(&self, seq_id: i32, n_accepted: u16) {
+        LlamaCppModel::mtp_accept(self, seq_id, n_accepted)
+    }
+
     fn prefill_sync(
         &self,
         req_ids: &[u64],
@@ -1202,6 +1583,10 @@ impl Model for LlamaCppModel {
             let model = self._model.as_ptr();
             !ffi::llama_model_is_recurrent(model) && !ffi::llama_model_is_hybrid(model)
         }
+    }
+
+    fn rollback_budget(&self) -> Option<usize> {
+        self.rollback_budget
     }
 
     fn roll_context(&self, seq_id: i32, n_keep: usize, n_discard: usize) -> Result<()> {

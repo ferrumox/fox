@@ -2,14 +2,22 @@
 //
 // Sub-modules:
 //   sampling   — token sampling (temperature, top-k, top-p, repetition penalty)
+//   chat_template — Jinja chat-template compilation/rendering (llama.cpp-free)
 //   llama_cpp  — LlamaCppModel implementation (real + fox_stub variant)
 //   stub       — StubModel for tests / test-helpers feature
 
 use anyhow::{anyhow, Result};
 
+pub(crate) mod chat_template;
 pub(crate) mod llama_cpp;
 pub(crate) mod model_info;
-#[cfg(not(fox_stub))]
+// Not gated on `fox_stub` despite its only caller (`llama_cpp::batch`) being
+// gated: this module is pure math over `&[f32]` plus `rand`, with no llama.cpp
+// dependency at all. It *was* gated, which meant `make ci` — which runs with
+// FOX_SKIP_LLAMA=1 — never compiled it and never ran any of its ~60 tests. That
+// is how a NaN bug in `sample_greedy` survived. `dead_code` is expected in a stub
+// build: the tests are the point, not the callers.
+#[cfg_attr(fox_stub, allow(dead_code))]
 pub(crate) mod sampling;
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod stub;
@@ -330,6 +338,41 @@ pub trait Model: Send + Sync {
         Ok(out.into_iter().map(|(_, l)| l).collect())
     }
 
+    /// Whether this model carries a trained multi-token-prediction head, attached at
+    /// load time from a paired `mtp-*.gguf`. Default: no.
+    fn has_mtp(&self) -> bool {
+        false
+    }
+
+    /// Tell the MTP head a new generation is starting on `seq_id` with `prompt`.
+    /// Default: nothing to tell.
+    fn mtp_begin(&self, seq_id: i32, prompt: &[i32]) {
+        let _ = (seq_id, prompt);
+    }
+
+    /// Draft up to `draft_len` tokens from the MTP head, continuing after `id_last` at
+    /// position `n_past`. `seq` is the request's full logical sequence so far.
+    ///
+    /// Only ever called on a model whose `has_mtp` is true. Default: empty, which the
+    /// caller treats as "no draft this step" and falls back to an ordinary decode.
+    fn mtp_propose(
+        &self,
+        seq_id: i32,
+        n_past: i32,
+        id_last: i32,
+        seq: &[i32],
+        draft_len: usize,
+    ) -> Vec<i32> {
+        let _ = (seq_id, n_past, id_last, seq, draft_len);
+        Vec::new()
+    }
+
+    /// Report how many drafted tokens the target accepted, so the head can keep its
+    /// per-sequence state aligned with what was actually committed.
+    fn mtp_accept(&self, seq_id: i32, n_accepted: u16) {
+        let _ = (seq_id, n_accepted);
+    }
+
     /// Feed `new_tokens` into this model's own KV at `seq_id` (starting at `base_pos`),
     /// then greedily (no penalty context — a draft proposer only needs to be
     /// plausible, not calibrated) decode up to `draft_len` further tokens, extending
@@ -508,9 +551,17 @@ pub trait Model: Send + Sync {
     /// Returns whether the trim actually happened. It can legitimately fail: on
     /// recurrent and hybrid caches a partial rollback is only possible while the
     /// distance is within the retained snapshot window (`n_rs_seq`,
-    /// `llama-memory-recurrent.cpp:181`), and outside it llama.cpp returns false rather
-    /// than corrupting the state. A caller that ignores this leaves the request
-    /// believing tokens are resident that were never trimmed back to.
+    /// `llama-memory-recurrent.cpp:181`).
+    ///
+    /// **`false` is reliable; `true` is not.** llama.cpp only performs that range check
+    /// while the sequence's tail cell is live. A preceding full clear sets `tail = -1`
+    /// ("invalidate tails which will be cleared"), and from then on a partial rollback
+    /// skips the check entirely, falls through, and returns `true` having rewound
+    /// nothing. Measured on Qwen3.8-27B on 2026-08-17: a 60-token rollback with
+    /// `n_rs_seq = 4` returned `true`, and every request after it answered with a bare
+    /// EOS. So the `false` branch is worth handling (callers re-prefill), but it is a
+    /// backstop, not the guard — bound the distance up front via
+    /// [`Self::rollback_budget`] instead.
     fn trim_sequence(&self, _seq_id: i32, _from_pos: usize) -> bool {
         true
     }
@@ -555,10 +606,37 @@ pub trait Model: Send + Sync {
     /// does exactly that kind on the same architectures and the same llama.cpp —
     /// measured reusing 14680 tokens on Qwen3.5-9B where fox reused none.
     ///
-    /// Default true: the real guard is [`Self::trim_sequence`]'s return value, checked
-    /// at the point of use, not a static prediction here.
+    /// Default true, because the question this asks really is "can KV be inherited at
+    /// all", and almost every model can.
+    ///
+    /// It is NOT the whole guard. This method says nothing about how far back a given
+    /// offer would have to rewind, and an earlier version of this comment claimed
+    /// [`Self::trim_sequence`]'s return value covered that at the point of use. It does
+    /// not — see [`Self::rollback_budget`], which is the distance check and must run
+    /// *before* the offer is accepted.
     fn supports_slot_reuse(&self) -> bool {
         true
+    }
+
+    /// How far back this model's memory can actually be rewound, in tokens.
+    ///
+    /// `None` means unbounded — an attention KV cache drops cells at any position, so
+    /// any divergence point is reachable. A recurrent or hybrid cache returns
+    /// `Some(n_rs_seq)`: it only keeps that many per-token state snapshots, and a
+    /// rollback further than that is impossible.
+    ///
+    /// This exists because [`Self::trim_sequence`]'s return value is **not** a
+    /// sufficient guard, contrary to what its own docs assumed.
+    /// `llama_memory_recurrent::seq_rm` only range-checks the rollback while the
+    /// sequence's tail cell is live; a preceding full clear sets `tail = -1`
+    /// (`llama-memory-recurrent.cpp`, "invalidate tails which will be cleared"), after
+    /// which a partial rollback skips the check entirely and reports success without
+    /// rewinding anything. Measured on Qwen3.8-27B (`qwen35`, hybrid) on 2026-08-17: a
+    /// 60-position rollback with `n_rs_seq = 4` returned `true`, and every request from
+    /// the next one on came back empty. Callers must therefore bound the distance
+    /// *before* deciding to reuse, not detect the failure afterwards.
+    fn rollback_budget(&self) -> Option<usize> {
+        None
     }
 
     /// Return the embedding dimension (n_embd) for the model.

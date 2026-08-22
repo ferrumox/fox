@@ -86,6 +86,7 @@ fox serve --json-logs --port 8080 --max-models 2 --keep-alive-secs 600
 
 | Flag | Env variable | Default | Description |
 |------|---|---|---|
+| `--n-gpu-layers <N>` | `FOX_N_GPU_LAYERS` | `-1` | Transformer layers to offload to the GPU. `-1` = all, `0` = keep the model on the CPU, anything in between splits it: the first N layers run on the GPU, the rest on the CPU. Mirrors `llama-server -ngl`. Set it when a model's weights do not fit in VRAM — at the default `-1` such a model fails to load rather than running partly on the CPU. |
 | `--main-gpu <N>` | `FOX_MAIN_GPU` | `0` | Primary GPU index (0-based). Used as the single GPU when `--split-mode none`, or as the main GPU for scratch buffers in other modes. |
 | `--split-mode <MODE>` | `FOX_SPLIT_MODE` | `layer` | How to distribute the model across GPUs. `none` = single GPU, `layer` = distribute consecutive transformer layers proportionally (recommended), `row` = tensor-parallel row splitting. |
 | `--tensor-split <RATIOS>` | `FOX_TENSOR_SPLIT` | auto | Comma-separated VRAM allocation weights per GPU, e.g. `"3,1"` for 75%/25%. When omitted, fox auto-balances based on available VRAM. Normalised to a sum of 1.0. |

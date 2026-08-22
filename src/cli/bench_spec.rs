@@ -254,6 +254,8 @@ pub async fn run_bench_spec(args: BenchSpecArgs) -> Result<()> {
         GPU_FRACTION,
         kv_type::F16,
         kv_type::F16,
+        // n_gpu_layers — all; a bench that cannot fit the model is not a bench
+        -1,
         args.main_gpu,
         split_mode,
         &tensor_split,

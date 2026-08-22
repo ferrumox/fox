@@ -43,6 +43,11 @@ async fn load_draft_model(
             gpu_memory_fraction,
             type_k,
             type_v,
+            // n_gpu_layers — always all of them, regardless of what the target model was
+            // given. A draft is small, and it is only worth having if it is much faster
+            // than the target; offloading part of it to the CPU would defeat speculation
+            // rather than economise on VRAM.
+            -1,
             main_gpu,
             split_mode,
             &tensor_split,
@@ -74,6 +79,7 @@ pub(super) async fn load_model(
     cfg: &RegistryConfig,
     draft: Option<(String, PathBuf)>,
     mmproj: Option<PathBuf>,
+    mtp: Option<PathBuf>,
     lora_modules: Vec<(String, PathBuf, f32)>,
 ) -> Result<EngineEntry> {
     let path = path.to_path_buf();
@@ -91,6 +97,7 @@ pub(super) async fn load_model(
     let metrics = cfg.metrics.clone();
     let type_k = cfg.type_k;
     let type_v = cfg.type_v;
+    let n_gpu_layers = cfg.n_gpu_layers;
     let main_gpu = cfg.main_gpu;
     let split_mode = cfg.split_mode;
     let tensor_split = cfg.tensor_split.clone();
@@ -127,6 +134,7 @@ pub(super) async fn load_model(
             gpu_memory_fraction,
             type_k,
             type_v,
+            n_gpu_layers,
             main_gpu,
             split_mode,
             &tensor_split,
@@ -139,6 +147,35 @@ pub(super) async fn load_model(
     })
     .await
     .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;
+
+    // Attach the paired MTP head, if one was configured. Done after load() rather than
+    // inside it because the head's context has to be linked to the target's, which does
+    // not exist until load() returns — and because load() already carries 15 arguments.
+    #[cfg(fox_mtp)]
+    let model = {
+        let mut model = model;
+        if let Some(mtp_path) = mtp {
+            if cfg.speculative {
+                let n_draft = cfg.spec_draft_len as i32;
+                model = tokio::task::spawn_blocking(move || {
+                    model.enable_mtp(&mtp_path, n_draft).map(|()| model)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;
+            } else {
+                tracing::warn!(
+                    "--mtp-model was set without --speculative true — the MTP head is ignored"
+                );
+            }
+        }
+        model
+    };
+    // Without the MTP shim there is nothing to attach it to; say so rather than
+    // silently ignoring a path the operator asked for.
+    #[cfg(not(fox_mtp))]
+    if mtp.is_some() {
+        tracing::warn!("this build has no MTP support (FOX_NO_MTP) — --mtp-model is ignored");
+    }
 
     // Size the paged block pool from the backend's ACTUAL KV capacity
     // (llama_n_ctx), so the pool can never claim room llama.cpp didn't allocate.
@@ -161,6 +198,14 @@ pub(super) async fn load_model(
     // model was configured (and successfully loaded above).
     let speculative = if !cfg.speculative {
         None
+    } else if model.has_mtp() {
+        // The model's own trained head beats both other proposers: unlike n-gram it does
+        // not need the text to repeat, and unlike a draft model it costs no second set of
+        // weights. Checked on the loaded model, not on the config, so a head that failed
+        // to attach falls back rather than drafting nothing every step.
+        Some(SpeculativeConfig::Mtp {
+            draft_len: cfg.spec_draft_len,
+        })
     } else if draft_model.is_some() {
         Some(SpeculativeConfig::Draft {
             draft_len: cfg.spec_draft_len,

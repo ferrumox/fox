@@ -164,10 +164,21 @@ start_arm() {
 # visible instead of silently producing "no difference".
 arm_fingerprint() {
     local log="$1"
-    local backend so
-    backend=$(grep -oE "backend: [A-Za-z0-9 ]+" "$log" 2>/dev/null | head -1 | sed 's/backend: //')
-    so=$(grep -oE "libggml-[a-z0-9_.-]+\.so" "$log" 2>/dev/null | head -1)
-    echo "${backend:-?} ${so:-?}" | tr -s ' '
+    local devices cpu_so
+    # What this has to answer is which devices llama.cpp actually put layers on —
+    # not which backend .so got dlopen-ed. Those are different questions, and
+    # fingerprinting the .so answered the wrong one: libggml-cuda.so loads even
+    # when CUDA_VISIBLE_DEVICES is empty and it contributes no device, so a CUDA
+    # arm and a Vulkan arm both fingerprinted as "loaded CUDA backend from
+    # libggml-cuda.so" (observed 2026-08-16 comparing an RTX 5060 Ti against a
+    # Radeon 890M: 53 vs 216 t/s, arms plainly different, fingerprints identical).
+    devices=$(grep -oE "using device [A-Za-z]+[0-9]+" "$log" 2>/dev/null \
+              | sed 's/using device //' | sort -u | paste -sd, -)
+    # The CPU variant is still worth carrying: it is hazard 3's original case, a
+    # stale libggml-cpu-*.so getting loaded regardless of what was just built.
+    cpu_so=$(grep -oE "libggml-cpu[a-z0-9_.-]*\.so" "$log" 2>/dev/null | head -1)
+    # No "using device" line at all means every layer stayed on the CPU.
+    echo "${devices:-cpu-only} ${cpu_so:-?}" | tr -s ' '
 }
 
 # Build the request body once. With --prompt-file the prompt is whatever that
