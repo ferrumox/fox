@@ -165,12 +165,15 @@ pub struct ServeArgs {
     #[arg(long, env = "FOX_MMPROJ")]
     pub mmproj: Option<String>,
 
-    /// EXPERIMENTAL, opt-in, and currently SLOWER than the default n-gram proposer —
-    /// do not enable it except to work on it. Acceptance is 4-17% against
-    /// `llama-server`'s ~60% with the same head, because a second driver desync
-    /// remains unfixed; the server warns about this at load. Deliberately absent from
-    /// `docs/cli/`, so it carries no Tier 1 compatibility promise and may change or be
-    /// removed in any release.
+    /// EXPERIMENTAL, opt-in, and BROKEN — do not enable it except to work on it. The
+    /// head's `llama_decode` returns `-1` on every call, so it has never actually
+    /// drafted: it returns a frozen, context-blind candidate set (asked to count to
+    /// twenty it proposes the same three tokens every step). The ~2.5% acceptance the
+    /// server reports is the rate at which that fixed list coincides with the target,
+    /// not a measure of draft quality; `llama-server` reaches ~60% with the same head
+    /// file, so neither the head nor its quantization is at fault. See STATUS.md item
+    /// 17. Deliberately absent from `docs/cli/`, so it carries no Tier 1 compatibility
+    /// promise and may change or be removed in any release.
     ///
     /// Name/path of the multi-token-prediction head GGUF paired with the main model
     /// (published as `mtp-<model>.gguf`), enabling MTP speculative decoding. Requires

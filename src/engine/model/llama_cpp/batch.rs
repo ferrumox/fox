@@ -3,6 +3,40 @@ use std::ffi::CString;
 use anyhow::{anyhow, Result};
 
 use crate::engine::ffi;
+use crate::seq::SeqId;
+
+/// Fill row `idx` of a `llama_batch`: one token, at one position, in one sequence.
+///
+/// The only sanctioned way to write a batch row, and it takes a [`SeqId`] rather than
+/// an `i32`. Bug `a4171eb` was `*arr.add(0) = 0` — a literal stored straight into
+/// `batch.seq_id[i][0]` by the embeddings path, which then `seq_rm`'d that sequence,
+/// wiping whichever live generation the scheduler had placed in slot 0.
+///
+/// Being honest about the guarantee: a raw store into `batch.seq_id` is still
+/// *expressible*, because `llama_batch` is a bag of bindgen pointers and no newtype
+/// reaches through one. What changes is that every existing caller goes through here,
+/// so writing that literal again means hand-rolling pointer arithmetic beside a helper
+/// that already exists — visible in a diff, rather than invisible inside a comment
+/// that claims the slot is dedicated.
+///
+/// # Safety
+///
+/// `batch` must come from `llama_batch_init(n, _, n_seq_max)` with `n > idx` and
+/// `n_seq_max >= 1`. `n_tokens` is left alone: the caller owns it.
+unsafe fn set_batch_row(
+    batch: &ffi::llama_batch,
+    idx: usize,
+    token: i32,
+    pos: i32,
+    seq: SeqId,
+    wants_logits: bool,
+) {
+    *batch.token.add(idx) = token;
+    *batch.pos.add(idx) = pos;
+    *batch.n_seq_id.add(idx) = 1;
+    *(*batch.seq_id.add(idx)).add(0) = seq.raw();
+    *batch.logits.add(idx) = i8::from(wants_logits);
+}
 use crate::engine::model::sampling::{sample_greedy, sample_token, SamplerParams};
 use crate::engine::model::{
     InferenceRequestForModel, KvCacheFullAtMinimum, Logits, Model, PrefillStep,
@@ -270,7 +304,13 @@ impl LlamaCppModel {
                             }
                             let copy_end = req.skip_prefix_tokens as i32;
                             if copy_end > 0 {
-                                ffi::llama_memory_seq_cp(mem, src, req.kv_seq_id, 0, copy_end);
+                                ffi::llama_memory_seq_cp(
+                                    mem,
+                                    src.raw(),
+                                    req.kv_seq_id.raw(),
+                                    0,
+                                    copy_end,
+                                );
                             }
                         }
                     }
@@ -324,12 +364,7 @@ impl LlamaCppModel {
                 // reaches the end of the prompt.
                 let has_logits = abs_pos == req.prompt_tokens.len() - 1;
                 unsafe {
-                    *batch.token.add(idx) = token;
-                    *batch.pos.add(idx) = abs_pos as i32;
-                    *batch.n_seq_id.add(idx) = 1;
-                    let arr = *batch.seq_id.add(idx);
-                    *arr.add(0) = seq_id;
-                    *batch.logits.add(idx) = if has_logits { 1i8 } else { 0i8 };
+                    set_batch_row(&batch, idx, token, abs_pos as i32, seq_id, has_logits);
                 }
                 batch.n_tokens += 1;
                 if has_logits {
@@ -480,7 +515,7 @@ impl LlamaCppModel {
                 ctx,
                 chunks.as_raw() as *const ffi::mtmd_input_chunks,
                 0,
-                req.kv_seq_id,
+                req.kv_seq_id.raw(),
                 self.effective_ctx as i32,
                 true, // logits_last
                 &mut new_n_past,
@@ -580,12 +615,7 @@ impl LlamaCppModel {
             let seq_id = req.kv_seq_id; // stable ID — never the batch slot index
 
             unsafe {
-                *batch.token.add(batch_slot) = input_token;
-                *batch.pos.add(batch_slot) = pos;
-                *batch.n_seq_id.add(batch_slot) = 1;
-                let arr = *batch.seq_id.add(batch_slot);
-                *arr.add(0) = seq_id;
-                *batch.logits.add(batch_slot) = 1i8;
+                set_batch_row(&batch, batch_slot, input_token, pos, seq_id, true);
             }
             batch.n_tokens += 1;
         }
@@ -848,12 +878,7 @@ impl LlamaCppModel {
             .collect();
         for (i, &tok) in tokens_in.iter().enumerate() {
             unsafe {
-                *batch.token.add(i) = tok;
-                *batch.pos.add(i) = base_pos + i as i32;
-                *batch.n_seq_id.add(i) = 1;
-                let arr = *batch.seq_id.add(i);
-                *arr.add(0) = seq_id;
-                *batch.logits.add(i) = 1i8;
+                set_batch_row(&batch, i, tok, base_pos + i as i32, seq_id, true);
             }
         }
         batch.n_tokens = n as i32;
@@ -906,7 +931,7 @@ impl LlamaCppModel {
         unsafe {
             let mem = ffi::llama_get_memory(ctx as *const _);
             if !mem.is_null() {
-                ffi::llama_memory_seq_rm(mem, seq_id, keep_end, -1);
+                ffi::llama_memory_seq_rm(mem, seq_id.raw(), keep_end, -1);
             }
         }
         unsafe { ffi::llama_batch_free(batch) };
@@ -926,7 +951,7 @@ impl LlamaCppModel {
     /// and is responsible for trimming/clearing it between requests.
     pub(super) fn do_draft_propose(
         &self,
-        seq_id: i32,
+        seq_id: SeqId,
         new_tokens: &[i32],
         base_pos: i32,
         draft_len: usize,
@@ -950,12 +975,7 @@ impl LlamaCppModel {
         let mut batch = unsafe { ffi::llama_batch_init(n as i32, 0, 1) };
         for (i, &tok) in new_tokens.iter().enumerate() {
             unsafe {
-                *batch.token.add(i) = tok;
-                *batch.pos.add(i) = base_pos + i as i32;
-                *batch.n_seq_id.add(i) = 1;
-                let arr = *batch.seq_id.add(i);
-                *arr.add(0) = seq_id;
-                *batch.logits.add(i) = i8::from(i == n - 1);
+                set_batch_row(&batch, i, tok, base_pos + i as i32, seq_id, i == n - 1);
             }
         }
         batch.n_tokens = n as i32;
@@ -989,12 +1009,7 @@ impl LlamaCppModel {
             // Decode this one new draft token to get logits for the next position.
             let mut batch = unsafe { ffi::llama_batch_init(1, 0, 1) };
             unsafe {
-                *batch.token.add(0) = tok;
-                *batch.pos.add(0) = next_pos;
-                *batch.n_seq_id.add(0) = 1;
-                let arr = *batch.seq_id.add(0);
-                *arr.add(0) = seq_id;
-                *batch.logits.add(0) = 1;
+                set_batch_row(&batch, 0, tok, next_pos, seq_id, true);
             }
             batch.n_tokens = 1;
             let ret = unsafe { ffi::llama_decode(ctx, batch) };
@@ -1052,16 +1067,18 @@ impl LlamaCppModel {
         let mut batch = unsafe { ffi::llama_batch_init(n_tokens, 0, 1) };
         for (i, &token) in tokens.iter().enumerate() {
             unsafe {
-                *batch.token.add(i) = token;
-                *batch.pos.add(i) = i as i32;
-                *batch.n_seq_id.add(i) = 1;
-                let arr = *batch.seq_id.add(i);
                 // Same dedicated slot as embeddings: outside the scheduler's pool, so
-                // scoring can never clobber a live generation's KV.
-                *arr.add(0) = self.embed_seq_id;
-                // RANK pooling reduces over the sequence; only the last token needs
-                // its output flagged.
-                *batch.logits.add(i) = i8::from(i + 1 == tokens.len());
+                // scoring can never clobber a live generation's KV. RANK pooling
+                // reduces over the sequence, so only the last token needs its output
+                // flagged.
+                set_batch_row(
+                    &batch,
+                    i,
+                    token,
+                    i as i32,
+                    self.embed_seq_id,
+                    i + 1 == tokens.len(),
+                );
             }
             batch.n_tokens += 1;
         }
@@ -1078,7 +1095,7 @@ impl LlamaCppModel {
         let cleanup = |ctx: *mut ffi::llama_context| unsafe {
             let mem = ffi::llama_get_memory(ctx as *const _);
             if !mem.is_null() {
-                ffi::llama_memory_seq_rm(mem, self.embed_seq_id, 0, -1);
+                ffi::llama_memory_seq_rm(mem, self.embed_seq_id.raw(), 0, -1);
             }
             ffi::llama_set_embeddings(ctx, false);
             ffi::llama_batch_free(batch);
@@ -1089,7 +1106,7 @@ impl LlamaCppModel {
             return Err(anyhow!("llama_decode (rerank) failed: {}", ret));
         }
 
-        let ptr = unsafe { ffi::llama_get_embeddings_seq(ctx, self.embed_seq_id) };
+        let ptr = unsafe { ffi::llama_get_embeddings_seq(ctx, self.embed_seq_id.raw()) };
         if ptr.is_null() {
             cleanup(ctx);
             return Err(anyhow!(
@@ -1112,14 +1129,11 @@ impl LlamaCppModel {
         let mut batch = unsafe { ffi::llama_batch_init(n_tokens, 0, 1) };
         for (i, &token) in tokens.iter().enumerate() {
             unsafe {
-                *batch.token.add(i) = token;
-                *batch.pos.add(i) = i as i32;
-                *batch.n_seq_id.add(i) = 1;
-                let arr = *batch.seq_id.add(i);
                 // Dedicated embeddings slot, OUTSIDE the scheduler's seq pool: writing
-                // (and wiping, below) a pool id would clobber a live generation's KV.
-                *arr.add(0) = self.embed_seq_id;
-                *batch.logits.add(i) = 1i8; // mark every token for embedding output (mean-pooled below)
+                // (and wiping, below) a pool id would clobber a live generation's KV —
+                // bug `a4171eb`. Every token is marked for embedding output
+                // (mean-pooled below).
+                set_batch_row(&batch, i, token, i as i32, self.embed_seq_id, true);
             }
             batch.n_tokens += 1;
         }
@@ -1176,7 +1190,7 @@ impl LlamaCppModel {
         unsafe {
             let mem = ffi::llama_get_memory(ctx as *const _);
             if !mem.is_null() {
-                ffi::llama_memory_seq_rm(mem, self.embed_seq_id, 0, -1);
+                ffi::llama_memory_seq_rm(mem, self.embed_seq_id.raw(), 0, -1);
             }
             ffi::llama_set_embeddings(ctx, false);
             ffi::llama_batch_free(batch);

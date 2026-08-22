@@ -8,6 +8,8 @@
 
 use anyhow::{anyhow, Result};
 
+use crate::seq::SeqId;
+
 pub(crate) mod chat_template;
 pub(crate) mod llama_cpp;
 pub(crate) mod model_info;
@@ -228,7 +230,7 @@ pub struct InferenceRequestForModel {
     pub context_len: usize,
     /// Stable llama.cpp sequence ID assigned at admission — never changes for the lifetime of
     /// a request. Using the batch index here would cause seq_id collisions across decode steps.
-    pub kv_seq_id: i32,
+    pub kv_seq_id: SeqId,
     /// Sampling temperature (0 = greedy, 1 = unscaled).
     pub temperature: f32,
     /// Top-p nucleus sampling threshold (1.0 = disabled).
@@ -259,7 +261,7 @@ pub struct InferenceRequestForModel {
     /// Sequence ID that holds the cached prefix KV data. When set, `do_prefill` calls
     /// `llama_memory_seq_cp` to transfer positions 0..skip_prefix_tokens before adding
     /// the remaining tokens to the batch.
-    pub prefix_seq_id: Option<i32>,
+    pub prefix_seq_id: Option<SeqId>,
     /// Absolute prompt position where this prefill call should start submitting tokens.
     /// Advances by up to `max_prefill_chunk` each call until it reaches
     /// `prompt_tokens.len()`. Starts at the effective skip (0, or the prefix-hit
@@ -346,7 +348,7 @@ pub trait Model: Send + Sync {
 
     /// Tell the MTP head a new generation is starting on `seq_id` with `prompt`.
     /// Default: nothing to tell.
-    fn mtp_begin(&self, seq_id: i32, prompt: &[i32]) {
+    fn mtp_begin(&self, seq_id: SeqId, prompt: &[i32]) {
         let _ = (seq_id, prompt);
     }
 
@@ -357,7 +359,7 @@ pub trait Model: Send + Sync {
     /// caller treats as "no draft this step" and falls back to an ordinary decode.
     fn mtp_propose(
         &self,
-        seq_id: i32,
+        seq_id: SeqId,
         n_past: i32,
         id_last: i32,
         seq: &[i32],
@@ -369,7 +371,7 @@ pub trait Model: Send + Sync {
 
     /// Report how many drafted tokens the target accepted, so the head can keep its
     /// per-sequence state aligned with what was actually committed.
-    fn mtp_accept(&self, seq_id: i32, n_accepted: u16) {
+    fn mtp_accept(&self, seq_id: SeqId, n_accepted: u16) {
         let _ = (seq_id, n_accepted);
     }
 
@@ -382,7 +384,7 @@ pub trait Model: Send + Sync {
     /// Default: empty (stubs and models not acting as a draft don't implement it).
     fn draft_propose(
         &self,
-        seq_id: i32,
+        seq_id: SeqId,
         new_tokens: &[i32],
         base_pos: i32,
         draft_len: usize,
@@ -540,7 +542,7 @@ pub trait Model: Send + Sync {
     /// Remove all KV cache / recurrent state for the given sequence ID.
     /// Must be called before a seq_id is reused for a new request; otherwise the new request
     /// will inherit stale positions from the previous occupant and llama_decode will fail.
-    fn clear_sequence(&self, seq_id: i32);
+    fn clear_sequence(&self, seq_id: SeqId);
 
     /// Remove the KV cells of `seq_id` from position `from_pos` (inclusive) onward,
     /// keeping `[0, from_pos)`. Used when a finished request donates its prompt prefix
@@ -562,7 +564,8 @@ pub trait Model: Send + Sync {
     /// EOS. So the `false` branch is worth handling (callers re-prefill), but it is a
     /// backstop, not the guard — bound the distance up front via
     /// [`Self::rollback_budget`] instead.
-    fn trim_sequence(&self, _seq_id: i32, _from_pos: usize) -> bool {
+    #[must_use = "`true` from trim_sequence is not proof the rollback happened — see `rollback_budget`; `false` means the caller must re-prefill. `f5214df` records what discarding this cost."]
+    fn trim_sequence(&self, _seq_id: SeqId, _from_pos: usize) -> bool {
         true
     }
 
@@ -570,7 +573,7 @@ pub trait Model: Send + Sync {
     /// (positions 0..token_count). Used by prefix caching: before prefilling a request whose
     /// prompt matches a completed one, we copy the KV data so only the non-cached suffix
     /// needs to be computed.
-    fn copy_sequence_range(&self, src_seq_id: i32, dst_seq_id: i32, token_count: i32);
+    fn copy_sequence_range(&self, src_seq_id: SeqId, dst_seq_id: SeqId, token_count: i32);
 
     /// Roll a sequence's KV window when it fills the context: discard the `n_discard`
     /// oldest tokens *after* the preserved head of `n_keep` tokens (e.g. BOS + system
@@ -579,7 +582,7 @@ pub trait Model: Send + Sync {
     /// (`supports_seq_copy()` / `llama_memory_can_shift`); the caller only invokes this
     /// for models where that holds. Default: no-op success (stub models never reach the
     /// context limit in tests).
-    fn roll_context(&self, _seq_id: i32, _n_keep: usize, _n_discard: usize) -> Result<()> {
+    fn roll_context(&self, _seq_id: SeqId, _n_keep: usize, _n_discard: usize) -> Result<()> {
         Ok(())
     }
 
@@ -654,14 +657,14 @@ pub trait Model: Send + Sync {
     /// and drop it on unload.
     ///
     /// `Err` when the backend cannot serialise (the stub) or the sequence is empty.
-    fn state_seq_save(&self, _seq_id: i32) -> Result<Vec<u8>> {
+    fn state_seq_save(&self, _seq_id: SeqId) -> Result<Vec<u8>> {
         anyhow::bail!("this model backend cannot serialise sequence state")
     }
 
     /// Restore a blob produced by [`Self::state_seq_save`] into `seq_id`, returning the
     /// number of bytes consumed. The destination sequence must be empty: llama.cpp
     /// writes the cells at their original positions and does not clear first.
-    fn state_seq_load(&self, _seq_id: i32, _data: &[u8]) -> Result<usize> {
+    fn state_seq_load(&self, _seq_id: SeqId, _data: &[u8]) -> Result<usize> {
         anyhow::bail!("this model backend cannot restore sequence state")
     }
 

@@ -282,16 +282,35 @@ them as two mechanisms:
 
 - **`develop`** takes ordinary merges, one per feature branch, keeping the merge commit:
   `git merge --no-ff feature/0.X -m "Merge branch 'feature/0.X' into develop"`.
-- **`main`** takes a **squashed snapshot per released version**, in order, one commit each
-  (`release: vX.Y.Z`), **and the tag lives there**. It is 10 linear single-parent commits
-  whose tree matches `develop`'s exactly; merging into it would splice unrelated
-  histories.
+- **`main`** takes a **snapshot per released version**, in order, one commit each
+  (`release: vX.Y.Z`), **and the tag lives there**.
+
+  Historically `main` was an orphan branch: its own root commit (`470e139 release:
+  v0.1.0`) with no ancestor in common with `develop`, so `git merge-base main develop`
+  was **empty** and every snapshot was a single-parent commit built by copying a tree.
+  That is a defect, not a design — it made `main` unmergeable, hid which develop commit
+  each release actually came from, and is why an earlier version of this section said
+  merging would "splice unrelated histories".
+
+  Fixed in 0.22.1 by grafting rather than rewriting: the snapshot is now a **two-parent**
+  commit. The first parent is `main`'s tip, so `git log --first-parent main` still shows
+  nothing but the clean release chain; the second is the `release: X.Y.Z` commit on the
+  working branch, which is what gives the two branches a common ancestor. Every published
+  tag keeps its SHA — nothing was rewritten.
 
   ```bash
+  REL=$(git rev-parse release/X.Y.Z)          # the `release: X.Y.Z` commit
   git checkout main
-  git read-tree -u --reset <the release commit>   # take that version's tree wholesale
-  git commit -m "release: vX.Y.Z"
-  git tag vX.Y.Z
+  NEW=$(git commit-tree "$REL^{tree}" -p main -p "$REL" -m "release: vX.Y.Z")
+  git reset --hard "$NEW"
+  ```
+
+  The tree still comes wholesale from the release commit, so `main` continues to hold
+  release snapshots and nothing else. Verify both properties before tagging:
+
+  ```bash
+  test "$(git rev-parse main^{tree})" = "$(git rev-parse $REL^{tree})"   # same tree
+  git merge-base main develop                                            # must not be empty
   ```
 
 Version by version, tag by tag. Never one snapshot covering several releases: `main` is

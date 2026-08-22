@@ -35,6 +35,7 @@
 use std::time::Instant;
 
 use crate::kv_cache::BlockId;
+use crate::seq::SeqId;
 
 /// Ownership state of one llama.cpp sequence slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,8 +54,9 @@ pub(crate) enum SlotState {
 #[derive(Debug)]
 pub(crate) struct Slot {
     /// Stable llama.cpp `seq_id`. Equal to the slot's index, like `slot.id = i` in
-    /// llama-server (`server-context.cpp:1355-1374`).
-    pub(super) seq_id: i32,
+    /// llama-server (`server-context.cpp:1355-1374`). This table is the only place
+    /// in fox that mints one — see [`SeqId`].
+    pub(super) seq_id: SeqId,
     /// Tokens currently resident in llama.cpp's KV for this sequence, at positions
     /// `0..tokens.len()`. Only meaningful while [`SlotState::Idle`]: while `Busy`
     /// the owning request is the source of truth, and while `Free` this is empty.
@@ -109,9 +111,9 @@ impl SlotTable {
     pub(super) fn new(n_slots: usize) -> Self {
         let now = Instant::now();
         Self {
-            slots: (0..n_slots as i32)
-                .map(|seq_id| Slot {
-                    seq_id,
+            slots: (0..n_slots)
+                .map(|index| Slot {
+                    seq_id: SeqId::slot(index),
                     tokens: Vec::new(),
                     blocks: Vec::new(),
                     state: SlotState::Free,
@@ -191,7 +193,7 @@ impl SlotTable {
     }
 
     /// The `seq_id` of the slot at `index`.
-    pub(super) fn seq_id_at(&self, index: usize) -> i32 {
+    pub(super) fn seq_id_at(&self, index: usize) -> SeqId {
         self.slots[index].seq_id
     }
 
@@ -205,7 +207,7 @@ impl SlotTable {
 
     /// Forget what a sequence was believed to hold, by `seq_id`. Used when a restore
     /// failed: the slot's recorded tokens describe a state that never landed.
-    pub(super) fn forget_resident(&mut self, seq_id: i32) {
+    pub(super) fn forget_resident(&mut self, seq_id: SeqId) {
         if let Some(slot) = self.slots.iter_mut().find(|s| s.seq_id == seq_id) {
             slot.tokens.clear();
         }
@@ -228,7 +230,7 @@ impl SlotTable {
     /// holds (which the request inherits rather than re-allocating). The resident
     /// token list is dropped: while `Busy`, the owning request is the source of
     /// truth, and [`Self::park`] restores it on completion.
-    pub(super) fn claim(&mut self, index: usize, req_id: u64) -> (i32, Vec<BlockId>) {
+    pub(super) fn claim(&mut self, index: usize, req_id: u64) -> (SeqId, Vec<BlockId>) {
         let slot = &mut self.slots[index];
         slot.state = SlotState::Busy(req_id);
         slot.tokens.clear();
@@ -240,7 +242,7 @@ impl SlotTable {
     /// `0..tokens.len()`.
     ///
     /// Returns `false` if `seq_id` isn't a slot this table owns.
-    pub(super) fn park(&mut self, seq_id: i32, tokens: Vec<i32>, blocks: Vec<BlockId>) -> bool {
+    pub(super) fn park(&mut self, seq_id: SeqId, tokens: Vec<i32>, blocks: Vec<BlockId>) -> bool {
         let Some(slot) = self.slots.iter_mut().find(|s| s.seq_id == seq_id) else {
             return false;
         };
@@ -254,7 +256,7 @@ impl SlotTable {
     /// Drop a slot's KV entirely and return the blocks it held so the caller can free
     /// them. Used when a finished request's KV must not be reused (context-rolled,
     /// LoRA, engine error) and when reclaiming under pressure.
-    pub(super) fn release(&mut self, seq_id: i32) -> Vec<BlockId> {
+    pub(super) fn release(&mut self, seq_id: SeqId) -> Vec<BlockId> {
         let Some(slot) = self.slots.iter_mut().find(|s| s.seq_id == seq_id) else {
             return Vec::new();
         };
@@ -276,7 +278,7 @@ impl SlotTable {
     /// than being dropped so the caller can serialise the sequence to the host-RAM
     /// prompt cache before its KV is wiped — the victim is only known here, so
     /// reading it beforehand is not possible.
-    pub(super) fn reclaim_lru(&mut self, except: usize) -> Option<(i32, Vec<i32>, Vec<BlockId>)> {
+    pub(super) fn reclaim_lru(&mut self, except: usize) -> Option<(SeqId, Vec<i32>, Vec<BlockId>)> {
         let index = self
             .slots
             .iter()
@@ -320,7 +322,8 @@ impl SlotTable {
         self.slots
             .iter()
             .map(|s| SlotSnapshot {
-                id: s.seq_id,
+                // The wire format is llama-server's, so the snapshot carries the raw id.
+                id: s.seq_id.raw(),
                 state: match s.state {
                     SlotState::Free => "free",
                     SlotState::Busy(_) => "processing",
@@ -430,7 +433,7 @@ mod tests {
     fn claim_takes_blocks_and_clears_resident_tokens() {
         let mut t = table_with(&[(SlotState::Idle, &[1, 2, 3], 3)]);
         let (seq_id, blocks) = t.claim(0, 42);
-        assert_eq!(seq_id, 0);
+        assert_eq!(seq_id, SeqId::slot(0));
         assert_eq!(blocks.len(), 3);
         assert_eq!(t.slots[0].state, SlotState::Busy(42));
         assert!(t.slots[0].tokens.is_empty());
@@ -441,7 +444,7 @@ mod tests {
     #[test]
     fn park_makes_the_whole_sequence_reusable() {
         let mut t = table_with(&[(SlotState::Busy(42), &[], 0)]);
-        assert!(t.park(0, vec![1, 2, 3, 4], vec![0, 1]));
+        assert!(t.park(SeqId::slot(0), vec![1, 2, 3, 4], vec![0, 1]));
         assert_eq!(t.slots[0].state, SlotState::Idle);
         // The parked tokens include the generated tail, which is the whole point:
         // the next turn of a conversation matches past the previous prompt's end.
@@ -452,7 +455,7 @@ mod tests {
     #[test]
     fn release_frees_the_slot_and_hands_back_its_blocks() {
         let mut t = table_with(&[(SlotState::Idle, &[1, 2], 2)]);
-        let blocks = t.release(0);
+        let blocks = t.release(SeqId::slot(0));
         assert_eq!(blocks.len(), 2);
         assert_eq!(t.slots[0].state, SlotState::Free);
         assert!(t.slots[0].tokens.is_empty());
@@ -466,7 +469,7 @@ mod tests {
         // Slot 0 is by far the oldest, but it is Busy — reclaiming it would be
         // preemption, which admission must never do.
         let (seq_id, tokens, blocks) = t.reclaim_lru(usize::MAX).unwrap();
-        assert_eq!(seq_id, 1);
+        assert_eq!(seq_id, SeqId::slot(1));
         assert_eq!(
             tokens,
             vec![2],

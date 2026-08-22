@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 use tracing::{debug, info};
 
 use crate::kv_cache::PageTable;
+use crate::seq::SeqId;
 
 use super::batch;
 use super::batch::{ScheduledBatch, StopReason};
@@ -57,10 +58,10 @@ impl Scheduler {
             }
         };
 
-        let mut kv_trims: Vec<(i32, usize)> = Vec::new();
-        let mut kv_clears: Vec<i32> = Vec::new();
-        let mut kv_saves: Vec<(i32, Vec<i32>)> = Vec::new();
-        let mut kv_restores: Vec<(i32, Vec<u8>)> = Vec::new();
+        let mut kv_trims: Vec<(SeqId, usize)> = Vec::new();
+        let mut kv_clears: Vec<SeqId> = Vec::new();
+        let mut kv_saves: Vec<(SeqId, Vec<i32>)> = Vec::new();
+        let mut kv_restores: Vec<(SeqId, Vec<u8>)> = Vec::new();
         // Held across the admission loop rather than re-locked per request. Acquired
         // after `slots`, matching the documented lock order.
         let mut pcache = self.prompt_cache.lock().ok();
@@ -69,18 +70,18 @@ impl Scheduler {
         //
         // `park_finished` (called from the engine on the completion path) has already
         // decided each one's fate and recorded it in `park_state`; here we only apply
-        // it. A parked request handed its blocks to its slot and left `kv_seq_id = -1`,
-        // so it is skipped below and its blocks are NOT freed — that is the whole
-        // point: the sequence stays resident as a cache entry.
+        // it. A parked request handed its blocks to its slot and left `kv_seq_id` at
+        // `None`, so it is skipped below and its blocks are NOT freed — that is the
+        // whole point: the sequence stays resident as a cache entry.
         let (finished, still_running): (Vec<_>, Vec<_>) = std::mem::take(&mut *running)
             .into_iter()
             .partition(|r| r.is_finished());
 
         for req in &finished {
-            if req.kv_seq_id < 0 {
+            let Some(seq_id) = req.kv_seq_id else {
                 continue; // already parked into its slot
-            }
-            let mut blocks = slots.release(req.kv_seq_id);
+            };
+            let mut blocks = slots.release(seq_id);
             blocks.extend_from_slice(req.page_table.block_ids());
             if !blocks.is_empty() {
                 self.kv_cache.free_blocks(&blocks);
@@ -90,7 +91,7 @@ impl Scheduler {
                     "freed KV blocks for finished request"
                 );
             }
-            kv_clears.push(req.kv_seq_id);
+            kv_clears.push(seq_id);
         }
         *running = still_running;
 
@@ -130,10 +131,13 @@ impl Scheduler {
                             && !req.skip_prefix_cache
                             && self.kv_reuse
                             && self.prefix_reuse_enabled(); // a fork copies: strict flag
-                        if forkable && parent_seq >= 0 && n_positions > 0 {
-                            req.fork_source = Some((parent_seq, n_positions - 1));
-                        } else {
-                            req.fork_parent = None; // unusable parent — prefill normally
+                        match parent_seq {
+                            Some(parent_seq) if forkable && n_positions > 0 => {
+                                req.fork_source = Some((parent_seq, n_positions - 1));
+                            }
+                            _ => {
+                                req.fork_parent = None; // unusable parent — prefill normally
+                            }
                         }
                     }
                     // Still prefilling: try again next step.
@@ -194,10 +198,10 @@ impl Scheduler {
             if allow_copy && req.fork_source.is_none() && req.multimodal.is_none() {
                 let best = running
                     .iter()
-                    .filter(|r| r.kv_seq_id >= 0 && r.multimodal.is_none() && !r.skip_prefix_cache)
-                    .map(|r| {
+                    .filter(|r| r.multimodal.is_none() && !r.skip_prefix_cache)
+                    .filter_map(|r| {
                         let lcp = common_prefix_len(&r.prompt_tokens, &req.prompt_tokens);
-                        (r.kv_seq_id, lcp, r.state)
+                        Some((r.kv_seq_id?, lcp, r.state))
                     })
                     .filter(|&(_, lcp, _)| {
                         lcp > choice.lcp
@@ -246,7 +250,7 @@ impl Scheduler {
             let slot_lcp = if slot_resident.saturating_sub(choice.lcp) > budget {
                 debug!(
                     request_id = req.id,
-                    seq_id = slots.seq_id_at(choice.index),
+                    seq_id = %slots.seq_id_at(choice.index),
                     offered = choice.lcp,
                     slot_resident,
                     budget,
@@ -367,7 +371,7 @@ impl Scheduler {
                     let want = n_past / block_size;
                     let got: Vec<_> = running
                         .iter()
-                        .find(|r| r.kv_seq_id == parent_seq)
+                        .find(|r| r.kv_seq_id == Some(parent_seq))
                         .map(|d| {
                             d.page_table
                                 .block_ids()
@@ -412,7 +416,7 @@ impl Scheduler {
                 self.kv_cache.free_blocks(&victim_blocks);
                 kv_clears.push(victim_seq);
                 debug!(
-                    seq_id = victim_seq,
+                    seq_id = %victim_seq,
                     blocks = victim_blocks.len(),
                     "reclaimed idle slot to make room"
                 );
@@ -464,7 +468,7 @@ impl Scheduler {
                 blocks = merged;
             }
             req.page_table = PageTable::new(blocks);
-            req.kv_seq_id = seq_id;
+            req.kv_seq_id = Some(seq_id);
             // A forked branch overrides whatever the slot offered: copying the
             // parent's whole prompt beats any partial LCP match, and the two are
             // mutually exclusive — the copy overwrites positions 0..n.
@@ -494,14 +498,14 @@ impl Scheduler {
                 self.prefix_hits.fetch_add(1, Ordering::Relaxed);
                 info!(
                     request_id = id,
-                    seq_id,
+                    %seq_id,
                     cached_tokens = n_past,
                     prompt_tokens = req.n_positions(),
                     "slot prefix hit — skipping prefill of resident tokens"
                 );
             } else {
                 self.prefix_misses.fetch_add(1, Ordering::Relaxed);
-                info!(request_id = id, seq_id, "request admitted to batch");
+                info!(request_id = id, %seq_id, "request admitted to batch");
             }
             running.push(req);
         }
@@ -599,12 +603,12 @@ impl Scheduler {
     ///
     /// Returns `None` once the request has generated anything, so a checkpoint can only
     /// ever capture the prompt boundary.
-    pub fn prefilled_sequence(&self, req_id: u64) -> Option<(i32, Vec<i32>)> {
+    pub fn prefilled_sequence(&self, req_id: u64) -> Option<(SeqId, Vec<i32>)> {
         let running = self.running_batch.lock().ok()?;
         running
             .iter()
             .find(|r| r.id == req_id && r.generated_tokens <= 1)
-            .map(|r| (r.kv_seq_id, r.prompt_tokens.clone()))
+            .and_then(|r| Some((r.kv_seq_id?, r.prompt_tokens.clone())))
     }
 
     /// Mark request as Finished with the given stop reason.
@@ -628,10 +632,10 @@ impl Scheduler {
     /// assumption the restore would succeed. If it did not, the request would prefill
     /// on top of cells that were never written. Resetting it to prefill from token 0
     /// costs a re-prefill and nothing else — the alternative is silently wrong output.
-    pub fn invalidate_restore(&self, seq_id: i32) {
+    pub fn invalidate_restore(&self, seq_id: SeqId) {
         if let Ok(mut running) = self.running_batch.lock() {
             for req in running.iter_mut() {
-                if req.kv_seq_id == seq_id {
+                if req.kv_seq_id == Some(seq_id) {
                     req.skip_prefix_tokens = 0;
                     req.prefill_pos = 0;
                 }
@@ -683,20 +687,19 @@ impl Scheduler {
         let Some(req) = running.iter_mut().find(|r| r.id == req_id) else {
             return false;
         };
-        if req.kv_seq_id < 0
-            || req.rolled_tokens > 0
-            || req.skip_prefix_cache
-            || req.multimodal.is_some()
-        {
+        if req.rolled_tokens > 0 || req.skip_prefix_cache || req.multimodal.is_some() {
             return false;
         }
+        // Already parked: the slot owns the KV, so there is nothing left to hand over.
+        let Some(seq_id) = req.kv_seq_id else {
+            return false;
+        };
 
         // What llama.cpp actually holds for this sequence: the prompt it prefilled
         // followed by every token it generated.
         let mut resident = req.prompt_tokens.clone();
         resident.extend_from_slice(&req.generated_token_ids);
 
-        let seq_id = req.kv_seq_id;
         let blocks = std::mem::take(&mut req.page_table).entries;
         if !slots.park(seq_id, resident, blocks.clone()) {
             // Unknown seq_id (defensive) — hand the blocks back rather than leaking
@@ -705,11 +708,11 @@ impl Scheduler {
             return false;
         }
 
-        // Zero out seq ownership so schedule_step's retire pass won't double-free.
-        req.kv_seq_id = -1;
+        // Give up seq ownership so schedule_step's retire pass won't double-free.
+        req.kv_seq_id = None;
         debug!(
             request_id = req_id,
-            seq_id,
+            %seq_id,
             resident_tokens = req.prompt_tokens.len() + req.generated_token_ids.len(),
             "parked sequence as reusable idle slot"
         );

@@ -19,6 +19,7 @@
 use crate::engine::model::{InferenceRequestForModel, LlamaCppModel, Logits, Model};
 use crate::engine::speculative::Proposer;
 use crate::model_registry::kv_type;
+use crate::seq::SeqId;
 
 /// Load the model named by FOX_GOLDEN_MODEL, or `None` (→ the test skips).
 fn golden_model() -> Option<LlamaCppModel> {
@@ -166,7 +167,7 @@ fn golden_chunked_prefill_matches_single_shot() {
         "need a multi-chunk prompt to be meaningful"
     );
 
-    let mk_req = |seq_id: i32, prefill_pos: usize| InferenceRequestForModel {
+    let mk_req = |seq_id: SeqId, prefill_pos: usize| InferenceRequestForModel {
         id: 1,
         prompt_tokens: prompt.clone(),
         last_token: None,
@@ -208,7 +209,7 @@ fn golden_chunked_prefill_matches_single_shot() {
     };
 
     // Single-shot prefill on sequence 0.
-    let single = m.do_prefill(&[1], &[mk_req(0, 0)], 0).unwrap();
+    let single = m.do_prefill(&[1], &[mk_req(SeqId::slot(0), 0)], 0).unwrap();
     let single_logits = single[0].logits.clone().expect("single-shot completes");
 
     // Chunked prefill (4 tokens/step) on sequence 1, looping until the cursor reaches
@@ -217,7 +218,9 @@ fn golden_chunked_prefill_matches_single_shot() {
     let mut chunked_logits = None;
     let mut steps = 0;
     while pos < prompt.len() {
-        let out = m.do_prefill(&[1], &[mk_req(1, pos)], 4).unwrap();
+        let out = m
+            .do_prefill(&[1], &[mk_req(SeqId::slot(1), pos)], 4)
+            .unwrap();
         pos = out[0].prefill_pos;
         if let Some(l) = &out[0].logits {
             chunked_logits = Some(l.clone());
@@ -258,7 +261,7 @@ fn golden_context_shift_continues_past_n_ctx() {
         generated_tokens: 0,
         max_new_tokens: 1,
         context_len: ctx_len,
-        kv_seq_id: 0,
+        kv_seq_id: SeqId::slot(0),
         temperature: 0.0,
         top_p: 1.0,
         top_k: 0,
@@ -294,7 +297,7 @@ fn golden_context_shift_continues_past_n_ctx() {
     for step in 0..(n_ctx * 3) {
         if live >= n_ctx {
             let n_discard = ((live - n_keep) / 2).max(1);
-            m.roll_context(0, n_keep, n_discard)
+            m.roll_context(SeqId::slot(0), n_keep, n_discard)
                 .expect("shiftable KV must roll");
             live -= n_discard;
             rolled += n_discard;
@@ -340,7 +343,7 @@ fn golden_grammar_constrains_output() {
         generated_tokens: 0,
         max_new_tokens: 8,
         context_len: ctx_len,
-        kv_seq_id: 0,
+        kv_seq_id: SeqId::slot(0),
         temperature: 0.0, // greedy *within* the grammar-allowed set
         top_p: 1.0,
         top_k: 0,
@@ -427,7 +430,7 @@ fn golden_json_schema_constrains_to_valid_json() {
         generated_tokens: 0,
         max_new_tokens: 64,
         context_len: ctx_len,
-        kv_seq_id: 0,
+        kv_seq_id: SeqId::slot(0),
         temperature: 0.0,
         top_p: 1.0,
         top_k: 0,
@@ -505,7 +508,7 @@ fn golden_min_tokens_suppresses_eog() {
         generated_tokens: generated,
         max_new_tokens: 32,
         context_len: ctx_len,
-        kv_seq_id: 0,
+        kv_seq_id: SeqId::slot(0),
         temperature: 0.0,
         top_p: 1.0,
         top_k: 0,
@@ -563,7 +566,7 @@ fn golden_speculative_matches_greedy() {
         .unwrap();
     let steps = 24usize;
 
-    let mk_req = |seq_id: i32, last: Option<i32>, ctx_len: usize, generated: Vec<i32>| {
+    let mk_req = |seq_id: SeqId, last: Option<i32>, ctx_len: usize, generated: Vec<i32>| {
         InferenceRequestForModel {
             id: 1,
             prompt_tokens: prompt.clone(),
@@ -598,14 +601,17 @@ fn golden_speculative_matches_greedy() {
 
     // ── Reference: plain one-token-at-a-time decode on sequence 0. ──
     let pre0 = m
-        .do_prefill(&[1], &[mk_req(0, None, 0, vec![])], 0)
+        .do_prefill(&[1], &[mk_req(SeqId::slot(0), None, 0, vec![])], 0)
         .unwrap();
     let mut plain = vec![pre0[0].logits.clone().unwrap().sampled_token];
     let mut live = prompt.len();
     while plain.len() < steps {
         let last = *plain.last().unwrap();
         let out = m
-            .do_decode(&[1], &[mk_req(0, Some(last), live + 1, plain.clone())])
+            .do_decode(
+                &[1],
+                &[mk_req(SeqId::slot(0), Some(last), live + 1, plain.clone())],
+            )
             .unwrap();
         plain.push(out[0].1.sampled_token);
         live += 1;
@@ -613,14 +619,14 @@ fn golden_speculative_matches_greedy() {
 
     // ── Speculative decode on sequence 1: same prompt, same greedy sampler. ──
     let pre1 = m
-        .do_prefill(&[1], &[mk_req(1, None, 0, vec![])], 0)
+        .do_prefill(&[1], &[mk_req(SeqId::slot(1), None, 0, vec![])], 0)
         .unwrap();
     let mut spec = vec![pre1[0].logits.clone().unwrap().sampled_token];
     let mut live = prompt.len();
     let mut accepted_total = 0usize;
     while spec.len() < steps {
         let last = *spec.last().unwrap();
-        let req = mk_req(1, Some(last), live + 1, spec.clone());
+        let req = mk_req(SeqId::slot(1), Some(last), live + 1, spec.clone());
         let mut seq = req.prompt_tokens.clone();
         seq.extend_from_slice(&req.generated_token_ids);
         let drafts = crate::engine::speculative::propose_ngram(&seq, 2, 4);
@@ -688,7 +694,7 @@ fn golden_draft_model_speculative_matches_greedy() {
         .unwrap();
     let steps = 24usize;
 
-    let mk_req = |seq_id: i32, last: Option<i32>, ctx_len: usize, generated: Vec<i32>| {
+    let mk_req = |seq_id: SeqId, last: Option<i32>, ctx_len: usize, generated: Vec<i32>| {
         InferenceRequestForModel {
             id: 1,
             prompt_tokens: prompt.clone(),
@@ -723,14 +729,17 @@ fn golden_draft_model_speculative_matches_greedy() {
 
     // ── Reference: plain one-token-at-a-time decode on sequence 0. ──
     let pre0 = m
-        .do_prefill(&[1], &[mk_req(0, None, 0, vec![])], 0)
+        .do_prefill(&[1], &[mk_req(SeqId::slot(0), None, 0, vec![])], 0)
         .unwrap();
     let mut plain = vec![pre0[0].logits.clone().unwrap().sampled_token];
     let mut live = prompt.len();
     while plain.len() < steps {
         let last = *plain.last().unwrap();
         let out = m
-            .do_decode(&[1], &[mk_req(0, Some(last), live + 1, plain.clone())])
+            .do_decode(
+                &[1],
+                &[mk_req(SeqId::slot(0), Some(last), live + 1, plain.clone())],
+            )
             .unwrap();
         plain.push(out[0].1.sampled_token);
         live += 1;
@@ -738,14 +747,14 @@ fn golden_draft_model_speculative_matches_greedy() {
 
     // ── Draft-model speculative decode on sequence 1: same prompt, same sampler. ──
     let pre1 = m
-        .do_prefill(&[1], &[mk_req(1, None, 0, vec![])], 0)
+        .do_prefill(&[1], &[mk_req(SeqId::slot(1), None, 0, vec![])], 0)
         .unwrap();
     let mut spec = vec![pre1[0].logits.clone().unwrap().sampled_token];
     let mut live = prompt.len();
     let mut accepted_total = 0usize;
     while spec.len() < steps {
         let last = *spec.last().unwrap();
-        let req = mk_req(1, Some(last), live + 1, spec.clone());
+        let req = mk_req(SeqId::slot(1), Some(last), live + 1, spec.clone());
         let mut seq = req.prompt_tokens.clone();
         seq.extend_from_slice(&req.generated_token_ids);
         let drafts = proposer.propose(req.id, &seq, 4);
@@ -801,7 +810,7 @@ fn golden_prefix_reuse_after_trim() {
                 generated_tokens: 0,
                 max_new_tokens: 8,
                 context_len: ctx_len,
-                kv_seq_id: 0,
+                kv_seq_id: SeqId::slot(0),
                 temperature: 0.0,
                 top_p: 1.0,
                 top_k: 0,
@@ -843,7 +852,10 @@ fn golden_prefix_reuse_after_trim() {
 
     // Donate: keep exactly the cached prefix [0, cached-1); the boundary token is
     // re-submitted on the hit (same as the engine's trim_sequence call).
-    m.trim_sequence(0, cached_tokens - 1);
+    assert!(
+        m.trim_sequence(SeqId::slot(0), cached_tokens - 1),
+        "the donate\u{2192}hit lifecycle this test mirrors depends on the trim happening"
+    );
 
     // Request 2 (cache hit): same 16-token prefix, different tail, SAME sequence.
     let mut prompt_b = prompt_a[..cached_tokens].to_vec();
@@ -887,7 +899,7 @@ fn golden_prefix_reuse_after_trim() {
     assert!(!out[0].1.values.is_empty(), "expected populated logits");
     assert!(out[0].1.values.iter().all(|v| v.is_finite()));
 
-    m.clear_sequence(0);
+    m.clear_sequence(SeqId::slot(0));
 }
 
 /// tokenize → detokenize must reconstruct tricky text. Uses the raw-byte piece
@@ -925,7 +937,7 @@ fn golden_tokenize_roundtrip() {
 /// Prefill `tokens` into `seq_id` and return the final-position logits.
 /// Shared by the state round-trip tests below.
 #[cfg(test)]
-fn decode_prompt_logits(model: &LlamaCppModel, seq_id: i32, tokens: &[i32]) -> Logits {
+fn decode_prompt_logits(model: &LlamaCppModel, seq_id: SeqId, tokens: &[i32]) -> Logits {
     let req = InferenceRequestForModel {
         id: 1,
         prompt_tokens: tokens.to_vec(),
@@ -967,7 +979,7 @@ fn decode_prompt_logits(model: &LlamaCppModel, seq_id: i32, tokens: &[i32]) -> L
 /// result depends on the resident KV rather than on a fresh prefill. This is what
 /// makes the round-trip assertion meaningful: it reads the restored state.
 #[cfg(test)]
-fn decode_next_logits(model: &LlamaCppModel, seq_id: i32, tokens: &[i32]) -> Logits {
+fn decode_next_logits(model: &LlamaCppModel, seq_id: SeqId, tokens: &[i32]) -> Logits {
     // Everything but the last token is already resident; submit only the last one at
     // its original position, which forces the model to attend over the restored cells.
     let req = InferenceRequestForModel {
@@ -1030,24 +1042,24 @@ fn golden_state_seq_round_trip_preserves_decode() {
     assert!(tokens.len() >= 3, "prompt too short to be meaningful");
     let prefix = &tokens[..tokens.len() - 1];
 
-    const SRC: i32 = 0;
-    const DST: i32 = 1;
+    let src = SeqId::slot(0);
+    let dst = SeqId::slot(1);
 
-    // Fill SRC with everything but the last token, then snapshot it.
-    let _ = decode_prompt_logits(&model, SRC, prefix);
-    let blob = model.state_seq_save(SRC).expect("state_seq_save");
+    // Fill src with everything but the last token, then snapshot it.
+    let _ = decode_prompt_logits(&model, src, prefix);
+    let blob = model.state_seq_save(src).expect("state_seq_save");
     assert!(
         !blob.is_empty(),
         "a prefilled sequence must serialise to something"
     );
 
     // What the ORIGINAL predicts once the final token lands.
-    let baseline = decode_next_logits(&model, SRC, &tokens);
+    let baseline = decode_next_logits(&model, src, &tokens);
 
     // Restore the snapshot into a different, empty sequence and decode the same token.
-    let read = model.state_seq_load(DST, &blob).expect("state_seq_load");
+    let read = model.state_seq_load(dst, &blob).expect("state_seq_load");
     assert_eq!(read, blob.len(), "the whole blob must be consumed");
-    let restored = decode_next_logits(&model, DST, &tokens);
+    let restored = decode_next_logits(&model, dst, &tokens);
 
     assert_eq!(
         baseline.sampled_token, restored.sampled_token,
@@ -1064,8 +1076,8 @@ fn golden_state_seq_round_trip_preserves_decode() {
         "restored logits diverge from the original (max delta {max_delta})"
     );
 
-    model.clear_sequence(SRC);
-    model.clear_sequence(DST);
+    model.clear_sequence(src);
+    model.clear_sequence(dst);
 }
 
 /// Restoring must not be corrupted by whatever the destination already held —
@@ -1085,24 +1097,24 @@ fn golden_state_seq_load_overwrites_a_dirty_destination() {
         .tokenize("Completely unrelated filler text that runs on for a while")
         .expect("tokenize");
 
-    const SRC: i32 = 0;
-    const DST: i32 = 1;
+    let src = SeqId::slot(0);
+    let dst = SeqId::slot(1);
 
-    let _ = decode_prompt_logits(&model, SRC, prefix);
-    let blob = model.state_seq_save(SRC).expect("save");
-    let baseline = decode_next_logits(&model, SRC, &tokens);
+    let _ = decode_prompt_logits(&model, src, prefix);
+    let blob = model.state_seq_save(src).expect("save");
+    let baseline = decode_next_logits(&model, src, &tokens);
 
     // Dirty the destination with a different, LONGER sequence first. Without the
     // clear inside state_seq_load its leftover cells would survive underneath.
-    let _ = decode_prompt_logits(&model, DST, &other);
+    let _ = decode_prompt_logits(&model, dst, &other);
 
-    model.state_seq_load(DST, &blob).expect("load");
-    let restored = decode_next_logits(&model, DST, &tokens);
+    model.state_seq_load(dst, &blob).expect("load");
+    let restored = decode_next_logits(&model, dst, &tokens);
     assert_eq!(
         baseline.sampled_token, restored.sampled_token,
         "a dirty destination corrupted the restored state"
     );
 
-    model.clear_sequence(SRC);
-    model.clear_sequence(DST);
+    model.clear_sequence(src);
+    model.clear_sequence(dst);
 }

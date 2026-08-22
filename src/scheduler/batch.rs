@@ -1,6 +1,7 @@
 // Batch types and InferenceRequest for the scheduler.
 
 use crate::kv_cache::PageTable;
+use crate::seq::SeqId;
 use tokio::sync::mpsc;
 
 /// A LoRA adapter selection: which named adapter (`--lora-modules`) to apply for
@@ -208,16 +209,18 @@ pub struct InferenceRequest {
     pub response_tx: mpsc::UnboundedSender<Token>,
     pub stop_reason: Option<StopReason>,
     pub sampling: SamplingParams,
-    /// Stable sequence ID assigned from the Scheduler's pool when admitted.
-    /// Used as the llama.cpp seq_id so KV cache slots are never confused across requests.
-    pub kv_seq_id: i32,
+    /// The llama.cpp sequence this request occupies, issued by the slot table when
+    /// it was admitted. `None` until then, and again once the request parks its KV
+    /// and hands the slot back — a variant rather than the `-1` this used to carry,
+    /// so "no sequence yet" cannot be missed by a comparison.
+    pub kv_seq_id: Option<SeqId>,
     /// Number of prompt tokens already present in the KV cache from a prefix cache hit.
     /// The prefill step will skip these tokens (they don't need to be computed again).
     pub skip_prefix_tokens: usize,
     /// Sequence ID holding the cached prefix KV data in llama.cpp.
     /// Set during admission when a prefix cache hit is found.
     /// The engine copies KV from this seq_id before prefill, then clears and returns it to pool.
-    pub prefix_seq_id: Option<i32>,
+    pub prefix_seq_id: Option<SeqId>,
     /// Timestamp when the request was submitted (for latency metrics).
     pub submitted_at: std::time::Instant,
     /// Total prompt tokens in the sequence's KV once prefill completes (donated
@@ -262,7 +265,7 @@ pub struct InferenceRequest {
     /// Separate from `fork_parent` because the parent's `seq_id` is only known once it
     /// is actually decoding, and because clearing `fork_parent` is how the fallback
     /// path says "prefill normally".
-    pub fork_source: Option<(i32, usize)>,
+    pub fork_source: Option<(SeqId, usize)>,
 }
 
 impl InferenceRequest {
@@ -285,7 +288,7 @@ impl InferenceRequest {
             response_tx,
             stop_reason: None,
             sampling,
-            kv_seq_id: -1,
+            kv_seq_id: None,
             skip_prefix_tokens: 0,
             prefix_seq_id: None,
             submitted_at: std::time::Instant::now(),
@@ -363,7 +366,7 @@ pub struct ScheduledBatch {
     pub prefill: Vec<u64>,
     pub decode: Vec<u64>,
     /// Sequence IDs whose KV cache must be cleared (request was preempted this step).
-    pub preempted_seq_ids: Vec<i32>,
+    pub preempted_seq_ids: Vec<SeqId>,
     /// `(seq_id, keep_from)` pairs: drop every KV position `>= keep_from` for that
     /// sequence before the next prefill writes there.
     ///
@@ -373,18 +376,18 @@ pub struct ScheduledBatch {
     /// model handle, so it records the intent here and `run_loop` applies it —
     /// **before** `run_prefill`, never after. Mirrors llama-server's
     /// `common_context_seq_rm(ctx, slot.id, p0, -1)` (`server-context.cpp:3392-3399`).
-    pub kv_trims: Vec<(i32, usize)>,
+    pub kv_trims: Vec<(SeqId, usize)>,
     /// Sequence IDs whose KV must be wiped entirely: a finished request whose state
     /// was not safe to reuse, or an idle slot reclaimed to free blocks.
-    pub kv_clears: Vec<i32>,
+    pub kv_clears: Vec<SeqId>,
     /// `(seq_id, tokens)` to serialise into the host-RAM prompt cache **before** the
     /// matching `kv_clears` entry wipes it. Order matters: the engine saves first,
     /// then clears, or the state is gone before it can be copied.
-    pub kv_saves: Vec<(i32, Vec<i32>)>,
+    pub kv_saves: Vec<(SeqId, Vec<i32>)>,
     /// `(seq_id, state_blob)` to restore into a sequence before it is prefilled.
     /// Carries the blob by value: it has just been removed from the cache, so there
     /// is exactly one copy in flight and no second reference to keep consistent.
-    pub kv_restores: Vec<(i32, Vec<u8>)>,
+    pub kv_restores: Vec<(SeqId, Vec<u8>)>,
 }
 
 impl ScheduledBatch {

@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.22.1] - 2026-08-22
+
+### Documentation
+
+- **The v0.22.0 release notes described `--mtp-model` as drafting badly. It does not
+  draft at all.** The entry was written from the commit that added the flag and missed
+  that a later commit on the same branch had superseded its numbers, so three claims went
+  out wrong: that acceptance is 4-17%, that the main cause had been found and fixed, and
+  that "a second desync remains". There was no first one. The head's `llama_decode`
+  returns `-1` on every call, so it returns a frozen candidate set — the same three
+  tokens at every step, blind to prompt and position — and the ~2.5% the server reports
+  is how often that fixed list coincides with the target's output, not draft quality.
+  `llama-server` reaches ~60% with the same head file. The `save_state`/`restore_state`
+  pair fox wraps around `mtp_propose` is dead code: that implementation does not override
+  `get_state`/`set_state`, so the dispatcher returns false, and removing it changed
+  nothing. `STATUS.md` item 17 had this already and the CHANGELOG contradicted it inside
+  the same release. Corrected in the 0.22.0 entry above, in `--help`, and recorded here;
+  the text published under the `v0.22.0` tag cannot be recalled.
+
+- **`src/seq.rs` claimed a guarantee its own FFI helper contradicts.** The module header
+  said a bare integer is a type error "wherever a sequence is expected" and that
+  `a4171eb` "is now unwriteable", while `set_batch_row` in the same change says a raw
+  store into `batch.seq_id` stays expressible because no newtype reaches through a
+  bindgen pointer. The honest one is `set_batch_row`'s, and the header now says so
+  explicitly, naming the claim it replaces.
+
+### Changed
+
+- **`main` and `develop` share history again.** `main` was an orphan branch — its own
+  root commit, no ancestor in common with `develop`, so `git merge-base main develop`
+  returned nothing and each release snapshot was a single-parent commit built by copying
+  a tree. That made `main` unmergeable and threw away the link between a published
+  version and the commit it came from. Fixed by grafting, not rewriting: from this
+  release the snapshot is a two-parent commit whose first parent is `main`'s tip — so
+  `git log --first-parent main` still shows only the release chain — and whose second is
+  the `release:` commit on the working branch. Every published tag keeps its SHA, and the
+  snapshot's tree is unchanged. `CONTRIBUTING.md` carries the new recipe and the two
+  checks to run before tagging.
+
+- **A llama.cpp sequence id is now a type, not an `i32`.** llama.cpp addresses its KV
+  cells by `(seq_id, pos)`, and fox passed that id around as a bare integer. Two of its
+  twelve verified KV lifecycle bugs came from exactly that, both in the *sequence*
+  lifecycle rather than the block pool — which is also why the typed-block refactor that
+  motivated the audit was rejected. `SeqId` has two named `pub(crate)` constructors:
+  `slot(i)` for the range the scheduler's slot table owns, and `dedicated(raw)` for the
+  two sequences that live outside it (the embeddings sequence, and the draft model's own
+  context). Sixty signatures take it, no raw `seq_id: i32` survives outside the FFI
+  layer, and `Option<SeqId>` replaces the `-1` sentinel `kv_seq_id` used to carry, so
+  "no sequence" is a variant rather than a magic number a comparison can miss — at a
+  cost of four bytes per slot, since a plain `i32` newtype has no niche.
+
+  **It does not make `a4171eb` impossible, and the module says so.** `llama_batch` is a
+  bag of bindgen pointers and no newtype reaches through one, so a raw store into
+  `batch.seq_id` stays expressible. What stops it is that `set_batch_row` is the only
+  sanctioned write path and it takes a `SeqId`: writing that literal again means
+  hand-rolling pointer arithmetic beside a helper that already exists, which shows up in
+  a diff instead of hiding inside a comment claiming the slot is dedicated. An invisible
+  literal becomes a visible act; a runtime bug does not become a compile error.
+
+  No performance change. The reasoning, the twelve-bug classification and the decision
+  rule agreed before it started are in `docs/design/kv-typed-classification.md`.
+
+---
+
 ## [0.22.0] - 2026-08-22
 
 ### Added
@@ -36,13 +100,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of surfacing as an unresolved mangled symbol at link time. `FOX_NO_MTP=1` drops
   the whole thing.
 
-  **It is currently slower than the n-gram proposer, warns loudly at load, and should not
-  be turned on except to work on it.** Acceptance is 4-17% against `llama-server`'s ~60%
-  with the same head. The main cause was found and fixed — drafting advanced the head's
-  KV past the target, so llama.cpp refused every verification decode, and checkpointing
-  the driver state around the draft took the trace from +1 token per step to +4/+5 — but
-  a second desync remains. `mtp_propose` documents the state, what was ruled out and with
-  which measurement, and how to diff the two engines' driver traces.
+  **It does not work, and this entry corrects the one that shipped in the v0.22.0 release
+  notes.** That text said acceptance was 4-17% and that the main cause had been found and
+  fixed with a second desync remaining. All three claims are wrong: they were taken from
+  the commit that added the flag, and a later commit on the same branch superseded them.
+
+  What is true is that the head has **never drafted**. Its `llama_decode` returns `-1` on
+  every call, so it returns a frozen, context-blind candidate set — asked to count from
+  one to twenty it proposes the same three tokens at every step, identical across
+  positions and prompts. The ~2.5% the server reports is therefore not draft quality at
+  all: it is how often a fixed list happens to coincide with the target's output.
+  `llama-server` reaches ~60% with the very same head file, so neither the head nor its
+  quantization is at fault. The `save_state`/`restore_state` pair fox wraps around
+  `mtp_propose` is dead code — that implementation does not override
+  `get_state`/`set_state`, so the dispatcher returns false — and removing it left
+  acceptance unchanged. `STATUS.md` item 17 carries the mechanism and the two hypotheses
+  already eliminated.
 
   It is deliberately **not** documented under `docs/cli/`, which is what makes it exempt
   from the Tier 1 flag promise in `COMPATIBILITY.md`: it may change shape or disappear in

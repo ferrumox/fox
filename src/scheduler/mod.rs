@@ -304,6 +304,7 @@ mod tests {
     use super::*;
     use crate::engine::model::ModelConfig;
     use crate::kv_cache::KVCacheManager;
+    use crate::seq::SeqId;
     use std::sync::atomic::Ordering;
 
     #[test]
@@ -404,9 +405,13 @@ mod tests {
         // so there is always a token left to decode and produce logits from.
         assert_eq!(req.skip_prefix_tokens, 17);
         assert_eq!(req.prefill_pos, 17, "prefill resumes at the skip boundary");
-        assert_eq!(req.kv_seq_id, 0, "inherits the parked sequence in place");
+        assert_eq!(
+            req.kv_seq_id,
+            Some(SeqId::slot(0)),
+            "inherits the parked sequence in place"
+        );
         assert!(
-            batch.kv_trims.contains(&(0, 17)),
+            batch.kv_trims.contains(&(SeqId::slot(0), 17)),
             "everything past the divergence point must be trimmed before prefill"
         );
     }
@@ -638,7 +643,7 @@ mod tests {
             "request 4 should have been admitted by reclaiming the idle slot"
         );
         assert!(
-            batch.kv_clears.contains(&0),
+            batch.kv_clears.contains(&SeqId::slot(0)),
             "the reclaimed sequence's KV must be wiped before reuse"
         );
         assert_eq!(
@@ -710,7 +715,7 @@ mod tests {
             "reclaim must request a save: {batch:?}"
         );
         let (saved_seq, saved_tokens) = &batch.kv_saves[0];
-        assert_eq!(*saved_seq, 0, "slot 0 was the idle victim");
+        assert_eq!(*saved_seq, SeqId::slot(0), "slot 0 was the idle victim");
         assert_eq!(
             saved_tokens.len(),
             21,
@@ -841,8 +846,7 @@ mod tests {
         let branch = running.iter().find(|r| r.id == 2).expect("branch admitted");
         let parent_seq = running.iter().find(|r| r.id == 1).unwrap().kv_seq_id;
         assert_eq!(
-            branch.prefix_seq_id,
-            Some(parent_seq),
+            branch.prefix_seq_id, parent_seq,
             "the branch must copy from its parent's sequence"
         );
         assert_eq!(
@@ -899,7 +903,7 @@ mod tests {
         let donor = running.iter().find(|r| r.id == 1).unwrap().kv_seq_id;
         let copied = running
             .iter()
-            .filter(|r| r.id != 1 && r.prefix_seq_id == Some(donor))
+            .filter(|r| r.id != 1 && r.prefix_seq_id == donor)
             .count();
         let admitted = running.len();
         assert!(
@@ -1082,8 +1086,7 @@ mod tests {
         let donor_seq = running.iter().find(|r| r.id == 1).unwrap().kv_seq_id;
         let second = running.iter().find(|r| r.id == 2).expect("admitted");
         assert_eq!(
-            second.prefix_seq_id,
-            Some(donor_seq),
+            second.prefix_seq_id, donor_seq,
             "must copy the shared prefix from the LIVE sequence"
         );
         assert_eq!(
@@ -1199,7 +1202,7 @@ mod tests {
 
             // Every seq_id appears exactly once, in exactly one state, and all
             // TOTAL_SEQ are accounted for.
-            let mut seen: HashSet<i32> = HashSet::new();
+            let mut seen: HashSet<SeqId> = HashSet::new();
             for slot in slots.iter() {
                 assert!(
                     seen.insert(slot.seq_id),
@@ -1216,13 +1219,12 @@ mod tests {
 
             // A Busy slot must correspond to exactly one live request holding that
             // seq_id, and no two running requests may share one.
-            let mut running_seqs: HashSet<i32> = HashSet::new();
+            let mut running_seqs: HashSet<SeqId> = HashSet::new();
             for r in running.iter() {
-                if r.kv_seq_id >= 0 {
+                if let Some(seq_id) = r.kv_seq_id {
                     assert!(
-                        running_seqs.insert(r.kv_seq_id),
-                        "{label}: seq {} claimed by two running requests",
-                        r.kv_seq_id
+                        running_seqs.insert(seq_id),
+                        "{label}: seq {seq_id} claimed by two running requests"
                     );
                 }
             }
@@ -1231,7 +1233,7 @@ mod tests {
                     assert!(
                         running
                             .iter()
-                            .any(|r| r.id == req_id && r.kv_seq_id == slot.seq_id),
+                            .any(|r| r.id == req_id && r.kv_seq_id == Some(slot.seq_id)),
                         "{label}: slot {} is Busy({req_id}) with no matching running request",
                         slot.seq_id
                     );
@@ -1326,7 +1328,7 @@ mod tests {
         sched.schedule_step();
         {
             let mut slots = sched.slots.lock().unwrap();
-            let seq_ids: Vec<i32> = slots.iter().map(|s| s.seq_id).collect();
+            let seq_ids: Vec<SeqId> = slots.iter().map(|s| s.seq_id).collect();
             for seq_id in seq_ids {
                 let blocks = slots.release(seq_id);
                 kv.free_blocks(&blocks);
@@ -1427,7 +1429,7 @@ mod tests {
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
             let mut req =
                 InferenceRequest::new(7, (0..40).collect(), 200, SamplingParams::default(), tx);
-            req.kv_seq_id = 0;
+            req.kv_seq_id = Some(SeqId::slot(0));
             req.prefilled_tokens = 40;
             req.generated_tokens = 60; // context_len = 100
             req.state = RequestState::Decoding;

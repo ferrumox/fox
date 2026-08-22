@@ -103,7 +103,7 @@ impl InferenceEngine {
                 match engine.model.state_seq_save(*seq_id) {
                     Ok(data) => {
                         tracing::debug!(
-                            seq_id,
+                            %seq_id,
                             bytes = data.len(),
                             tokens = tokens.len(),
                             "serialised sequence to the host-RAM prompt cache"
@@ -112,7 +112,7 @@ impl InferenceEngine {
                     }
                     // A failed save costs a re-prefill later, nothing more — the
                     // sequence is being discarded either way.
-                    Err(e) => tracing::debug!(seq_id, "prompt-cache save skipped: {e}"),
+                    Err(e) => tracing::debug!(%seq_id, "prompt-cache save skipped: {e}"),
                 }
             }
             for seq_id in &batch.kv_clears {
@@ -125,7 +125,7 @@ impl InferenceEngine {
                     // written. Wipe the sequence and let it re-prefill from scratch:
                     // the following trim then bounds an empty sequence, which is a
                     // no-op, and the request is merely slower rather than wrong.
-                    tracing::warn!(seq_id, "prompt-cache restore failed: {e} — re-prefilling");
+                    tracing::warn!(%seq_id, "prompt-cache restore failed: {e} — re-prefilling");
                     engine.model.clear_sequence(*seq_id);
                     engine.scheduler.invalidate_restore(*seq_id);
                 }
@@ -137,10 +137,10 @@ impl InferenceEngine {
                 // same escape hatch the prompt-cache restore failure uses: drop the
                 // sequence and prefill it from scratch. Slower, never wrong.
                 let trimmed = engine.model.trim_sequence(*seq_id, *keep_from);
-                tracing::debug!(seq_id, keep_from, trimmed, "KV trim applied");
+                tracing::debug!(%seq_id, keep_from, trimmed, "KV trim applied");
                 if !trimmed {
                     tracing::warn!(
-                        seq_id,
+                        %seq_id,
                         keep_from,
                         "KV trim refused (rollback outside the cache's window) — re-prefilling"
                     );
@@ -191,8 +191,8 @@ impl InferenceEngine {
                             });
                             // Clear KV before the seq_id returns to the pool — a failed
                             // llama_decode leaves partial cells that poison the next occupant.
-                            if req.kv_seq_id >= 0 {
-                                engine.model.clear_sequence(req.kv_seq_id);
+                            if let Some(seq_id) = req.kv_seq_id {
+                                engine.model.clear_sequence(seq_id);
                             }
                         }
                         for req_id in &prefill_ids {
@@ -245,8 +245,8 @@ impl InferenceEngine {
                                 logprob: None,
                                 cached_tokens: 0,
                             });
-                            if req.kv_seq_id >= 0 {
-                                engine.model.clear_sequence(req.kv_seq_id);
+                            if let Some(seq_id) = req.kv_seq_id {
+                                engine.model.clear_sequence(seq_id);
                             }
                         }
                         for req_id in &decode_ids {
@@ -289,14 +289,16 @@ impl InferenceEngine {
         let threshold = n_ctx.saturating_sub(reserve);
         for req in self.scheduler.get_running(decode_ids) {
             let ctx_len = req.context_len();
-            if ctx_len < threshold || req.kv_seq_id < 0 {
+            let Some(seq_id) = req.kv_seq_id else {
+                continue; // parked: the slot owns the KV, there is nothing to roll
+            };
+            if ctx_len < threshold {
                 continue;
             }
             // Preserve the head; discard half of what remains (at least one token). Keep
             // at least one token beyond the head so the shifted tail is non-empty.
             let n_keep = n_keep_cfg.min(n_ctx.saturating_sub(1));
             let n_discard = (ctx_len.saturating_sub(n_keep) / 2).max(1);
-            let seq_id = req.kv_seq_id;
             let model = self.model.clone();
             let res =
                 tokio::task::spawn_blocking(move || model.roll_context(seq_id, n_keep, n_discard))
@@ -306,7 +308,7 @@ impl InferenceEngine {
                     self.scheduler.record_context_roll(req.id, n_discard);
                     tracing::info!(
                         request_id = req.id,
-                        seq_id,
+                        %seq_id,
                         n_keep,
                         n_discard,
                         ctx_len,
@@ -350,14 +352,13 @@ impl InferenceEngine {
         let Some(req) = running.iter().find(|r| r.id == req_id) else {
             return Some(false);
         };
-        if req.kv_seq_id < 0 {
+        let Some(seq_id) = req.kv_seq_id else {
             return Some(false);
-        }
+        };
         let Some((n_keep, n_discard)) = reactive_roll_amounts(n_keep_cfg, n_ctx, req.context_len())
         else {
             return Some(false);
         };
-        let seq_id = req.kv_seq_id;
         let model = self.model.clone();
         let res =
             tokio::task::spawn_blocking(move || model.roll_context(seq_id, n_keep, n_discard))
@@ -367,7 +368,7 @@ impl InferenceEngine {
                 self.scheduler.record_context_roll(req_id, n_discard);
                 tracing::info!(
                     request_id = req_id,
-                    seq_id,
+                    %seq_id,
                     n_keep,
                     n_discard,
                     n_ctx,
@@ -390,35 +391,40 @@ impl InferenceEngine {
         let requests = self.scheduler.get_running(req_ids);
         let model_requests: Vec<InferenceRequestForModel> = requests
             .iter()
-            .map(|r| InferenceRequestForModel {
-                id: r.id,
-                prompt_tokens: r.prompt_tokens.clone(),
-                last_token: r.last_token,
-                generated_tokens: r.generated_tokens,
-                max_new_tokens: r.max_new_tokens,
-                context_len: r.context_len(),
-                kv_seq_id: r.kv_seq_id,
-                temperature: r.sampling.temperature,
-                top_p: r.sampling.top_p,
-                top_k: r.sampling.top_k,
-                repetition_penalty: r.sampling.repetition_penalty,
-                frequency_penalty: r.sampling.frequency_penalty,
-                presence_penalty: r.sampling.presence_penalty,
-                repeat_last_n: r.sampling.repeat_last_n,
-                top_n_sigma: r.sampling.top_n_sigma,
-                min_keep: r.sampling.min_keep,
-                seed: r.sampling.seed,
-                generated_token_ids: r.generated_token_ids.clone(),
-                skip_prefix_tokens: r.skip_prefix_tokens,
-                prefix_seq_id: r.prefix_seq_id,
-                prefill_pos: r.prefill_pos,
-                grammar: r.sampling.grammar.clone(),
-                min_p: r.sampling.min_p,
-                min_tokens: r.sampling.min_tokens,
-                logit_bias: r.sampling.logit_bias.clone(),
-                multimodal: r.multimodal.clone(),
-                lora: r.lora.clone(),
-                needs_logits: r.sampling.logprobs.is_some(),
+            // A running request always holds a sequence; `filter_map` rather than an
+            // unwrap so a bookkeeping slip degrades to one skipped request instead of
+            // taking the engine loop down.
+            .filter_map(|r| {
+                Some(InferenceRequestForModel {
+                    id: r.id,
+                    prompt_tokens: r.prompt_tokens.clone(),
+                    last_token: r.last_token,
+                    generated_tokens: r.generated_tokens,
+                    max_new_tokens: r.max_new_tokens,
+                    context_len: r.context_len(),
+                    kv_seq_id: r.kv_seq_id?,
+                    temperature: r.sampling.temperature,
+                    top_p: r.sampling.top_p,
+                    top_k: r.sampling.top_k,
+                    repetition_penalty: r.sampling.repetition_penalty,
+                    frequency_penalty: r.sampling.frequency_penalty,
+                    presence_penalty: r.sampling.presence_penalty,
+                    repeat_last_n: r.sampling.repeat_last_n,
+                    top_n_sigma: r.sampling.top_n_sigma,
+                    min_keep: r.sampling.min_keep,
+                    seed: r.sampling.seed,
+                    generated_token_ids: r.generated_token_ids.clone(),
+                    skip_prefix_tokens: r.skip_prefix_tokens,
+                    prefix_seq_id: r.prefix_seq_id,
+                    prefill_pos: r.prefill_pos,
+                    grammar: r.sampling.grammar.clone(),
+                    min_p: r.sampling.min_p,
+                    min_tokens: r.sampling.min_tokens,
+                    logit_bias: r.sampling.logit_bias.clone(),
+                    multimodal: r.multimodal.clone(),
+                    lora: r.lora.clone(),
+                    needs_logits: r.sampling.logprobs.is_some(),
+                })
             })
             .collect();
 
@@ -481,35 +487,40 @@ impl InferenceEngine {
         let requests = self.scheduler.get_running(req_ids);
         let model_requests: Vec<InferenceRequestForModel> = requests
             .iter()
-            .map(|r| InferenceRequestForModel {
-                id: r.id,
-                prompt_tokens: r.prompt_tokens.clone(),
-                last_token: r.last_token,
-                generated_tokens: r.generated_tokens,
-                max_new_tokens: r.max_new_tokens,
-                context_len: r.context_len(),
-                kv_seq_id: r.kv_seq_id,
-                temperature: r.sampling.temperature,
-                top_p: r.sampling.top_p,
-                top_k: r.sampling.top_k,
-                repetition_penalty: r.sampling.repetition_penalty,
-                frequency_penalty: r.sampling.frequency_penalty,
-                presence_penalty: r.sampling.presence_penalty,
-                repeat_last_n: r.sampling.repeat_last_n,
-                top_n_sigma: r.sampling.top_n_sigma,
-                min_keep: r.sampling.min_keep,
-                seed: r.sampling.seed,
-                generated_token_ids: r.generated_token_ids.clone(),
-                skip_prefix_tokens: 0,
-                prefix_seq_id: None,
-                prefill_pos: r.prefill_pos,
-                grammar: r.sampling.grammar.clone(),
-                min_p: r.sampling.min_p,
-                min_tokens: r.sampling.min_tokens,
-                logit_bias: r.sampling.logit_bias.clone(),
-                multimodal: r.multimodal.clone(),
-                lora: r.lora.clone(),
-                needs_logits: r.sampling.logprobs.is_some(),
+            // A running request always holds a sequence; `filter_map` rather than an
+            // unwrap so a bookkeeping slip degrades to one skipped request instead of
+            // taking the engine loop down.
+            .filter_map(|r| {
+                Some(InferenceRequestForModel {
+                    id: r.id,
+                    prompt_tokens: r.prompt_tokens.clone(),
+                    last_token: r.last_token,
+                    generated_tokens: r.generated_tokens,
+                    max_new_tokens: r.max_new_tokens,
+                    context_len: r.context_len(),
+                    kv_seq_id: r.kv_seq_id?,
+                    temperature: r.sampling.temperature,
+                    top_p: r.sampling.top_p,
+                    top_k: r.sampling.top_k,
+                    repetition_penalty: r.sampling.repetition_penalty,
+                    frequency_penalty: r.sampling.frequency_penalty,
+                    presence_penalty: r.sampling.presence_penalty,
+                    repeat_last_n: r.sampling.repeat_last_n,
+                    top_n_sigma: r.sampling.top_n_sigma,
+                    min_keep: r.sampling.min_keep,
+                    seed: r.sampling.seed,
+                    generated_token_ids: r.generated_token_ids.clone(),
+                    skip_prefix_tokens: 0,
+                    prefix_seq_id: None,
+                    prefill_pos: r.prefill_pos,
+                    grammar: r.sampling.grammar.clone(),
+                    min_p: r.sampling.min_p,
+                    min_tokens: r.sampling.min_tokens,
+                    logit_bias: r.sampling.logit_bias.clone(),
+                    multimodal: r.multimodal.clone(),
+                    lora: r.lora.clone(),
+                    needs_logits: r.sampling.logprobs.is_some(),
+                })
             })
             .collect();
         let model = self.model.clone();

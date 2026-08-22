@@ -168,8 +168,8 @@ impl InferenceEngine {
                 // Client disconnected: receiver was dropped. Cancel the request
                 // immediately to free KV cache and scheduler slot.
                 if !send_ok {
-                    if req.kv_seq_id >= 0 {
-                        self.model.clear_sequence(req.kv_seq_id);
+                    if let Some(seq_id) = req.kv_seq_id {
+                        self.model.clear_sequence(seq_id);
                     }
                     self.scheduler.mark_finished(*req_id, StopReason::Preempt);
                     self.per_request_state.remove(req_id);
@@ -236,8 +236,10 @@ impl InferenceEngine {
                         true
                     };
 
-                    if should_clear && req.kv_seq_id >= 0 {
-                        self.model.clear_sequence(req.kv_seq_id);
+                    if should_clear {
+                        if let Some(seq_id) = req.kv_seq_id {
+                            self.model.clear_sequence(seq_id);
+                        }
                     }
 
                     self.scheduler.mark_finished(*req_id, stop_reason.unwrap());
@@ -287,13 +289,13 @@ impl super::InferenceEngine {
         let Some((seq_id, tokens)) = self.scheduler.prefilled_sequence(req_id) else {
             return;
         };
-        if seq_id < 0 || tokens.is_empty() {
+        if tokens.is_empty() {
             return;
         }
         match self.model.state_seq_save(seq_id) {
             Ok(data) => {
                 tracing::debug!(
-                    seq_id,
+                    %seq_id,
                     bytes = data.len(),
                     tokens = tokens.len(),
                     "checkpointed a prefilled sequence (model cannot roll back its KV)"
@@ -301,7 +303,7 @@ impl super::InferenceEngine {
                 self.scheduler.store_prompt_state(tokens, data);
             }
             // Costs a re-prefill next turn, nothing more.
-            Err(e) => tracing::debug!(seq_id, "prefill checkpoint skipped: {e}"),
+            Err(e) => tracing::debug!(%seq_id, "prefill checkpoint skipped: {e}"),
         }
     }
 }

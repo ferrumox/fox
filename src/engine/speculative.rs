@@ -11,10 +11,10 @@
 // wrong draft is simply rejected. See `docs/design/speculative-decoding.md` and
 // `docs/design/speculative-roadmap.md` (Level 2).
 
-use std::sync::atomic::{AtomicI32, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use super::model::Model;
+use crate::seq::SeqId;
 
 /// Proposes candidate tokens for speculative decoding, to be verified against the
 /// target model's real logits. Implementations must be cheap to call once per decode
@@ -33,7 +33,7 @@ pub trait Proposer: Send + Sync {
     /// of the process, while `kv_seq_id` is a slot index that gets reused. The MTP
     /// driver keys its per-sequence hidden-state carryover by the *llama.cpp* sequence,
     /// so it has to be told which one, not which request.
-    fn set_kv_seq_id(&self, kv_seq_id: i32) {
+    fn set_kv_seq_id(&self, kv_seq_id: SeqId) {
         let _ = kv_seq_id;
     }
 
@@ -72,16 +72,20 @@ pub struct MtpProposer {
     /// hidden-state carryover by this, and `mtp_process` files those rows under the
     /// sequence the batch actually used — so asking for a draft under any other id
     /// returns nothing, or something that belongs to a different conversation.
-    kv_seq_id: AtomicI32,
+    kv_seq_id: Mutex<Option<SeqId>>,
     /// The request currently holding the speculative slot, so a new one gets a `begin`.
     last_req_id: Mutex<Option<u64>>,
 }
 
 impl MtpProposer {
+    fn seq_id(&self) -> Option<SeqId> {
+        *self.kv_seq_id.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn new(model: Arc<dyn Model>) -> Self {
         Self {
             model,
-            kv_seq_id: AtomicI32::new(0),
+            kv_seq_id: Mutex::new(None),
             last_req_id: Mutex::new(None),
         }
     }
@@ -105,22 +109,28 @@ impl Proposer for MtpProposer {
             let mut last = self.last_req_id.lock().unwrap_or_else(|e| e.into_inner());
             if *last != Some(req_id) {
                 *last = Some(req_id);
-                self.model
-                    .mtp_begin(self.kv_seq_id.load(AtomicOrdering::Relaxed), head);
+                if let Some(seq_id) = self.seq_id() {
+                    self.model.mtp_begin(seq_id, head);
+                }
             }
         }
-        let seq_id = self.kv_seq_id.load(AtomicOrdering::Relaxed);
+        // No sequence yet means the engine has not told us which slot the request
+        // occupies; drafting under a guessed one is how `a4171eb` happened.
+        let Some(seq_id) = self.seq_id() else {
+            return Vec::new();
+        };
         self.model
             .mtp_propose(seq_id, head.len() as i32, id_last, head, draft_len)
     }
 
-    fn set_kv_seq_id(&self, kv_seq_id: i32) {
-        self.kv_seq_id.store(kv_seq_id, AtomicOrdering::Relaxed);
+    fn set_kv_seq_id(&self, kv_seq_id: SeqId) {
+        *self.kv_seq_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(kv_seq_id);
     }
 
     fn accept(&self, n_accepted: usize) {
-        let seq_id = self.kv_seq_id.load(AtomicOrdering::Relaxed);
-        self.model.mtp_accept(seq_id, n_accepted as u16);
+        if let Some(seq_id) = self.seq_id() {
+            self.model.mtp_accept(seq_id, n_accepted as u16);
+        }
     }
 }
 
@@ -142,7 +152,7 @@ struct DraftState {
 /// in the draft's own KV is used — no pool needed.
 pub struct DraftModelProposer {
     draft_model: Arc<dyn Model>,
-    seq_id: i32,
+    seq_id: SeqId,
     state: Mutex<DraftState>,
 }
 
@@ -150,7 +160,9 @@ impl DraftModelProposer {
     pub fn new(draft_model: Arc<dyn Model>) -> Self {
         Self {
             draft_model,
-            seq_id: 0,
+            // The draft model has its own llama.cpp context, so this id shares no
+            // address space with the scheduler's slots — see `SeqId::dedicated`.
+            seq_id: SeqId::dedicated(0),
             state: Mutex::new(DraftState {
                 synced_len: 0,
                 last_req_id: None,
@@ -171,11 +183,21 @@ impl Proposer for DraftModelProposer {
             self.draft_model.clear_sequence(self.seq_id);
             state.synced_len = 0;
             state.last_req_id = Some(req_id);
-        } else {
+        } else if !self
+            .draft_model
+            .trim_sequence(self.seq_id, state.synced_len)
+        {
             // Discard last round's unconfirmed speculative tail (the target may not
             // have accepted all of it) — keep only the target-verified prefix.
-            self.draft_model
-                .trim_sequence(self.seq_id, state.synced_len);
+            //
+            // A refused trim means the tail is still there, so feeding the next tokens
+            // would write at positions that already hold cells. Same escape hatch the
+            // engine uses for a refused trim: wipe and re-sync from scratch. Costs one
+            // round of drafting, never produces drafts from a state the model did not
+            // reach. (Found by `#[must_use]` — this return value used to be discarded,
+            // which is `f5214df` item 3 in a second place.)
+            self.draft_model.clear_sequence(self.seq_id);
+            state.synced_len = 0;
         }
 
         let new_tokens = &seq[state.synced_len..];
@@ -218,6 +240,7 @@ pub(crate) fn propose_ngram(seq: &[i32], ngram: usize, draft_len: usize) -> Vec<
 mod tests {
     use super::{propose_ngram, DraftModelProposer, NgramProposer, Proposer};
     use crate::engine::model::{InferenceRequestForModel, Logits, Model, ModelConfig, PrefillStep};
+    use crate::seq::SeqId;
     use std::sync::{Arc, Mutex as StdMutex};
 
     #[test]
@@ -271,17 +294,17 @@ mod tests {
         fn apply_chat_template(&self, _messages: &[(String, String)]) -> anyhow::Result<String> {
             unimplemented!("not used by DraftModelProposer")
         }
-        fn clear_sequence(&self, seq_id: i32) {
+        fn clear_sequence(&self, seq_id: SeqId) {
             self.calls.lock().unwrap().push(format!("clear({seq_id})"));
         }
-        fn trim_sequence(&self, seq_id: i32, from_pos: usize) -> bool {
+        fn trim_sequence(&self, seq_id: SeqId, from_pos: usize) -> bool {
             self.calls
                 .lock()
                 .unwrap()
                 .push(format!("trim({seq_id},{from_pos})"));
             true
         }
-        fn copy_sequence_range(&self, _src_seq_id: i32, _dst_seq_id: i32, _token_count: i32) {}
+        fn copy_sequence_range(&self, _src_seq_id: SeqId, _dst_seq_id: SeqId, _token_count: i32) {}
         fn supports_seq_copy(&self) -> bool {
             false
         }
@@ -296,7 +319,7 @@ mod tests {
         }
         fn draft_propose(
             &self,
-            seq_id: i32,
+            seq_id: SeqId,
             new_tokens: &[i32],
             base_pos: i32,
             draft_len: usize,

@@ -34,10 +34,13 @@ use anyhow::anyhow;
 
 #[cfg(not(fox_stub))]
 use crate::engine::ffi;
+// Only the real (non-stub) Model impl reaches the FFI, so the stub build sees this unused.
 #[cfg(not(fox_stub))]
 use crate::engine::model::{
     InferenceRequestForModel, Logits, Model, ModelConfig, ModelInfo, NativeToolFormat, PrefillStep,
 };
+#[cfg_attr(fox_stub, allow(unused_imports))]
+use crate::seq::SeqId;
 
 /// SentencePiece uses U+2581 (▁) for word boundaries.
 #[cfg(not(fox_stub))]
@@ -404,8 +407,10 @@ pub struct LlamaCppModel {
     pub(super) eog_tokens: Vec<i32>,
     /// Sequence id reserved for embeddings (the extra `n_seq - 1` slot, OUTSIDE the
     /// scheduler's 0..max_batch pool). Embeddings write + wipe this sequence per call;
-    /// using a pool id here would clobber a live generation's KV under load.
-    pub(super) embed_seq_id: i32,
+    /// using a pool id here would clobber a live generation's KV under load — which is
+    /// exactly what `a4171eb` did with a literal `0`. Typed so that writing a literal
+    /// into the batch is no longer possible: see [`SeqId`].
+    pub(super) embed_seq_id: SeqId,
     /// Effective per-sequence context length (tokens) used when creating the llama.cpp context.
     pub(super) effective_ctx: u32,
     /// Whether this instance owns the model pointer and should free it on drop.
@@ -933,7 +938,7 @@ impl LlamaCppModel {
             config,
             eos_token,
             eog_tokens,
-            embed_seq_id: (n_seq - 1) as i32,
+            embed_seq_id: SeqId::dedicated((n_seq - 1) as i32),
             effective_ctx: effective_max_ctx,
             owns_model: true,
             chat_env: std::sync::OnceLock::new(),
@@ -1102,12 +1107,12 @@ impl LlamaCppModel {
     /// the prompt length and warns when the prefill hidden states never arrived, which
     /// is the difference between useful drafts and noise. Visible with `FOX_LLAMA_LOG=1`.
     #[cfg(fox_mtp)]
-    pub(super) fn mtp_begin(&self, seq_id: i32, prompt: &[i32]) {
+    pub(super) fn mtp_begin(&self, seq_id: SeqId, prompt: &[i32]) {
         let Some(mtp) = self.mtp.as_ref() else {
             return;
         };
         if let Ok(mut driver) = mtp.driver.lock() {
-            driver.begin(seq_id, prompt);
+            driver.begin(seq_id.raw(), prompt);
         }
     }
 
@@ -1147,7 +1152,7 @@ impl LlamaCppModel {
     #[cfg(fox_mtp)]
     pub(super) fn mtp_propose(
         &self,
-        seq_id: i32,
+        seq_id: SeqId,
         n_past: i32,
         id_last: i32,
         seq: &[i32],
@@ -1178,15 +1183,15 @@ impl LlamaCppModel {
         // all and emits a frozen candidate set ('system', '以及', ' `') no matter the prompt.
         // Whatever acceptance has ever been measured here was coincidence, not drafting.
         // Fix the decode first; only then is the checkpoint question even answerable.
-        let saved = driver.save_state(seq_id);
+        let saved = driver.save_state(seq_id.raw());
 
         let mut out = vec![0i32; draft_len];
         let drafted = driver
-            .draft(seq_id, n_past, id_last, seq, &mut out)
+            .draft(seq_id.raw(), n_past, id_last, seq, &mut out)
             .to_vec();
 
         if saved {
-            driver.restore_state(seq_id);
+            driver.restore_state(seq_id.raw());
         }
 
         drafted
@@ -1194,12 +1199,12 @@ impl LlamaCppModel {
 
     /// Tell the MTP driver how many of its drafted tokens the target accepted.
     #[cfg(fox_mtp)]
-    pub(super) fn mtp_accept(&self, seq_id: i32, n_accepted: u16) {
+    pub(super) fn mtp_accept(&self, seq_id: SeqId, n_accepted: u16) {
         let Some(mtp) = self.mtp.as_ref() else {
             return;
         };
         if let Ok(mut driver) = mtp.driver.lock() {
-            driver.accept(seq_id, n_accepted);
+            driver.accept(seq_id.raw(), n_accepted);
         }
     }
 
@@ -1287,7 +1292,7 @@ impl LlamaCppModel {
             config: self.config.clone(),
             eos_token: self.eos_token,
             eog_tokens: self.eog_tokens.clone(),
-            embed_seq_id: (n_seq - 1) as i32,
+            embed_seq_id: SeqId::dedicated((n_seq - 1) as i32),
             effective_ctx: effective_max_ctx,
             owns_model: false, // weights are owned by the original LlamaCppModel
             chat_env: std::sync::OnceLock::new(),
@@ -1320,14 +1325,14 @@ impl Model for LlamaCppModel {
     }
 
     #[cfg(fox_mtp)]
-    fn mtp_begin(&self, seq_id: i32, prompt: &[i32]) {
+    fn mtp_begin(&self, seq_id: SeqId, prompt: &[i32]) {
         LlamaCppModel::mtp_begin(self, seq_id, prompt)
     }
 
     #[cfg(fox_mtp)]
     fn mtp_propose(
         &self,
-        seq_id: i32,
+        seq_id: SeqId,
         n_past: i32,
         id_last: i32,
         seq: &[i32],
@@ -1337,7 +1342,7 @@ impl Model for LlamaCppModel {
     }
 
     #[cfg(fox_mtp)]
-    fn mtp_accept(&self, seq_id: i32, n_accepted: u16) {
+    fn mtp_accept(&self, seq_id: SeqId, n_accepted: u16) {
         LlamaCppModel::mtp_accept(self, seq_id, n_accepted)
     }
 
@@ -1509,7 +1514,7 @@ impl Model for LlamaCppModel {
         }
     }
 
-    fn clear_sequence(&self, seq_id: i32) {
+    fn clear_sequence(&self, seq_id: SeqId) {
         let ctx_guard = match self._ctx.lock() {
             Ok(g) => g,
             Err(_) => return,
@@ -1518,12 +1523,12 @@ impl Model for LlamaCppModel {
             let mem = ffi::llama_get_memory(ctx_guard.as_ptr() as *const _);
             if !mem.is_null() {
                 // p0=0, p1=-1 means "remove all positions for this sequence"
-                ffi::llama_memory_seq_rm(mem, seq_id, 0, -1);
+                ffi::llama_memory_seq_rm(mem, seq_id.raw(), 0, -1);
             }
         }
     }
 
-    fn trim_sequence(&self, seq_id: i32, from_pos: usize) -> bool {
+    fn trim_sequence(&self, seq_id: SeqId, from_pos: usize) -> bool {
         let ctx_guard = match self._ctx.lock() {
             Ok(g) => g,
             Err(_) => return false,
@@ -1538,11 +1543,11 @@ impl Model for LlamaCppModel {
             // its snapshot window and returns false, having mutated nothing
             // (`llama-memory-hybrid.cpp:143` tries the recurrent side first for exactly
             // that reason). The caller re-prefills from scratch when it fails.
-            ffi::llama_memory_seq_rm(mem, seq_id, from_pos as i32, -1)
+            ffi::llama_memory_seq_rm(mem, seq_id.raw(), from_pos as i32, -1)
         }
     }
 
-    fn copy_sequence_range(&self, src_seq_id: i32, dst_seq_id: i32, token_count: i32) {
+    fn copy_sequence_range(&self, src_seq_id: SeqId, dst_seq_id: SeqId, token_count: i32) {
         if token_count <= 0 {
             return;
         }
@@ -1553,7 +1558,7 @@ impl Model for LlamaCppModel {
         unsafe {
             let mem = ffi::llama_get_memory(ctx_guard.as_ptr() as *const _);
             if !mem.is_null() {
-                ffi::llama_memory_seq_cp(mem, src_seq_id, dst_seq_id, 0, token_count);
+                ffi::llama_memory_seq_cp(mem, src_seq_id.raw(), dst_seq_id.raw(), 0, token_count);
             }
         }
     }
@@ -1589,7 +1594,7 @@ impl Model for LlamaCppModel {
         self.rollback_budget
     }
 
-    fn roll_context(&self, seq_id: i32, n_keep: usize, n_discard: usize) -> Result<()> {
+    fn roll_context(&self, seq_id: SeqId, n_keep: usize, n_discard: usize) -> Result<()> {
         if n_discard == 0 {
             return Ok(());
         }
@@ -1621,12 +1626,12 @@ impl Model for LlamaCppModel {
             let keep = n_keep as i32;
             let discard = n_discard as i32;
             // Drop [n_keep, n_keep + n_discard) …
-            if !ffi::llama_memory_seq_rm(mem, seq_id, keep, keep + discard) {
+            if !ffi::llama_memory_seq_rm(mem, seq_id.raw(), keep, keep + discard) {
                 return Err(anyhow!("llama_memory_seq_rm failed during context roll"));
             }
             // … then shift every surviving token after the hole down by n_discard so
             // positions stay contiguous (p1 = -1 → [keep + discard, ∞)).
-            ffi::llama_memory_seq_add(mem, seq_id, keep + discard, -1, -discard);
+            ffi::llama_memory_seq_add(mem, seq_id.raw(), keep + discard, -1, -discard);
         }
         Ok(())
     }
@@ -1647,7 +1652,7 @@ impl Model for LlamaCppModel {
 
     fn draft_propose(
         &self,
-        seq_id: i32,
+        seq_id: SeqId,
         new_tokens: &[i32],
         base_pos: i32,
         draft_len: usize,
@@ -1659,7 +1664,7 @@ impl Model for LlamaCppModel {
         self.do_rerank_score(tokens)
     }
 
-    fn state_seq_save(&self, seq_id: i32) -> Result<Vec<u8>> {
+    fn state_seq_save(&self, seq_id: SeqId) -> Result<Vec<u8>> {
         let ctx_guard = self
             ._ctx
             .lock()
@@ -1669,7 +1674,7 @@ impl Model for LlamaCppModel {
         // variant keeps the data in device buffers AND invalidates every prior state
         // for that seq_id — the opposite of what a host-RAM cache needs.
         let size = unsafe {
-            ffi::llama_state_seq_get_size_ext(ctx, seq_id, ffi::LLAMA_STATE_SEQ_FLAGS_NONE)
+            ffi::llama_state_seq_get_size_ext(ctx, seq_id.raw(), ffi::LLAMA_STATE_SEQ_FLAGS_NONE)
         };
         if size == 0 {
             return Err(anyhow!("sequence {seq_id} has no state to save"));
@@ -1680,7 +1685,7 @@ impl Model for LlamaCppModel {
                 ctx,
                 buf.as_mut_ptr(),
                 size,
-                seq_id,
+                seq_id.raw(),
                 ffi::LLAMA_STATE_SEQ_FLAGS_NONE,
             )
         };
@@ -1691,7 +1696,7 @@ impl Model for LlamaCppModel {
         Ok(buf)
     }
 
-    fn state_seq_load(&self, seq_id: i32, data: &[u8]) -> Result<usize> {
+    fn state_seq_load(&self, seq_id: SeqId, data: &[u8]) -> Result<usize> {
         if data.is_empty() {
             return Err(anyhow!("cannot restore an empty state blob"));
         }
@@ -1706,7 +1711,7 @@ impl Model for LlamaCppModel {
         unsafe {
             let mem = ffi::llama_get_memory(ctx as *const _);
             if !mem.is_null() {
-                ffi::llama_memory_seq_rm(mem, seq_id, 0, -1);
+                ffi::llama_memory_seq_rm(mem, seq_id.raw(), 0, -1);
             }
         }
         let read = unsafe {
@@ -1714,7 +1719,7 @@ impl Model for LlamaCppModel {
                 ctx,
                 data.as_ptr(),
                 data.len(),
-                seq_id,
+                seq_id.raw(),
                 ffi::LLAMA_STATE_SEQ_FLAGS_NONE,
             )
         };

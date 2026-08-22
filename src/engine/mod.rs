@@ -18,6 +18,7 @@ use dashmap::DashMap;
 use crate::kv_cache::KVCacheManager;
 use crate::metrics::Metrics;
 use crate::scheduler::InferenceRequest;
+use crate::seq::SeqId;
 
 use self::model::Model;
 use self::speculative::{DraftModelProposer, MtpProposer, NgramProposer, Proposer};
@@ -329,12 +330,12 @@ impl InferenceEngine {
     }
 
     /// Serialise a sequence's KV to host memory (see `Model::state_seq_save`).
-    pub fn state_seq_save(&self, seq_id: i32) -> anyhow::Result<Vec<u8>> {
+    pub fn state_seq_save(&self, seq_id: SeqId) -> anyhow::Result<Vec<u8>> {
         self.model.state_seq_save(seq_id)
     }
 
     /// Restore a previously saved sequence blob into `seq_id`.
-    pub fn state_seq_load(&self, seq_id: i32, data: &[u8]) -> anyhow::Result<usize> {
+    pub fn state_seq_load(&self, seq_id: SeqId, data: &[u8]) -> anyhow::Result<usize> {
         self.model.state_seq_load(seq_id, data)
     }
 

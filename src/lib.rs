@@ -9,3 +9,4 @@ pub mod metrics;
 pub mod model_registry;
 pub mod registry;
 pub(crate) mod scheduler;
+pub(crate) mod seq;

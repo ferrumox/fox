@@ -6,6 +6,8 @@ use anyhow::Result;
 
 #[cfg(fox_stub)]
 use crate::engine::model::{InferenceRequestForModel, Logits, Model, ModelConfig, PrefillStep};
+#[allow(unused_imports)]
+use crate::seq::SeqId;
 
 #[cfg(fox_stub)]
 pub struct LlamaCppModel {
@@ -162,9 +164,9 @@ impl Model for LlamaCppModel {
             .join("\n"))
     }
 
-    fn clear_sequence(&self, _seq_id: i32) {}
+    fn clear_sequence(&self, _seq_id: SeqId) {}
 
-    fn copy_sequence_range(&self, _src_seq_id: i32, _dst_seq_id: i32, _token_count: i32) {}
+    fn copy_sequence_range(&self, _src_seq_id: SeqId, _dst_seq_id: SeqId, _token_count: i32) {}
 
     fn supports_seq_copy(&self) -> bool {
         false

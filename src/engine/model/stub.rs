@@ -4,6 +4,7 @@ use anyhow::Result;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{InferenceRequestForModel, Logits, Model, ModelConfig, PrefillStep};
+use crate::seq::SeqId;
 
 pub struct StubModel;
 
@@ -91,9 +92,9 @@ impl Model for StubModel {
             .join("\n"))
     }
 
-    fn clear_sequence(&self, _seq_id: i32) {}
+    fn clear_sequence(&self, _seq_id: SeqId) {}
 
-    fn copy_sequence_range(&self, _src: i32, _dst: i32, _count: i32) {}
+    fn copy_sequence_range(&self, _src: SeqId, _dst: SeqId, _count: i32) {}
 
     fn supports_seq_copy(&self) -> bool {
         true
@@ -208,9 +209,9 @@ impl Model for ThinkingStubModel {
         true
     }
 
-    fn clear_sequence(&self, _seq_id: i32) {}
+    fn clear_sequence(&self, _seq_id: SeqId) {}
 
-    fn copy_sequence_range(&self, _src: i32, _dst: i32, _count: i32) {}
+    fn copy_sequence_range(&self, _src: SeqId, _dst: SeqId, _count: i32) {}
 
     fn supports_seq_copy(&self) -> bool {
         true
