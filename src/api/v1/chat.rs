@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::api::error::{load_model_or_respond, AppError};
 use crate::api::router::AppState;
 use crate::api::shared::inference::{
-    parse_tool_call, prepare_multimodal_prompt, prepare_prompt, resolve_tool_call_parser,
+    parse_tool_call, prepare_multimodal_prompt_blocking, prepare_prompt, resolve_tool_call_parser,
     resolve_tool_choice, MessageForTemplate,
 };
 use crate::api::shared::sampling_defaults as defaults;
@@ -118,17 +118,19 @@ pub async fn chat_completions(
                 tool_call_id: m.tool_call_id.clone(),
             });
         }
-        match prepare_multimodal_prompt(
-            &entry,
+        match prepare_multimodal_prompt_blocking(
+            entry.clone(),
             messages,
-            state.system_prompt.as_deref(),
-            eff_tools,
+            state.system_prompt.clone(),
+            eff_tools.map(<[_]>::to_vec),
             tool_required,
-            specific_tool,
-            req.response_format.as_ref(),
+            specific_tool.map(str::to_string),
+            req.response_format.clone(),
             enable_thinking,
-            &images,
-        ) {
+            images,
+        )
+        .await
+        {
             Ok(chunks) => {
                 let n = chunks.n_positions();
                 (Vec::new(), n, Some(chunks))

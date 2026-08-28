@@ -394,6 +394,74 @@ impl Drop for GrammarSampler {
     }
 }
 
+/// One cached CLIP encode: keyed by (hash, byte length) of the raw image bytes,
+/// holding the `n_image_tokens × n_embd_inp` floats `mtmd_get_output_embd` produced.
+#[cfg(not(fox_stub))]
+type ClipCache = lru::LruCache<(u64, usize), Arc<Vec<f32>>>;
+
+/// CLIP-cache capacity, in images. Entries are `n_image_tokens × n_embd_inp`
+/// floats — roughly 1-4 MiB for typical vision models — so the cache tops out
+/// around tens of MiB of host RAM. Sized for the common shape of the win: a
+/// handful of conversations each re-sending the same image every turn.
+#[cfg(not(fox_stub))]
+const CLIP_CACHE_ENTRIES: usize = 16;
+
+/// Checkout pool of `mtmd_context`s for CLIP encoding.
+///
+/// An `mtmd_context` carries per-call state (`mtmd_get_output_embd`'s buffer), so
+/// one context serves one encode at a time; `acquire` blocks until a context is
+/// free. With `--vision-contexts 1` (the default) this degenerates to a mutex
+/// around the single context — exactly the exclusivity the previous
+/// `Option<NonNull<mtmd_context>>` field provided implicitly by only ever being
+/// used under the engine's serialization.
+#[cfg(not(fox_stub))]
+pub(super) struct MtmdPool {
+    contexts: std::sync::Mutex<Vec<NonNull<ffi::mtmd_context>>>,
+    available: std::sync::Condvar,
+    /// The model's input embedding width — sizes the per-image-token embedding
+    /// rows `mtmd_get_output_embd` returns.
+    pub(super) n_embd_inp: usize,
+}
+
+#[cfg(not(fox_stub))]
+impl MtmdPool {
+    fn new(contexts: Vec<NonNull<ffi::mtmd_context>>, n_embd_inp: usize) -> Self {
+        Self {
+            contexts: std::sync::Mutex::new(contexts),
+            available: std::sync::Condvar::new(),
+            n_embd_inp,
+        }
+    }
+
+    /// Check out a context for exclusive use; blocks while all are in flight.
+    /// Every `acquire` must be paired with a `release` on all exit paths — a
+    /// dropped checkout permanently shrinks the pool.
+    pub(super) fn acquire(&self) -> NonNull<ffi::mtmd_context> {
+        let mut pool = self.contexts.lock().expect("mtmd pool lock poisoned");
+        loop {
+            if let Some(ctx) = pool.pop() {
+                return ctx;
+            }
+            pool = self.available.wait(pool).expect("mtmd pool lock poisoned");
+        }
+    }
+
+    pub(super) fn release(&self, ctx: NonNull<ffi::mtmd_context>) {
+        if let Ok(mut pool) = self.contexts.lock() {
+            pool.push(ctx);
+        }
+        self.available.notify_one();
+    }
+
+    fn free_all(&self) {
+        if let Ok(mut pool) = self.contexts.lock() {
+            for ctx in pool.drain(..) {
+                unsafe { ffi::mtmd_free(ctx.as_ptr()) };
+            }
+        }
+    }
+}
+
 /// Llama.cpp model via FFI.
 #[cfg(not(fox_stub))]
 pub struct LlamaCppModel {
@@ -430,10 +498,19 @@ pub struct LlamaCppModel {
     /// via `Model::bisection_retry_count()` and diffed into a Prometheus counter in
     /// `run_loop`, same pattern as `spec_proposed`/`spec_accepted`.
     pub(super) decode_bisection_retries: std::sync::atomic::AtomicU64,
-    /// Vision/multimodal context (`mtmd`), present only when this model was loaded
+    /// Vision/multimodal contexts (`mtmd`), present only when this model was loaded
     /// with a paired mmproj GGUF. `None` for the overwhelming majority of models —
-    /// every multimodal code path is gated on this being `Some`.
-    pub(super) mtmd_ctx: Option<NonNull<ffi::mtmd_context>>,
+    /// every multimodal code path is gated on this being `Some`. Holds one context
+    /// by default; `--vision-contexts N` creates a pool of N so concurrent requests
+    /// CLIP-encode their images in parallel (each context is checked out exclusively,
+    /// so per-context state like `mtmd_get_output_embd`'s buffer is never shared).
+    pub(super) mtmd_pool: Option<MtmdPool>,
+    /// LRU of CLIP embeddings keyed by (hash, byte length) of the raw image bytes:
+    /// a client that re-sends the same image every conversation turn (which is how
+    /// both the OpenAI and Ollama chat APIs work — history carries the image) pays
+    /// the encode once. Entry values are shared into `MultimodalChunks` via `Arc`.
+    /// Always present; only the vision path ever touches it.
+    pub(super) clip_cache: std::sync::Mutex<ClipCache>,
     /// Multi-token-prediction head and driver, present only when this model was given a
     /// paired MTP GGUF via [`LlamaCppModel::enable_mtp`]. `None` for every other model,
     /// and every MTP code path is gated on this being `Some` — same shape as `mtmd_ctx`.
@@ -485,8 +562,8 @@ impl Drop for LlamaCppModel {
         // mtmd holds no ownership over the llama model/context (it only borrows a
         // `llama_model*` at init and a `llama_context*` per eval call), but free it
         // first regardless, before either of the resources it borrowed goes away.
-        if let Some(mtmd_ctx) = self.mtmd_ctx {
-            unsafe { ffi::mtmd_free(mtmd_ctx.as_ptr()) };
+        if let Some(pool) = &self.mtmd_pool {
+            pool.free_all();
         }
         // LoRA adapters borrow the model's weights (loaded via `llama_adapter_lora_init(model, ..)`)
         // but are otherwise independent objects — free them before the model itself.
@@ -521,6 +598,7 @@ impl LlamaCppModel {
         tensor_split: &[f32],
         moe_offload_cpu: bool,
         mmproj_path: Option<&std::path::Path>,
+        vision_contexts: usize,
         lora_modules: &[(String, std::path::PathBuf, f32)],
         reranking: bool,
         rs_rollback: u32,
@@ -867,8 +945,12 @@ impl LlamaCppModel {
 
         // Vision/multimodal: load the paired mmproj GGUF via mtmd, if given. A bad
         // pairing (wrong architecture, corrupt file) fails loudly here rather than
-        // producing garbage output at inference time.
-        let mtmd_ctx = match mmproj_path {
+        // producing garbage output at inference time. `--vision-contexts N` loads N
+        // contexts into a checkout pool so concurrent requests CLIP-encode in
+        // parallel; the first context failing is fatal (as before), while a later
+        // one failing only shrinks the pool — the feature still works, just with
+        // less parallelism, and a warning says so.
+        let mtmd_pool = match mmproj_path {
             Some(p) => {
                 let mmproj_cstr = CString::new(
                     p.to_str()
@@ -878,18 +960,42 @@ impl LlamaCppModel {
                 let marker_cstr = CString::new(crate::engine::model::MEDIA_MARKER)
                     .expect("MEDIA_MARKER is a valid C string");
                 mtmd_params.media_marker = marker_cstr.as_ptr();
-                let raw = unsafe {
-                    ffi::mtmd_init_from_file(mmproj_cstr.as_ptr(), model.as_ptr(), mtmd_params)
-                };
-                // marker_cstr/mmproj_cstr only need to outlive the call above — mtmd
-                // copies both into its own storage during init.
-                Some(NonNull::new(raw).ok_or_else(|| {
-                    unsafe { ffi::llama_free(ctx.as_ptr()) };
-                    unsafe { ffi::llama_model_free(model.as_ptr()) };
-                    anyhow!(
-                        "mtmd_init_from_file failed for {p:?} — check the mmproj matches this model's architecture"
-                    )
-                })?)
+                let n_contexts = vision_contexts.max(1);
+                let mut pool_ctxs: Vec<NonNull<ffi::mtmd_context>> = Vec::new();
+                for i in 0..n_contexts {
+                    let raw = unsafe {
+                        ffi::mtmd_init_from_file(mmproj_cstr.as_ptr(), model.as_ptr(), mtmd_params)
+                    };
+                    // marker_cstr/mmproj_cstr only need to outlive the call above — mtmd
+                    // copies both into its own storage during init.
+                    match NonNull::new(raw) {
+                        Some(ptr) => pool_ctxs.push(ptr),
+                        None if i == 0 => {
+                            unsafe { ffi::llama_free(ctx.as_ptr()) };
+                            unsafe { ffi::llama_model_free(model.as_ptr()) };
+                            return Err(anyhow!(
+                                "mtmd_init_from_file failed for {p:?} — check the mmproj matches this model's architecture"
+                            ));
+                        }
+                        None => {
+                            tracing::warn!(
+                                context_idx = i,
+                                "failed to create additional mtmd context (likely out of memory); \
+                                 continuing with a pool of {}",
+                                pool_ctxs.len()
+                            );
+                            break;
+                        }
+                    }
+                }
+                let n_embd_inp = unsafe { ffi::llama_model_n_embd_inp(model.as_ptr()) } as usize;
+                if pool_ctxs.len() > 1 {
+                    tracing::info!(
+                        count = pool_ctxs.len(),
+                        "created mtmd context pool for parallel CLIP encoding"
+                    );
+                }
+                Some(MtmdPool::new(pool_ctxs, n_embd_inp))
             }
             None => None,
         };
@@ -910,8 +1016,8 @@ impl LlamaCppModel {
                     let adapter: &NonNull<ffi::llama_adapter_lora> = adapter;
                     unsafe { ffi::llama_adapter_lora_free(adapter.as_ptr()) };
                 }
-                if let Some(mtmd_ctx) = mtmd_ctx {
-                    unsafe { ffi::mtmd_free(mtmd_ctx.as_ptr()) };
+                if let Some(pool) = &mtmd_pool {
+                    pool.free_all();
                 }
                 unsafe { ffi::llama_free(ctx.as_ptr()) };
                 unsafe { ffi::llama_model_free(model.as_ptr()) };
@@ -944,7 +1050,10 @@ impl LlamaCppModel {
             chat_env: std::sync::OnceLock::new(),
             grammars: dashmap::DashMap::new(),
             decode_bisection_retries: std::sync::atomic::AtomicU64::new(0),
-            mtmd_ctx,
+            mtmd_pool,
+            clip_cache: std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(CLIP_CACHE_ENTRIES).expect("cap is non-zero"),
+            )),
             #[cfg(fox_mtp)]
             mtp: None,
             lora_adapters,
@@ -1299,8 +1408,11 @@ impl LlamaCppModel {
             grammars: dashmap::DashMap::new(),
             decode_bisection_retries: std::sync::atomic::AtomicU64::new(0),
             // bench-kv compares KV cache types, not vision/LoRA; the original
-            // instance (if any) keeps ownership of its mtmd context and adapters.
-            mtmd_ctx: None,
+            // instance (if any) keeps ownership of its mtmd contexts and adapters.
+            mtmd_pool: None,
+            clip_cache: std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(CLIP_CACHE_ENTRIES).expect("cap is non-zero"),
+            )),
             #[cfg(fox_mtp)]
             mtp: None,
             rollback_budget: unsafe {
@@ -1487,7 +1599,7 @@ impl Model for LlamaCppModel {
     }
 
     fn supports_vision(&self) -> bool {
-        self.mtmd_ctx.is_some()
+        self.mtmd_pool.is_some()
     }
 
     fn lora_adapter_names(&self) -> Vec<String> {

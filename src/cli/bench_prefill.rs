@@ -364,6 +364,7 @@ pub async fn run_bench_prefill(args: BenchPrefillArgs) -> Result<()> {
         &tensor_split,
         args.moe_cpu,
         None,  // mmproj_path
+        1,     // vision_contexts — no mmproj, single (unused) pool slot
         &[],   // lora_modules
         false, // reranking — benches generate, never score,
         0,     // rs_rollback — no prompt reuse in this path

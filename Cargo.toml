@@ -51,6 +51,7 @@ dashmap = "6"
 toml = "0.8"
 bytes = "1"
 dirs = "5"
+walkdir = "2"
 # `json` is NOT a default feature, and without it the `tojson` filter is unknown.
 # Every native tool-use chat template (Qwen, Hermes, Mistral) renders its tool
 # listing with `{{ tool | tojson }}`, so leaving it out makes those templates fail
@@ -82,3 +83,24 @@ tokio-test = "0.4"
 tempfile = "3"
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
+
+[package.metadata.deb]
+maintainer = "Ferrumox Contributors"
+copyright = "2026 Ferrumox contributors"
+depends = "$auto"
+suggests = "nvidia-cuda-toolkit"
+section = "utils"
+priority = "optional"
+extended-description = """\
+High-performance LLM inference engine built in Rust. \
+Provides OpenAI and Ollama compatible APIs, continuous batching, \
+KV cache management, and GPU acceleration via llama.cpp."""
+# `lib*.so*`, not a hand-written list of prefixes — the release tarball once
+# shipped without `libmtmd.so.0` because its glob named `libggml*`/`libllama*`
+# only, and the installed binary could not start (see release.yml).
+assets = [
+    ["target/release/fox", "usr/bin/", "755"],
+    ["target/release/fox-bench", "usr/bin/", "755"],
+    ["target/release/lib*.so*", "usr/lib/", "644"],
+    ["fox.service", "lib/systemd/system/fox@.service", "644"],
+]

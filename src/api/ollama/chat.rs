@@ -13,7 +13,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use crate::api::error::load_model_or_respond;
 use crate::api::router::AppState;
 use crate::api::shared::inference::{
-    extract_thinking, parse_tool_call, prepare_multimodal_prompt, prepare_prompt,
+    extract_thinking, parse_tool_call, prepare_multimodal_prompt_blocking, prepare_prompt,
     resolve_tool_call_parser, resolve_tool_choice, sampling_from_ollama, MessageForTemplate,
 };
 use crate::api::shared::streaming::{
@@ -189,17 +189,19 @@ pub async fn ollama_chat(
     }
 
     let (prompt_tokens, prompt_tokens_len, multimodal) = if use_vision {
-        match prepare_multimodal_prompt(
-            &entry,
+        match prepare_multimodal_prompt_blocking(
+            entry.clone(),
             messages,
-            state.system_prompt.as_deref(),
-            eff_tools,
+            state.system_prompt.clone(),
+            eff_tools.map(<[_]>::to_vec),
             false, // tool_required (Ollama uses auto only)
             None,  // specific_tool
-            response_format.as_ref(),
+            response_format.clone(),
             show_thinking_in_output,
-            &images,
-        ) {
+            images,
+        )
+        .await
+        {
             Ok(chunks) => {
                 let n = chunks.n_positions();
                 (Vec::new(), n, Some(chunks))

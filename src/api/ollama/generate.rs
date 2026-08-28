@@ -12,7 +12,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use crate::api::error::load_model_or_respond;
 use crate::api::router::AppState;
 use crate::api::shared::inference::{
-    prepare_multimodal_prompt, prepare_prompt, sampling_from_ollama, MessageForTemplate,
+    prepare_multimodal_prompt_blocking, prepare_prompt, sampling_from_ollama, MessageForTemplate,
 };
 use crate::api::shared::streaming::{
     collect_tokens_timed, ndjson_response, ndjson_stream, now_rfc3339, ollama_done_reason,
@@ -148,17 +148,19 @@ pub async fn ollama_generate(
     }
 
     let (prompt_tokens, prompt_tokens_len, multimodal) = if use_vision {
-        match prepare_multimodal_prompt(
-            &entry,
+        match prepare_multimodal_prompt_blocking(
+            entry.clone(),
             messages,
-            state.system_prompt.as_deref(),
+            state.system_prompt.clone(),
             None, // no tools on /api/generate
             false,
             None,
-            response_format.as_ref(),
+            response_format.clone(),
             false, // show_thinking always false for /api/generate
-            &images,
-        ) {
+            images,
+        )
+        .await
+        {
             Ok(chunks) => {
                 let n = chunks.n_positions();
                 (Vec::new(), n, Some(chunks))

@@ -5,7 +5,10 @@ pub mod bench;
 pub mod bench_kv;
 pub mod bench_prefill;
 pub mod bench_spec;
+pub mod discover;
+pub mod gpu_info;
 pub mod list;
+pub mod mcp;
 pub mod models;
 pub mod probe;
 pub mod ps;
@@ -67,6 +70,12 @@ pub enum Command {
     Search(search::SearchArgs),
     /// Manage model name aliases
     Alias(alias::AliasArgs),
+    /// Start an MCP (Model Context Protocol) server over stdio for IDE integration
+    Mcp(mcp::McpArgs),
+    /// Scan well-known directories (HuggingFace, Ollama, LM Studio, custom) for GGUF models
+    Discover(discover::DiscoverArgs),
+    /// Display GPU backend, VRAM, and driver details
+    GpuInfo(gpu_info::GpuInfoArgs),
 }
 
 /// Known subcommand names — anything else is treated as `fox run <arg>`.
@@ -86,6 +95,9 @@ const SUBCOMMANDS: &[&str] = &[
     "models",
     "search",
     "alias",
+    "mcp",
+    "discover",
+    "gpu-info",
     "help",
 ];
 
@@ -123,5 +135,8 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Models(args) => models::run_models(args).await,
         Command::Search(args) => search::run_search(args).await,
         Command::Alias(args) => alias::run_alias(args).await,
+        Command::Mcp(args) => mcp::run_mcp(args).await,
+        Command::Discover(args) => discover::run_discover(args).await,
+        Command::GpuInfo(args) => gpu_info::run_gpu_info(args).await,
     }
 }

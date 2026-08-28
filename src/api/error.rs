@@ -113,6 +113,12 @@ impl IntoResponse for AppError {
 /// names a configured adapter (`--lora-modules`) instead of a real model/alias —
 /// see `ModelRegistry::resolve_for_request`. Callers that don't apply LoRA
 /// (embeddings) can just discard the second element.
+// `result_large_err` (new in clippy 1.98) wants the ~128-byte `Response` boxed,
+// but the Err variant here IS the finished HTTP response a handler returns —
+// built at most once per rejected request, then consumed immediately. Boxing it
+// would add an unbox at every `Err(r) => return r` call site to save a move
+// that is not on any hot path.
+#[allow(clippy::result_large_err)]
 pub async fn load_model_or_respond(
     registry: &ModelRegistry,
     model: &str,

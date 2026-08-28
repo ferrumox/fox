@@ -165,6 +165,13 @@ pub struct ServeArgs {
     #[arg(long, env = "FOX_MMPROJ")]
     pub mmproj: Option<String>,
 
+    /// Number of vision (mtmd) contexts loaded with the mmproj. 1 = concurrent
+    /// requests take turns CLIP-encoding their images; N = up to N encode in
+    /// parallel, at roughly one mmproj's VRAM footprint per extra context.
+    /// Ignored without --mmproj.
+    #[arg(long, default_value = "1", env = "FOX_VISION_CONTEXTS")]
+    pub vision_contexts: usize,
+
     /// EXPERIMENTAL, opt-in, and BROKEN — do not enable it except to work on it. The
     /// head's `llama_decode` returns `-1` on every call, so it has never actually
     /// drafted: it returns a frozen, context-blind candidate set (asked to count to
@@ -561,6 +568,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         spec_draft_len: args.spec_draft_len,
         draft_model: args.draft_model,
         mmproj: args.mmproj,
+        vision_contexts: args.vision_contexts,
         mtp_model: args.mtp_model,
         lora_modules: args
             .lora_modules

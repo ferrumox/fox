@@ -41,6 +41,7 @@ fn golden_model() -> Option<LlamaCppModel> {
         &[],   // tensor_split
         false, // moe_offload_cpu
         None,  // mmproj_path
+        1,     // vision_contexts — no mmproj, single (unused) pool slot
         &[],   // lora_modules
         false, // reranking — golden tests exercise generation,
         0,     // rs_rollback — no prompt reuse in this path
@@ -673,6 +674,7 @@ fn golden_draft_model_speculative_matches_greedy() {
         &[],   // tensor_split
         false, // moe_offload_cpu
         None,  // mmproj_path
+        1,     // vision_contexts — no mmproj, single (unused) pool slot
         &[],   // lora_modules
         false, // reranking — golden tests exercise generation,
         0,     // rs_rollback — no prompt reuse in this path

@@ -53,6 +53,7 @@ async fn load_draft_model(
             &tensor_split,
             moe_offload_cpu,
             None,  // mmproj_path — draft models are text-only speculation proposers
+            1,     // vision_contexts — no mmproj, so no pool to size
             &[],   // lora_modules — adapters apply to the primary model, not the draft
             false, // reranking — a draft model only ever proposes tokens
             0,     // rs_rollback — the draft holds no reusable prefix of its own
@@ -102,6 +103,7 @@ pub(super) async fn load_model(
     let split_mode = cfg.split_mode;
     let tensor_split = cfg.tensor_split.clone();
     let moe_offload_cpu = cfg.moe_offload_cpu;
+    let vision_contexts = cfg.vision_contexts;
 
     // Estimate VRAM requirement before attempting to load.
     // Heuristic: file_size × 1.8 covers weights + overhead. Warn early so the
@@ -140,6 +142,7 @@ pub(super) async fn load_model(
             &tensor_split,
             moe_offload_cpu,
             mmproj.as_deref(),
+            vision_contexts,
             &lora_modules,
             reranking,
             rs_rollback,

@@ -747,6 +747,42 @@ pub fn prepare_multimodal_prompt(
         .tokenize_multimodal(&flat, show_thinking, tools_json.as_ref(), images)
 }
 
+/// [`prepare_multimodal_prompt`], moved off the async runtime. Tokenizing a
+/// multimodal prompt now CLIP-encodes its images on a pooled mtmd context
+/// (hundreds of milliseconds to seconds of work), so handlers call this
+/// `spawn_blocking` wrapper instead of stalling a tokio worker thread — which
+/// is also what lets concurrent requests actually use `--vision-contexts N`
+/// contexts in parallel. Arguments are owned because the closure outlives the
+/// caller's borrows.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_multimodal_prompt_blocking(
+    entry: std::sync::Arc<EngineEntry>,
+    messages: Vec<MessageForTemplate>,
+    system_prompt: Option<String>,
+    tools: Option<Vec<Tool>>,
+    tool_required: bool,
+    specific_tool: Option<String>,
+    response_format: Option<ResponseFormat>,
+    show_thinking: bool,
+    images: Vec<Vec<u8>>,
+) -> anyhow::Result<crate::engine::model::MultimodalChunks> {
+    tokio::task::spawn_blocking(move || {
+        prepare_multimodal_prompt(
+            &entry,
+            messages,
+            system_prompt.as_deref(),
+            tools.as_deref(),
+            tool_required,
+            specific_tool.as_deref(),
+            response_format.as_ref(),
+            show_thinking,
+            &images,
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("vision preprocessing task panicked: {e}"))?
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------

@@ -527,6 +527,7 @@ mod tests {
             tensor_split: vec![],
             moe_offload_cpu: false,
             mmproj: None,
+            vision_contexts: 1,
             mtp_model: None,
             lora_modules: Vec::new(),
             primary_model: None,

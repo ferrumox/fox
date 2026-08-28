@@ -218,6 +218,7 @@ pub async fn run_run(args: RunArgs) -> Result<()> {
         &tensor_split_parsed,
         args.moe_cpu,
         None,  // mmproj_path — `fox run` has no --mmproj flag yet; use `fox serve` for vision
+        1,     // vision_contexts — no mmproj, single (unused) pool slot
         &[],   // lora_modules — same: fox run has no --lora-modules flag yet
         false, // reranking — benches generate, never score,
         0,     // rs_rollback — no prompt reuse in this path

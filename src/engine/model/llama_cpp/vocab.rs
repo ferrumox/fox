@@ -153,8 +153,9 @@ impl LlamaCppModel {
         tools: Option<&serde_json::Value>,
         images: &[Vec<u8>],
     ) -> Result<crate::engine::model::MultimodalChunks> {
-        let mtmd_ctx = self
-            .mtmd_ctx
+        let pool = self
+            .mtmd_pool
+            .as_ref()
             .ok_or_else(|| anyhow!("model has no vision support (no mmproj loaded)"))?;
 
         // Same add_special/parse_special split as build_prompt_tokens_impl: a real
@@ -179,57 +180,136 @@ impl LlamaCppModel {
             parse_special,
         };
 
-        // mtmd_helper_bitmap_init_from_buf decodes the raw image bytes (bundled
-        // stb_image). We own the resulting bitmaps until mtmd_tokenize returns —
-        // it only borrows the pointers to compute chunks, never takes ownership
-        // (mirrors mtmd-cli.cpp's own usage: bitmaps are freed right after tokenize).
-        let free_bitmap = |w: &ffi::mtmd_helper_bitmap_wrapper| {
-            if !w.bitmap.is_null() {
-                unsafe { ffi::mtmd_bitmap_free(w.bitmap) };
+        // Everything below holds a pooled mtmd context checked out for exclusive
+        // use — decode + tokenize + CLIP encode — and must release it on every
+        // exit path, hence the closure. With `--vision-contexts N` this is what
+        // lets N requests preprocess their images concurrently.
+        let mtmd_nn = pool.acquire();
+        let result = (|| -> Result<crate::engine::model::MultimodalChunks> {
+            let mtmd_ptr = mtmd_nn.as_ptr();
+
+            // mtmd_helper_bitmap_init_from_buf decodes the raw image bytes (bundled
+            // stb_image). We own the resulting bitmaps until mtmd_tokenize returns —
+            // it only borrows the pointers to compute chunks, never takes ownership
+            // (mirrors mtmd-cli.cpp's own usage: bitmaps are freed right after tokenize).
+            let free_bitmap = |w: &ffi::mtmd_helper_bitmap_wrapper| {
+                if !w.bitmap.is_null() {
+                    unsafe { ffi::mtmd_bitmap_free(w.bitmap) };
+                }
+            };
+            let mut wrappers = Vec::with_capacity(images.len());
+            for img in images {
+                let wrapper = unsafe {
+                    ffi::mtmd_helper_bitmap_init_from_buf(
+                        mtmd_ptr,
+                        img.as_ptr(),
+                        img.len(),
+                        false, // placeholder
+                    )
+                };
+                if wrapper.bitmap.is_null() {
+                    wrappers.iter().for_each(free_bitmap);
+                    anyhow::bail!(
+                        "failed to decode image ({} bytes) — unsupported or corrupt format",
+                        img.len()
+                    );
+                }
+                wrappers.push(wrapper);
             }
-        };
-        let mut wrappers = Vec::with_capacity(images.len());
-        for img in images {
-            let wrapper = unsafe {
-                ffi::mtmd_helper_bitmap_init_from_buf(
-                    mtmd_ctx.as_ptr(),
-                    img.as_ptr(),
-                    img.len(),
-                    false, // placeholder
+            let mut bitmap_ptrs: Vec<*const ffi::mtmd_bitmap> =
+                wrappers.iter().map(|w| w.bitmap as *const _).collect();
+
+            let chunks_ptr = unsafe { ffi::mtmd_input_chunks_init() };
+            let ret = unsafe {
+                ffi::mtmd_tokenize(
+                    mtmd_ptr,
+                    chunks_ptr,
+                    &input_text,
+                    bitmap_ptrs.as_mut_ptr(),
+                    bitmap_ptrs.len(),
                 )
             };
-            if wrapper.bitmap.is_null() {
-                wrappers.iter().for_each(free_bitmap);
-                anyhow::bail!(
-                    "failed to decode image ({} bytes) — unsupported or corrupt format",
-                    img.len()
-                );
+            wrappers.iter().for_each(free_bitmap);
+
+            if ret != 0 {
+                unsafe { ffi::mtmd_input_chunks_free(chunks_ptr) };
+                anyhow::bail!("mtmd_tokenize failed (code {ret})");
             }
-            wrappers.push(wrapper);
-        }
-        let mut bitmap_ptrs: Vec<*const ffi::mtmd_bitmap> =
-            wrappers.iter().map(|w| w.bitmap as *const _).collect();
 
-        let chunks_ptr = unsafe { ffi::mtmd_input_chunks_init() };
-        let ret = unsafe {
-            ffi::mtmd_tokenize(
-                mtmd_ctx.as_ptr(),
-                chunks_ptr,
-                &input_text,
-                bitmap_ptrs.as_mut_ptr(),
-                bitmap_ptrs.len(),
-            )
-        };
-        wrappers.iter().for_each(free_bitmap);
+            // From here `chunks` owns chunks_ptr; any error below frees it via Drop.
+            let mut chunks = unsafe {
+                crate::engine::model::MultimodalChunks::from_raw(
+                    chunks_ptr as *mut std::ffi::c_void,
+                )
+            };
 
-        if ret != 0 {
-            unsafe { ffi::mtmd_input_chunks_free(chunks_ptr) };
-            anyhow::bail!("mtmd_tokenize failed (code {ret})");
-        }
+            // CLIP-encode every media chunk now, on this pooled context, so prefill
+            // can decode from the stored embeddings instead of encoding while it
+            // holds the llama context lock (see `do_prefill_multimodal`). Repeated
+            // images — chat clients re-send the whole history's images every turn —
+            // are served from the per-model CLIP cache, keyed by the raw bytes.
+            let n_chunks = unsafe { ffi::mtmd_input_chunks_size(chunks_ptr) };
+            let media_chunk_indices: Vec<usize> = (0..n_chunks)
+                .filter(|&i| {
+                    let chunk = unsafe { ffi::mtmd_input_chunks_get(chunks_ptr, i) };
+                    let ty = unsafe { ffi::mtmd_input_chunk_get_type(chunk) };
+                    ty != ffi::mtmd_input_chunk_type_MTMD_INPUT_CHUNK_TYPE_TEXT
+                })
+                .collect();
+            // The cache key maps the k-th media chunk back to `images[k]`; that
+            // holds when mtmd produced exactly one chunk per bitmap. If it didn't
+            // (an architecture that splits one image into several chunks), encode
+            // without caching rather than key a chunk by the wrong image's bytes.
+            let cache_keys: Option<Vec<(u64, usize)>> = (media_chunk_indices.len() == images.len())
+                .then(|| {
+                    images
+                        .iter()
+                        .map(|b| {
+                            use std::hash::{Hash, Hasher};
+                            let mut h = ahash::AHasher::default();
+                            b.hash(&mut h);
+                            (h.finish(), b.len())
+                        })
+                        .collect()
+                });
 
-        Ok(unsafe {
-            crate::engine::model::MultimodalChunks::from_raw(chunks_ptr as *mut std::ffi::c_void)
-        })
+            let mut embeddings: Vec<(usize, std::sync::Arc<Vec<f32>>)> =
+                Vec::with_capacity(media_chunk_indices.len());
+            for (k, &i) in media_chunk_indices.iter().enumerate() {
+                let key = cache_keys.as_ref().map(|keys| keys[k]);
+                if let Some(key) = key {
+                    let mut cache = self.clip_cache.lock().expect("clip cache lock poisoned");
+                    if let Some(hit) = cache.get(&key) {
+                        embeddings.push((i, std::sync::Arc::clone(hit)));
+                        continue;
+                    }
+                }
+
+                let chunk = unsafe { ffi::mtmd_input_chunks_get(chunks_ptr, i) };
+                let ret = unsafe { ffi::mtmd_encode_chunk(mtmd_ptr, chunk) };
+                if ret != 0 {
+                    anyhow::bail!("mtmd_encode_chunk failed (code {ret})");
+                }
+                let n_tokens = unsafe { ffi::mtmd_input_chunk_get_n_tokens(chunk) };
+                let embd_ptr = unsafe { ffi::mtmd_get_output_embd(mtmd_ptr) };
+                if embd_ptr.is_null() {
+                    anyhow::bail!("mtmd_get_output_embd returned null after encode");
+                }
+                let embd_len = pool.n_embd_inp * n_tokens;
+                let embd = std::sync::Arc::new(
+                    unsafe { std::slice::from_raw_parts(embd_ptr, embd_len) }.to_vec(),
+                );
+                if let Some(key) = key {
+                    let mut cache = self.clip_cache.lock().expect("clip cache lock poisoned");
+                    cache.put(key, std::sync::Arc::clone(&embd));
+                }
+                embeddings.push((i, embd));
+            }
+            chunks.set_image_embeddings(embeddings);
+            Ok(chunks)
+        })();
+        pool.release(mtmd_nn);
+        result
     }
 
     pub(super) fn token_to_piece_impl(&self, token: i32) -> Result<String> {

@@ -491,8 +491,9 @@ impl LlamaCppModel {
         req_id: u64,
         req: &InferenceRequestForModel,
     ) -> Result<PrefillStep> {
-        let mtmd_ctx = self
-            .mtmd_ctx
+        let pool = self
+            .mtmd_pool
+            .as_ref()
             .ok_or_else(|| anyhow!("multimodal request but model has no mmproj loaded"))?;
         let chunks = req
             .multimodal
@@ -505,25 +506,92 @@ impl LlamaCppModel {
             .map_err(|e| anyhow!("lock poisoned: {}", e))?;
         let ctx = ctx_guard.as_ptr();
 
+        // The helpers still read mrope/non-causal config off an mtmd context, so
+        // one is checked out here too — but on the pre-encoded path below it never
+        // runs the CLIP encode, which is the expensive part that used to execute
+        // inside this function while every other request waited on `_ctx`.
+        let mtmd_nn = pool.acquire();
+        let mtmd_ptr = mtmd_nn.as_ptr();
+
         // n_past is always 0: multimodal requests skip fox's chunked-prefill and
         // prefix-cache machinery entirely (see prompt_tokens being left empty for
         // them), so this is always a fresh sequence's first and only prefill call.
         let mut new_n_past: i32 = 0;
-        let ret = unsafe {
-            ffi::mtmd_helper_eval_chunks(
-                mtmd_ctx.as_ptr(),
-                ctx,
-                chunks.as_raw() as *const ffi::mtmd_input_chunks,
-                0,
-                req.kv_seq_id.raw(),
-                self.effective_ctx as i32,
-                true, // logits_last
-                &mut new_n_past,
-            )
-        };
-        if ret != 0 {
-            return Err(anyhow!("mtmd_helper_eval_chunks failed (code {ret})"));
-        }
+        let eval_result = (|| -> Result<()> {
+            if chunks.has_image_embeddings() {
+                // Split path: tokenize time already CLIP-encoded every media chunk
+                // (`tokenize_multimodal_impl`), so walk the chunks and decode —
+                // text chunks as tokens, media chunks from their stored embeddings.
+                // Both helpers handle the model quirks (M-RoPE positions, Gemma's
+                // non-causal attention) that a manual llama_batch would have to
+                // re-implement.
+                let chunks_raw = chunks.as_raw() as *const ffi::mtmd_input_chunks;
+                let n_chunks = unsafe { ffi::mtmd_input_chunks_size(chunks_raw) };
+                for i in 0..n_chunks {
+                    let chunk = unsafe { ffi::mtmd_input_chunks_get(chunks_raw, i) };
+                    let is_last = i + 1 == n_chunks;
+                    let ret = match chunks.embedding_for_chunk(i) {
+                        Some(embd) => unsafe {
+                            ffi::mtmd_helper_decode_image_chunk(
+                                mtmd_ptr,
+                                ctx,
+                                chunk,
+                                embd.as_ptr() as *mut f32,
+                                new_n_past,
+                                req.kv_seq_id.raw(),
+                                self.effective_ctx as i32,
+                                &mut new_n_past,
+                                None,
+                                std::ptr::null_mut(),
+                            )
+                        },
+                        // Text chunks (and any media chunk that somehow has no
+                        // stored embedding) go through the single-chunk eval,
+                        // which encodes on demand for media and is a plain
+                        // llama_decode for text.
+                        None => unsafe {
+                            ffi::mtmd_helper_eval_chunk_single(
+                                mtmd_ptr,
+                                ctx,
+                                chunk,
+                                new_n_past,
+                                req.kv_seq_id.raw(),
+                                self.effective_ctx as i32,
+                                is_last, // logits_last
+                                &mut new_n_past,
+                            )
+                        },
+                    };
+                    if ret != 0 {
+                        return Err(anyhow!(
+                            "multimodal prefill failed on chunk {i} (code {ret})"
+                        ));
+                    }
+                }
+                Ok(())
+            } else {
+                // Atomic fallback: no pre-encoded embeddings on this prompt, so
+                // mtmd runs encode + decode itself (the pre-0.23 behaviour).
+                let ret = unsafe {
+                    ffi::mtmd_helper_eval_chunks(
+                        mtmd_ptr,
+                        ctx,
+                        chunks.as_raw() as *const ffi::mtmd_input_chunks,
+                        0,
+                        req.kv_seq_id.raw(),
+                        self.effective_ctx as i32,
+                        true, // logits_last
+                        &mut new_n_past,
+                    )
+                };
+                if ret != 0 {
+                    return Err(anyhow!("mtmd_helper_eval_chunks failed (code {ret})"));
+                }
+                Ok(())
+            }
+        })();
+        pool.release(mtmd_nn);
+        eval_result?;
 
         let n_vocab = self.config.vocab_size as i32;
         let logits_ptr = unsafe { ffi::llama_get_logits_ith(ctx, -1) };

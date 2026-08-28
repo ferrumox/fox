@@ -66,6 +66,15 @@ pub const MEDIA_MARKER: &str = "<__fox_media__>";
 #[derive(Debug)]
 pub struct MultimodalChunks {
     inner: std::sync::Arc<RawChunksPtr>,
+    /// Pre-encoded CLIP embeddings for the prompt's image/audio chunks, keyed by
+    /// chunk index: `n_tokens × n_embd_inp` floats per entry, produced at tokenize
+    /// time on a pooled mtmd context (or served from the per-model CLIP cache).
+    /// When every non-text chunk has an entry here, prefill decodes from these via
+    /// `mtmd_helper_decode_image_chunk` instead of re-encoding inside the atomic
+    /// `mtmd_helper_eval_chunks` call — the encode then never runs while the
+    /// llama context lock is held. Empty = prefill falls back to the atomic path.
+    /// `Arc` per entry so a CLIP-cache hit shares the buffer instead of copying it.
+    image_embeddings: Vec<(usize, std::sync::Arc<Vec<f32>>)>,
 }
 
 // The field is only read in `#[cfg(not(fox_stub))]` code (Drop, n_positions) —
@@ -89,6 +98,7 @@ impl Clone for MultimodalChunks {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            image_embeddings: self.image_embeddings.clone(),
         }
     }
 }
@@ -101,12 +111,37 @@ impl MultimodalChunks {
     pub(crate) unsafe fn from_raw(ptr: *mut std::ffi::c_void) -> Self {
         Self {
             inner: std::sync::Arc::new(RawChunksPtr(ptr)),
+            image_embeddings: Vec::new(),
         }
     }
 
     #[cfg(not(fox_stub))]
     pub(crate) fn as_raw(&self) -> *mut std::ffi::c_void {
         self.inner.0
+    }
+
+    /// Attach pre-encoded CLIP embeddings, keyed by chunk index (see the field doc).
+    #[cfg(not(fox_stub))]
+    pub(crate) fn set_image_embeddings(
+        &mut self,
+        embeddings: Vec<(usize, std::sync::Arc<Vec<f32>>)>,
+    ) {
+        self.image_embeddings = embeddings;
+    }
+
+    /// Pre-encoded embedding for the chunk at `idx`, if tokenize produced one.
+    #[cfg(not(fox_stub))]
+    pub(crate) fn embedding_for_chunk(&self, idx: usize) -> Option<&std::sync::Arc<Vec<f32>>> {
+        self.image_embeddings
+            .iter()
+            .find(|(i, _)| *i == idx)
+            .map(|(_, e)| e)
+    }
+
+    /// Whether this prompt carries pre-encoded embeddings (the split prefill path).
+    #[cfg(not(fox_stub))]
+    pub(crate) fn has_image_embeddings(&self) -> bool {
+        !self.image_embeddings.is_empty()
     }
 
     /// Total KV positions this multimodal prompt will occupy (text + image

@@ -74,12 +74,20 @@ jobs:
             runner: ubuntu-22.04
             suffix: ""
             gpu_deps: ""
+            build_deb: true
           # Vulkan — needs Ubuntu 24.04 for glslc/spirv-headers. The resulting binary
           # needs glibc 2.39+ and a Vulkan driver at runtime (Mesa RADV/ANV, etc.).
           - name: x86_64-linux-vulkan
             runner: ubuntu-24.04
             suffix: "-vulkan"
             gpu_deps: "glslc glslang-tools libvulkan-dev spirv-headers"
+          # ROCm — HIP SDK from AMD's own repo (the ROCm install step below);
+          # build.rs auto-enables the HIP backend when hipcc is on PATH.
+          - name: x86_64-linux-rocm
+            runner: ubuntu-22.04
+            suffix: "-rocm"
+            gpu_deps: ""
+            gpu_backend: rocm
 
     steps:
       - uses: actions/checkout@v4
@@ -109,6 +117,27 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y build-essential cmake clang libclang-dev ninja-build ${{ matrix.gpu_deps }}
 
+      - name: Install ROCm HIP SDK
+        if: matrix.gpu_backend == 'rocm'
+        run: |
+          sudo mkdir -p /etc/apt/keyrings
+          wget -q -O - https://repo.radeon.com/rocm/rocm.gpg.key \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/rocm.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] \
+            https://repo.radeon.com/rocm/apt/6.2 jammy main" \
+            | sudo tee /etc/apt/sources.list.d/rocm.list
+          # Give ROCm repo higher priority than Ubuntu's packages.
+          # Ubuntu 22.04 ships rocminfo 5.0.0-1 (upstream versioning) which
+          # apt prefers over ROCm's 1.0.0.6XXXX (Radeon versioning).
+          # Pin-Priority 1001 forces ROCm packages even when they look like a downgrade.
+          printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1001\n' \
+            | sudo tee /etc/apt/preferences.d/rocm.pref
+          sudo apt-get update -q
+          sudo apt-get install -y rocm-hip-sdk
+          echo "/opt/rocm/bin" >> "$GITHUB_PATH"
+          echo "/opt/rocm/lib/llvm/bin" >> "$GITHUB_PATH"
+          echo "HIPCC=/opt/rocm/bin/hipcc" >> "$GITHUB_ENV"
+
       - name: Build
         run: cargo build --release --bin fox --bin fox-bench
 
@@ -133,12 +162,42 @@ jobs:
           echo "ASSET=$TARBALL" >> "$GITHUB_ENV"
           echo "ASSET_SHA256=${TARBALL}.sha256" >> "$GITHUB_ENV"
 
+      - name: Install cargo-deb
+        if: matrix.build_deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build .deb package
+        if: matrix.build_deb
+        shell: bash
+        run: |
+          cargo deb --no-build
+          DEB=$(ls target/debian/*.deb)
+          sha256sum "$DEB" > "${DEB}.sha256"
+          echo "DEB_ASSET=$DEB" >> "$GITHUB_ENV"
+          echo "DEB_ASSET_SHA256=${DEB}.sha256" >> "$GITHUB_ENV"
+
+      - name: The .deb must actually install its binary
+        # Same reasoning as the tarball smoke test below: unpack what is about to
+        # be published and run it, instead of trusting the asset glob.
+        if: matrix.build_deb
+        shell: bash
+        run: |
+          SMOKE="$(mktemp -d)"
+          dpkg-deb -x "$DEB_ASSET" "$SMOKE"
+          LD_LIBRARY_PATH="$SMOKE/usr/lib" "$SMOKE/usr/bin/fox" --version
+          echo "packaged .deb installs a binary that starts and reports its version"
+
       - name: The tarball must actually run
         # Unpack what is about to be published, somewhere else, and start it. v0.20.3
         # shipped a binary that died on a missing `libmtmd.so.0` and nothing noticed,
         # because packaging was only ever checked by reading the glob. A release that
         # cannot print its own version is not a release.
         shell: bash
+        # The ROCm leg's libggml-hip.so pulls in the HIP runtime from /opt/rocm,
+        # which the runner has but the default loader path does not; empty and
+        # harmless on the other legs.
+        env:
+          LD_LIBRARY_PATH: ${{ matrix.gpu_backend == 'rocm' && '/opt/rocm/lib' || '' }}
         run: |
           SMOKE="$(mktemp -d)"
           tar xzf "$ASSET" -C "$SMOKE"
@@ -155,9 +214,13 @@ jobs:
           #   curl -fsSL .../releases/latest/download/install.sh | sh
           # and that URL 404'd, because the only assets uploaded were the tarball and
           # its checksum. The advertised way to install fox did not work.
+          # DEB_ASSET is only set on the build_deb leg; softprops skips the
+          # resulting empty lines on the others.
           files: |
             ${{ env.ASSET }}
             ${{ env.ASSET_SHA256 }}
+            ${{ env.DEB_ASSET }}
+            ${{ env.DEB_ASSET_SHA256 }}
             install.sh
             install.ps1
 
