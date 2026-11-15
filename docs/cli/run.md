@@ -86,6 +86,8 @@ Fox: This is a recursive implementation of Fibonacci...
 | `[PROMPT]` | — | The prompt text. If omitted, interactive REPL starts. |
 | `--max-new-tokens <N>` | `512` | Maximum number of tokens to generate per turn. Generation stops when this limit is reached, even if the model hasn't produced a stop token. |
 | `--show-thinking` | `false` | When using a reasoning model (e.g., DeepSeek-R1), stream the `<think>…</think>` block to stdout. By default, thinking tokens are hidden and only the final answer is shown. |
+| `--confidence` | `false` | After each reply, print it again to stderr colored by token probability, then list the words the model was least sure of with the alternatives it weighed at each one. Turns on per-token logprobs for the run. stdout still carries only the reply. |
+| `--confidence-threshold <P>` | `0.5` | Probability (0-1) below which `--confidence` flags a word. |
 
 ### Sampling
 
