@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
+use llm_token_visualizer::{report, Alternative, LogprobToken};
 
 use crate::engine::model::{LlamaCppModel, Model};
 use crate::engine::{EngineOptions, InferenceEngine};
@@ -136,7 +137,29 @@ pub struct RunArgs {
     /// output is unchanged). Off by default.
     #[arg(long, env = "FOX_SPECULATIVE")]
     pub speculative: bool,
+
+    /// After each reply, show it colored by token probability and list the words the
+    /// model was least sure of, with the alternatives it weighed. Turns on per-token
+    /// logprobs, which costs a log-softmax over the vocabulary per generated token.
+    #[arg(long)]
+    pub confidence: bool,
+
+    /// Probability (0-1) below which `--confidence` flags a word.
+    #[arg(long, default_value = "0.5", value_parser = parse_confidence_threshold)]
+    pub confidence_threshold: f64,
 }
+
+fn parse_confidence_threshold(s: &str) -> Result<f64, String> {
+    let t: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if (0.0..=1.0).contains(&t) {
+        Ok(t)
+    } else {
+        Err(format!("{t} is not a probability between 0 and 1"))
+    }
+}
+
+/// How many alternatives `--confidence` asks the engine for at each position.
+const CONFIDENCE_TOP_N: u8 = 5;
 
 pub async fn run_run(args: RunArgs) -> Result<()> {
     if args.verbose {
@@ -268,8 +291,9 @@ async fn run_oneshot(args: &RunArgs, engine: &Arc<InferenceEngine>, prompt: Stri
     }
     messages.push(("user".to_string(), prompt));
 
-    stream_turn(args, engine, &messages).await?;
+    let scored = stream_turn(args, engine, &messages).await?;
     println!();
+    print_confidence(args, &scored);
     Ok(())
 }
 
@@ -398,6 +422,9 @@ async fn run_repl(args: &RunArgs, engine: &Arc<InferenceEngine>) -> Result<()> {
         let elapsed = start.elapsed();
 
         println!();
+        if !cancelled {
+            print_confidence(args, &turn.scored);
+        }
         let secs = elapsed.as_secs_f64();
         let toks_per_sec = if secs > 0.0 {
             token_count as f64 / secs
@@ -611,6 +638,44 @@ struct Turn {
     visible: usize,
     cancelled: bool,
     stop_reason: Option<crate::scheduler::StopReason>,
+    /// Visible tokens with their logprobs, for `--confidence`. Empty when it is off.
+    scored: Vec<LogprobToken>,
+}
+
+/// One streamed token as `llm-token-visualizer` input, or `None` when it carries no
+/// logprob or no visible text. Scoring the text the user actually saw keeps hidden
+/// reasoning and held-back control markers out of the report.
+fn scored_token(token: &crate::scheduler::Token) -> Option<LogprobToken> {
+    let lp = token.logprob.as_ref()?;
+    if token.text.is_empty() {
+        return None;
+    }
+    Some(LogprobToken {
+        token: token.text.clone(),
+        logprob: f64::from(lp.logprob),
+        top_logprobs: lp
+            .top
+            .iter()
+            .map(|t| Alternative {
+                token: t.token.clone(),
+                logprob: f64::from(t.logprob),
+            })
+            .collect(),
+    })
+}
+
+/// Print the `--confidence` report for one reply to stderr, so stdout stays the reply.
+fn print_confidence(args: &RunArgs, scored: &[LogprobToken]) {
+    if !args.confidence || scored.is_empty() {
+        return;
+    }
+    let report = llm_token_visualizer::detect(scored, args.confidence_threshold);
+    let meta = report::Meta {
+        source: "confidence".to_string(),
+        model: None,
+    };
+    eprint!("{}", report::terminal(scored, &report, &meta));
+    let _ = std::io::stderr().flush();
 }
 
 /// Run one inference turn, streaming tokens to stdout.
@@ -677,6 +742,7 @@ async fn stream_turn_collecting(
     let mut cancelled = false;
     let mut emitted: usize = 0;
     let mut last_stop: Option<crate::scheduler::StopReason> = None;
+    let mut scored = Vec::new();
 
     loop {
         let token = tokio::select! {
@@ -696,6 +762,7 @@ async fn stream_turn_collecting(
         if token.stop_reason.is_some() {
             last_stop = token.stop_reason.clone();
         }
+        scored.extend(scored_token(&token));
 
         if !token.text.is_empty() {
             if first_token {
@@ -756,15 +823,17 @@ async fn stream_turn_collecting(
         visible: token_count,
         cancelled,
         stop_reason: last_stop,
+        scored,
     })
 }
 
 /// Run one inference turn streaming to stdout (no response collection — for one-shot mode).
+/// Returns the scored tokens for `--confidence`, empty when it is off.
 async fn stream_turn(
     args: &RunArgs,
     engine: &Arc<InferenceEngine>,
     messages: &[(String, String)],
-) -> Result<()> {
+) -> Result<Vec<LogprobToken>> {
     // Same prompt-building path as the REPL and the HTTP handlers — see the comment in
     // `stream_turn_collecting` for why the manual render-then-tokenize is not equivalent.
     let prompt_tokens = engine
@@ -804,18 +873,20 @@ async fn stream_turn(
         println!("<think>");
         let _ = stdout.lock().flush();
     }
+    let mut scored = Vec::new();
     while let Some(token) = rx.recv().await {
         if !token.text.is_empty() {
             print!("{}", token.text);
             let _ = stdout.lock().flush();
         }
+        scored.extend(scored_token(&token));
         if token.stop_reason.is_some() {
             break;
         }
     }
 
     engine_loop.abort();
-    Ok(())
+    Ok(scored)
 }
 
 fn build_sampling_params(
@@ -850,7 +921,7 @@ fn build_sampling_params(
         initial_in_thinking: false, // set by callers that force thinking mode
         max_thinking_chars: 8192,
         grammar: None,
-        logprobs: None,
+        logprobs: args.confidence.then_some(CONFIDENCE_TOP_N),
         min_p: 0.0,
         min_tokens: 0,
         top_n_sigma: 0.0,
@@ -861,7 +932,8 @@ fn build_sampling_params(
 
 #[cfg(test)]
 mod tests {
-    use super::trim_to_clean_boundary;
+    use super::{parse_confidence_threshold, scored_token, trim_to_clean_boundary};
+    use crate::scheduler::{Token, TokenLogprob, TopLogprob};
 
     #[test]
     fn an_interrupted_reply_is_cut_at_the_last_sentence() {
@@ -888,5 +960,52 @@ mod tests {
     #[test]
     fn stopping_before_the_first_word_ends_keeps_nothing_to_push() {
         assert_eq!(trim_to_clean_boundary("   "), "");
+    }
+
+    fn token(text: &str, logprob: Option<f32>) -> Token {
+        Token {
+            id: 1,
+            token_id: 0,
+            text: text.to_string(),
+            is_eos: false,
+            stop_reason: None,
+            logprob: logprob.map(|lp| TokenLogprob {
+                token: text.to_string(),
+                logprob: lp,
+                bytes: text.as_bytes().to_vec(),
+                top: vec![TopLogprob {
+                    token: " Paris".to_string(),
+                    logprob: -0.3,
+                    bytes: b" Paris".to_vec(),
+                }],
+            }),
+            cached_tokens: 0,
+        }
+    }
+
+    #[test]
+    fn a_visible_token_with_a_logprob_is_scored_with_its_alternatives() {
+        let scored = scored_token(&token(" Lyon", Some(-1.2))).expect("scored");
+        assert_eq!(scored.token, " Lyon");
+        assert!((scored.logprob - f64::from(-1.2f32)).abs() < 1e-12);
+        assert_eq!(scored.top_logprobs.len(), 1);
+        assert_eq!(scored.top_logprobs[0].token, " Paris");
+    }
+
+    #[test]
+    fn hidden_text_and_missing_logprobs_are_not_scored() {
+        // Reasoning with thinking hidden, or a held-back control marker, arrives with
+        // empty text: the user never saw it, so it has no place in the report.
+        assert!(scored_token(&token("", Some(-0.1))).is_none());
+        assert!(scored_token(&token(" Lyon", None)).is_none());
+    }
+
+    #[test]
+    fn the_confidence_threshold_must_be_a_probability() {
+        assert_eq!(parse_confidence_threshold("0.7"), Ok(0.7));
+        assert!(parse_confidence_threshold("1.5").is_err());
+        assert!(parse_confidence_threshold("-0.1").is_err());
+        assert!(parse_confidence_threshold("NaN").is_err());
+        assert!(parse_confidence_threshold("high").is_err());
     }
 }

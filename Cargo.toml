@@ -59,6 +59,9 @@ dirs = "5"
 minijinja = { version = "2", features = ["json"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 base64 = "0.22"
+# `fox run --confidence`: flags low-probability words in a reply from the engine's
+# per-token logprobs. Detector and terminal renderer only, no CLI or legacy modules.
+llm-token-visualizer = { version = "0.6", default-features = false, features = ["terminal"] }
 
 # Optional (enabled via test-helpers feature)
 tower = { version = "0.4", features = ["util"], optional = true }

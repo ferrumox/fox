@@ -15,6 +15,16 @@ shipped.
 
 ## [Unreleased]
 
+### Added
+
+- **`fox run --confidence` shows which words the model was unsure of.** The engine already
+  computes per-token logprobs for `/v1/chat/completions`, but `fox run` never asked for
+  them. With the flag set it does, and after each reply prints a heatmap of the reply plus
+  each low-probability span with the alternatives the model weighed, using
+  [`llm-token-visualizer`](https://crates.io/crates/llm-token-visualizer). The report goes
+  to stderr, so piping stdout is unchanged; `--confidence-threshold` sets the cutoff
+  (default 0.5). Off by default: logprobs cost a log-softmax per generated token.
+
 ### Changed
 
 - **The release page stops being a wall of text.** `scripts/release_notes.py` published
